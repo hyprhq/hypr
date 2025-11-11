@@ -3,6 +3,7 @@
 //! Shared types, traits, and utilities for the HYPR microVM orchestration engine.
 
 pub mod adapters;
+pub mod builder;
 pub mod compose;
 pub mod error;
 pub mod network;
