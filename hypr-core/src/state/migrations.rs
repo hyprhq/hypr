@@ -4,7 +4,7 @@ use crate::error::{HyprError, Result};
 use sqlx::SqlitePool;
 use tracing::{info, instrument};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 #[instrument(skip(pool))]
 pub async fn run(pool: &SqlitePool) -> Result<()> {
@@ -39,6 +39,10 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     // Run migrations
     if current_version < 1 {
         migrate_to_v1(pool).await?;
+    }
+
+    if current_version < 2 {
+        migrate_to_v2(pool).await?;
     }
 
     Ok(())
@@ -196,5 +200,45 @@ async fn migrate_to_v1(pool: &SqlitePool) -> Result<()> {
         .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
 
     info!("Migration to schema version 1 complete");
+    Ok(())
+}
+
+#[instrument(skip(pool))]
+async fn migrate_to_v2(pool: &SqlitePool) -> Result<()> {
+    info!("Running migration to schema version 2");
+
+    // IP allocations table
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS ip_allocations (
+            ip_address TEXT PRIMARY KEY,
+            vm_id TEXT NOT NULL UNIQUE,
+            allocated_at INTEGER NOT NULL,
+            FOREIGN KEY (vm_id) REFERENCES vms(id) ON DELETE CASCADE
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_ip_allocations_vm ON ip_allocations(vm_id)")
+        .execute(pool)
+        .await
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    // Update schema version
+    sqlx::query("DELETE FROM schema_version")
+        .execute(pool)
+        .await
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    sqlx::query("INSERT INTO schema_version (version) VALUES (?)")
+        .bind(2i64)
+        .execute(pool)
+        .await
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    info!("Migration to schema version 2 complete");
     Ok(())
 }

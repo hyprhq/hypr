@@ -79,6 +79,9 @@ pub enum HyprError {
     #[error("Failed to create TAP device: {reason}")]
     TapDeviceError { reason: String },
 
+    #[error("IP address pool exhausted: no more IP addresses available")]
+    IpPoolExhausted,
+
     // eBPF errors
     #[error("Failed to load eBPF program: {0}")]
     EbpfLoadError(String),

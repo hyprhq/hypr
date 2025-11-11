@@ -572,4 +572,70 @@ impl StateManager {
             created_at,
         })
     }
+
+    // ========================
+    // IP Allocation Operations
+    // ========================
+
+    /// List all allocated IP addresses.
+    #[instrument(skip(self))]
+    pub async fn list_allocated_ips(&self) -> Result<Vec<std::net::Ipv4Addr>> {
+        let rows = sqlx::query("SELECT ip_address FROM ip_allocations ORDER BY allocated_at")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
+
+        Ok(rows.into_iter().filter_map(|row| {
+            let ip_str: String = row.get("ip_address");
+            ip_str.parse().ok()
+        }).collect())
+    }
+
+    /// Allocate an IP address to a VM.
+    #[instrument(skip(self), fields(vm_id = %vm_id, ip = %ip))]
+    pub async fn insert_ip_allocation(&self, vm_id: &str, ip: std::net::Ipv4Addr) -> Result<()> {
+        let allocated_at = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as i64;
+
+        sqlx::query(
+            r#"
+            INSERT INTO ip_allocations (ip_address, vm_id, allocated_at)
+            VALUES (?, ?, ?)
+            "#,
+        )
+        .bind(ip.to_string())
+        .bind(vm_id)
+        .bind(allocated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Release an IP address from a VM.
+    #[instrument(skip(self), fields(vm_id = %vm_id))]
+    pub async fn delete_ip_allocation(&self, vm_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM ip_allocations WHERE vm_id = ?")
+            .bind(vm_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Get the IP address allocated to a VM.
+    #[instrument(skip(self), fields(vm_id = %vm_id))]
+    pub async fn get_ip_allocation(&self, vm_id: &str) -> Result<Option<std::net::Ipv4Addr>> {
+        let row = sqlx::query("SELECT ip_address FROM ip_allocations WHERE vm_id = ?")
+            .bind(vm_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
+
+        Ok(row.and_then(|r| {
+            let ip_str: String = r.get("ip_address");
+            ip_str.parse().ok()
+        }))
+    }
 }
