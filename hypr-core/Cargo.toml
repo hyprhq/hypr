@@ -37,6 +37,14 @@ metrics-exporter-prometheus = { workspace = true }
 # gRPC API
 hypr-api = { path = "../hypr-api" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# eBPF support (Linux only)
+libbpf-rs = "0.24"
+libbpf-sys = "1.4"
+nix = { version = "0.29", features = ["net"] }
+
 [features]
 # libkrun-efi support (macOS Metal GPU, Phase 4)
 krun = []
+# eBPF networking support (Linux only)
+ebpf = []
