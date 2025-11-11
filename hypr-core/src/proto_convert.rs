@@ -5,6 +5,7 @@ use crate::types::image::{
     HealthCheckConfig, HealthCheckType, Image, ImageManifest, RestartPolicy, RuntimeConfig,
 };
 use crate::types::network::{NetworkConfig, PortMapping, Protocol};
+use crate::types::stack::{Service, Stack};
 use crate::types::vm::{
     DiskConfig, DiskFormat, GpuConfig, GpuVendor, Vm, VmConfig, VmResources, VmStatus,
 };
@@ -43,21 +44,13 @@ impl From<Vm> for ProtoVm {
             config: Some(vm.config.into()),
             ip_address: vm.ip_address,
             pid: vm.pid,
-            created_at: vm
-                .created_at
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64,
-            started_at: vm.started_at.map(|t| {
-                t.duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64
-            }),
-            stopped_at: vm.stopped_at.map(|t| {
-                t.duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64
-            }),
+            created_at: vm.created_at.duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
+            started_at: vm
+                .started_at
+                .map(|t| t.duration_since(UNIX_EPOCH).unwrap().as_secs() as i64),
+            stopped_at: vm
+                .stopped_at
+                .map(|t| t.duration_since(UNIX_EPOCH).unwrap().as_secs() as i64),
         }
     }
 }
@@ -81,9 +74,7 @@ impl TryFrom<ProtoVm> for Vm {
 
         let config = proto
             .config
-            .ok_or_else(|| HyprError::InvalidConfig {
-                reason: "Missing VM config".to_string(),
-            })?
+            .ok_or_else(|| HyprError::InvalidConfig { reason: "Missing VM config".to_string() })?
             .try_into()?;
 
         Ok(Self {
@@ -131,9 +122,7 @@ impl TryFrom<ProtoVmConfig> for VmConfig {
     fn try_from(proto: ProtoVmConfig) -> Result<Self> {
         let resources = proto
             .resources
-            .ok_or_else(|| HyprError::InvalidConfig {
-                reason: "Missing resources".to_string(),
-            })?
+            .ok_or_else(|| HyprError::InvalidConfig { reason: "Missing resources".to_string() })?
             .try_into()?;
 
         let network = proto
@@ -149,23 +138,11 @@ impl TryFrom<ProtoVmConfig> for VmConfig {
             resources,
             kernel_path: proto.kernel_path.map(PathBuf::from),
             kernel_args: proto.kernel_args,
-            disks: proto
-                .disks
-                .into_iter()
-                .map(|d| d.try_into())
-                .collect::<Result<Vec<_>>>()?,
+            disks: proto.disks.into_iter().map(|d| d.try_into()).collect::<Result<Vec<_>>>()?,
             network,
-            ports: proto
-                .ports
-                .into_iter()
-                .map(|p| p.try_into())
-                .collect::<Result<Vec<_>>>()?,
+            ports: proto.ports.into_iter().map(|p| p.try_into()).collect::<Result<Vec<_>>>()?,
             env: proto.env,
-            volumes: proto
-                .volumes
-                .into_iter()
-                .map(|v| v.try_into())
-                .collect::<Result<Vec<_>>>()?,
+            volumes: proto.volumes.into_iter().map(|v| v.try_into()).collect::<Result<Vec<_>>>()?,
             gpu: proto.gpu.map(|g| g.try_into()).transpose()?,
             vsock_path: PathBuf::from(proto.vsock_path),
         })
@@ -174,10 +151,7 @@ impl TryFrom<ProtoVmConfig> for VmConfig {
 
 impl From<VmResources> for ProtoVmResources {
     fn from(res: VmResources) -> Self {
-        Self {
-            cpus: res.cpus,
-            memory_mb: res.memory_mb,
-        }
+        Self { cpus: res.cpus, memory_mb: res.memory_mb }
     }
 }
 
@@ -185,10 +159,7 @@ impl TryFrom<ProtoVmResources> for VmResources {
     type Error = HyprError;
 
     fn try_from(proto: ProtoVmResources) -> Result<Self> {
-        Ok(Self {
-            cpus: proto.cpus,
-            memory_mb: proto.memory_mb,
-        })
+        Ok(Self { cpus: proto.cpus, memory_mb: proto.memory_mb })
     }
 }
 
@@ -223,11 +194,7 @@ impl TryFrom<ProtoDiskConfig> for DiskConfig {
             }
         };
 
-        Ok(Self {
-            path: PathBuf::from(proto.path),
-            readonly: proto.readonly,
-            format,
-        })
+        Ok(Self { path: PathBuf::from(proto.path), readonly: proto.readonly, format })
     }
 }
 
@@ -235,8 +202,8 @@ impl From<NetworkConfig> for ProtoNetworkConfig {
     fn from(_net: NetworkConfig) -> Self {
         Self {
             mode: "bridge".to_string(), // Default mode
-            cidr: None,                  // Managed by network module
-            gateway: None,               // Managed by network module
+            cidr: None,                 // Managed by network module
+            gateway: None,              // Managed by network module
         }
     }
 }
@@ -278,21 +245,13 @@ impl TryFrom<ProtoPortMapping> for PortMapping {
             }
         };
 
-        Ok(Self {
-            host_port: proto.host_port as u16,
-            vm_port: proto.guest_port as u16,
-            protocol,
-        })
+        Ok(Self { host_port: proto.host_port as u16, vm_port: proto.guest_port as u16, protocol })
     }
 }
 
 impl From<VolumeMount> for ProtoVolumeMount {
     fn from(vol: VolumeMount) -> Self {
-        Self {
-            source: vol.source,
-            target: vol.target,
-            readonly: vol.readonly,
-        }
+        Self { source: vol.source, target: vol.target, readonly: vol.readonly }
     }
 }
 
@@ -300,11 +259,7 @@ impl TryFrom<ProtoVolumeMount> for VolumeMount {
     type Error = HyprError;
 
     fn try_from(proto: ProtoVolumeMount) -> Result<Self> {
-        Ok(Self {
-            source: proto.source,
-            target: proto.target,
-            readonly: proto.readonly,
-        })
+        Ok(Self { source: proto.source, target: proto.target, readonly: proto.readonly })
     }
 }
 
@@ -366,11 +321,7 @@ impl From<Image> for ProtoImage {
             manifest: Some(img.manifest.into()),
             rootfs_path: img.rootfs_path.to_str().unwrap_or_default().to_string(),
             size_bytes: img.size_bytes,
-            created_at: img
-                .created_at
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64,
+            created_at: img.created_at.duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
         }
     }
 }
@@ -532,5 +483,56 @@ impl TryFrom<ProtoHealthCheckConfig> for HealthCheckConfig {
             timeout_sec: proto.timeout_sec,
             retries: proto.retries,
         })
+    }
+}
+
+// ============================================================================
+// Stack Conversions
+// ============================================================================
+
+type ProtoStack = v1::Stack;
+type ProtoStackService = v1::StackService;
+
+impl From<Stack> for ProtoStack {
+    fn from(stack: Stack) -> Self {
+        Self {
+            id: stack.id,
+            name: stack.name,
+            services: stack.services.into_iter().map(|s| s.into()).collect(),
+            compose_path: stack.compose_path,
+            created_at: stack.created_at.duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
+        }
+    }
+}
+
+impl TryFrom<ProtoStack> for Stack {
+    type Error = HyprError;
+
+    fn try_from(proto: ProtoStack) -> Result<Self> {
+        Ok(Self {
+            id: proto.id,
+            name: proto.name,
+            services: proto
+                .services
+                .into_iter()
+                .map(|s| s.try_into())
+                .collect::<Result<Vec<_>>>()?,
+            compose_path: proto.compose_path,
+            created_at: UNIX_EPOCH + std::time::Duration::from_secs(proto.created_at as u64),
+        })
+    }
+}
+
+impl From<Service> for ProtoStackService {
+    fn from(service: Service) -> Self {
+        Self { name: service.name, vm_id: service.vm_id, status: service.status }
+    }
+}
+
+impl TryFrom<ProtoStackService> for Service {
+    type Error = HyprError;
+
+    fn try_from(proto: ProtoStackService) -> Result<Self> {
+        Ok(Self { name: proto.name, vm_id: proto.vm_id, status: proto.status })
     }
 }

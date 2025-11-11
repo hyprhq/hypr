@@ -74,6 +74,58 @@ enum Commands {
 
     /// Check daemon health
     Health,
+
+    /// Manage stacks with compose files
+    #[command(subcommand)]
+    Compose(ComposeCommands),
+}
+
+#[derive(Subcommand)]
+enum ComposeCommands {
+    /// Deploy a stack from docker-compose.yml
+    Up {
+        /// Path to docker-compose.yml
+        #[arg(short, long)]
+        file: String,
+
+        /// Stack name (optional, defaults to directory name)
+        #[arg(short, long)]
+        name: Option<String>,
+
+        /// Run in background
+        #[arg(short, long)]
+        detach: bool,
+
+        /// Force recreate even if exists
+        #[arg(long)]
+        force_recreate: bool,
+
+        /// Build images before deploying
+        #[arg(long)]
+        build: bool,
+    },
+
+    /// Destroy a stack
+    Down {
+        /// Stack name
+        stack_name: String,
+
+        /// Force destroy without confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// List all stacks or show details of specific stack
+    Ps {
+        /// Stack name (optional)
+        stack_name: Option<String>,
+    },
+
+    /// Show logs for a service (stub for Phase 3)
+    Logs {
+        /// Service name
+        service_name: String,
+    },
 }
 
 #[tokio::main]
@@ -81,14 +133,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run {
-            image,
-            name,
-            cpus,
-            memory,
-            port,
-            env,
-        } => {
+        Commands::Run { image, name, cpus, memory, port, env } => {
             // Parse ports
             let ports: Vec<(u16, u16)> = port
                 .iter()
@@ -151,12 +196,7 @@ async fn main() -> Result<()> {
             } else {
                 for image in images {
                     let size_mb = image.size_bytes as f64 / 1024.0 / 1024.0;
-                    println!(
-                        "{:<20} {:<10} {:.1} MB",
-                        image.name,
-                        image.tag,
-                        size_mb
-                    );
+                    println!("{:<20} {:<10} {:.1} MB", image.name, image.tag, size_mb);
                 }
             }
         }
@@ -167,6 +207,24 @@ async fn main() -> Result<()> {
             println!("Status: {}", status);
             println!("Version: {}", version);
         }
+
+        Commands::Compose(compose_cmd) => match compose_cmd {
+            ComposeCommands::Up { file, name, detach, force_recreate, build } => {
+                commands::compose::up(&file, name, detach, force_recreate, build).await?;
+            }
+
+            ComposeCommands::Down { stack_name, force } => {
+                commands::compose::down(&stack_name, force).await?;
+            }
+
+            ComposeCommands::Ps { stack_name } => {
+                commands::compose::ps(stack_name.as_deref()).await?;
+            }
+
+            ComposeCommands::Logs { service_name } => {
+                commands::compose::logs(&service_name).await?;
+            }
+        },
     }
 
     Ok(())

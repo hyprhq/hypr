@@ -1,5 +1,6 @@
 //! CLI command implementations
 
+pub mod compose;
 pub mod ps;
 pub mod run;
 

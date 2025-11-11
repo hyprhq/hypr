@@ -134,18 +134,12 @@ pub struct Resources {
 impl Resources {
     /// Get CPU limit as a float (e.g., "2.0" -> 2.0)
     pub fn get_cpu_limit(&self) -> Option<f64> {
-        self.limits
-            .as_ref()
-            .and_then(|l| l.cpus.as_ref())
-            .and_then(|s| s.parse().ok())
+        self.limits.as_ref().and_then(|l| l.cpus.as_ref()).and_then(|s| s.parse().ok())
     }
 
     /// Get memory limit in megabytes
     pub fn get_memory_mb(&self) -> Option<u64> {
-        self.limits
-            .as_ref()
-            .and_then(|l| l.memory.as_ref())
-            .and_then(|s| parse_memory_string(s))
+        self.limits.as_ref().and_then(|l| l.memory.as_ref()).and_then(|s| parse_memory_string(s))
     }
 }
 
@@ -217,10 +211,7 @@ mod tests {
 
     #[test]
     fn test_environment_to_map_from_list() {
-        let env = Environment::List(vec![
-            "ENV=production".to_string(),
-            "DEBUG=false".to_string(),
-        ]);
+        let env = Environment::List(vec!["ENV=production".to_string(), "DEBUG=false".to_string()]);
         let map = env.to_map();
         assert_eq!(map.get("ENV"), Some(&"production".to_string()));
         assert_eq!(map.get("DEBUG"), Some(&"false".to_string()));
@@ -255,10 +246,7 @@ mod tests {
     #[test]
     fn test_resources_get_cpu_limit() {
         let resources = Resources {
-            limits: Some(ResourceLimit {
-                cpus: Some("2.5".to_string()),
-                memory: None,
-            }),
+            limits: Some(ResourceLimit { cpus: Some("2.5".to_string()), memory: None }),
             reservations: None,
         };
         assert_eq!(resources.get_cpu_limit(), Some(2.5));
@@ -267,10 +255,7 @@ mod tests {
     #[test]
     fn test_resources_get_memory_mb() {
         let resources = Resources {
-            limits: Some(ResourceLimit {
-                cpus: None,
-                memory: Some("2G".to_string()),
-            }),
+            limits: Some(ResourceLimit { cpus: None, memory: Some("2G".to_string()) }),
             reservations: None,
         };
         assert_eq!(resources.get_memory_mb(), Some(2048));

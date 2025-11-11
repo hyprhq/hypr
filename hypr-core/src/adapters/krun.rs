@@ -38,9 +38,7 @@ impl KrunAdapter {
         // Check if library exists (but don't load it yet)
         let library_path = Self::find_library()?;
 
-        Ok(Self {
-            _library_path: library_path,
-        })
+        Ok(Self { _library_path: library_path })
     }
 
     /// Find libkrun-efi library.

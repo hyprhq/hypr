@@ -16,42 +16,24 @@ pub fn register_core_metrics() {
         "hypr_vm_boot_duration_seconds",
         "Time taken to boot a VM from create to running state"
     );
-    describe_counter!(
-        "hypr_vm_created_total",
-        "Total number of VMs created (by adapter)"
-    );
-    describe_counter!(
-        "hypr_vm_started_total",
-        "Total number of VMs successfully started"
-    );
+    describe_counter!("hypr_vm_created_total", "Total number of VMs created (by adapter)");
+    describe_counter!("hypr_vm_started_total", "Total number of VMs successfully started");
     describe_counter!(
         "hypr_vm_start_failures_total",
         "Total number of VM start failures (by reason)"
     );
-    describe_gauge!(
-        "hypr_vm_count",
-        "Current number of VMs (by state: running, stopped, error)"
-    );
+    describe_gauge!("hypr_vm_count", "Current number of VMs (by state: running, stopped, error)");
 
     // API metrics
     describe_counter!(
         "hypr_api_requests_total",
         "Total number of API requests (by endpoint, status)"
     );
-    describe_histogram!(
-        "hypr_api_request_duration_seconds",
-        "API request duration (by endpoint)"
-    );
+    describe_histogram!("hypr_api_request_duration_seconds", "API request duration (by endpoint)");
 
     // Build metrics
-    describe_histogram!(
-        "hypr_build_duration_seconds",
-        "Image build duration (by image name)"
-    );
-    describe_counter!(
-        "hypr_build_failures_total",
-        "Total number of build failures (by reason)"
-    );
+    describe_histogram!("hypr_build_duration_seconds", "Image build duration (by image name)");
+    describe_counter!("hypr_build_failures_total", "Total number of build failures (by reason)");
 
     // Network metrics
     describe_counter!(
@@ -64,10 +46,7 @@ pub fn register_core_metrics() {
     );
 
     // Database metrics
-    describe_histogram!(
-        "hypr_db_query_duration_seconds",
-        "Database query duration (by operation)"
-    );
+    describe_histogram!("hypr_db_query_duration_seconds", "Database query duration (by operation)");
     describe_counter!(
         "hypr_db_query_failures_total",
         "Total database query failures (by operation)"
@@ -76,7 +55,8 @@ pub fn register_core_metrics() {
 
 /// Helper functions for common metric patterns
 pub fn record_vm_boot(duration_secs: f64, adapter: &str) {
-    histogram!("hypr_vm_boot_duration_seconds", "adapter" => adapter.to_string()).record(duration_secs);
+    histogram!("hypr_vm_boot_duration_seconds", "adapter" => adapter.to_string())
+        .record(duration_secs);
     counter!("hypr_vm_started_total").increment(1);
 }
 

@@ -74,15 +74,8 @@ async fn test_health_checker_lifecycle() {
         .await;
 
     let health = checker.get_health().await;
-    assert_eq!(
-        health.status,
-        HealthStatus::Degraded,
-        "Overall status should be degraded"
-    );
-    assert!(
-        !checker.is_ready().await,
-        "Should not be ready when degraded"
-    );
+    assert_eq!(health.status, HealthStatus::Degraded, "Overall status should be degraded");
+    assert!(!checker.is_ready().await, "Should not be ready when degraded");
 
     let db_subsystem = health
         .subsystems
@@ -102,39 +95,20 @@ async fn test_health_checker_lifecycle() {
         .await;
 
     let health = checker.get_health().await;
-    assert_eq!(
-        health.status,
-        HealthStatus::Unhealthy,
-        "Overall status should be unhealthy"
-    );
-    assert!(
-        !checker.is_ready().await,
-        "Should not be ready when unhealthy"
-    );
+    assert_eq!(health.status, HealthStatus::Unhealthy, "Overall status should be unhealthy");
+    assert!(!checker.is_ready().await, "Should not be ready when unhealthy");
 
     // Recover network
-    checker
-        .update_subsystem("network", HealthStatus::Healthy, None)
-        .await;
+    checker.update_subsystem("network", HealthStatus::Healthy, None).await;
 
     let health = checker.get_health().await;
-    assert_eq!(
-        health.status,
-        HealthStatus::Degraded,
-        "Should still be degraded (database)"
-    );
+    assert_eq!(health.status, HealthStatus::Degraded, "Should still be degraded (database)");
 
     // Recover database
-    checker
-        .update_subsystem("database", HealthStatus::Healthy, None)
-        .await;
+    checker.update_subsystem("database", HealthStatus::Healthy, None).await;
 
     let health = checker.get_health().await;
-    assert_eq!(
-        health.status,
-        HealthStatus::Healthy,
-        "Should be fully healthy again"
-    );
+    assert_eq!(health.status, HealthStatus::Healthy, "Should be fully healthy again");
     assert!(checker.is_ready().await, "Should be ready when all healthy");
 }
 
@@ -150,9 +124,7 @@ async fn test_health_checker_concurrent_updates() {
 
     // Register subsystems
     for i in 0..5 {
-        checker
-            .register_subsystem(format!("subsystem_{}", i))
-            .await;
+        checker.register_subsystem(format!("subsystem_{}", i)).await;
     }
 
     // Spawn multiple tasks updating different subsystems concurrently
@@ -196,11 +168,7 @@ async fn test_health_checker_concurrent_updates() {
 
     // All subsystems should have a message from the last update
     for subsystem in &health.subsystems {
-        assert!(
-            subsystem.message.is_some(),
-            "Subsystem {} should have a message",
-            subsystem.name
-        );
+        assert!(subsystem.message.is_some(), "Subsystem {} should have a message", subsystem.name);
     }
 }
 
@@ -216,11 +184,7 @@ async fn test_health_check_serialization() {
 
     checker.register_subsystem("test_service".to_string()).await;
     checker
-        .update_subsystem(
-            "test_service",
-            HealthStatus::Degraded,
-            Some("Test message".to_string()),
-        )
+        .update_subsystem("test_service", HealthStatus::Degraded, Some("Test message".to_string()))
         .await;
 
     let health = checker.get_health().await;
@@ -428,11 +392,7 @@ async fn test_tracing_events() {
     // Test with computed values
     let vm_count = 5;
     let error_count = 2;
-    tracing::warn!(
-        vm_count = vm_count,
-        error_count = error_count,
-        "Multiple VMs in error state"
-    );
+    tracing::warn!(vm_count = vm_count, error_count = error_count, "Multiple VMs in error state");
 }
 
 /// Test tracing across async boundaries.
@@ -484,7 +444,11 @@ async fn test_tracing_async_boundaries() {
 #[tokio::test]
 async fn test_tracing_instrumentation() {
     #[tracing::instrument(name = "test_function", skip(data))]
-    async fn instrumented_function(vm_id: &str, adapter: &str, data: Vec<u8>) -> Result<(), String> {
+    async fn instrumented_function(
+        vm_id: &str,
+        adapter: &str,
+        data: Vec<u8>,
+    ) -> Result<(), String> {
         tracing::info!(data_len = data.len(), "Processing VM operation");
         tokio::time::sleep(Duration::from_millis(1)).await;
         Ok(())
@@ -500,14 +464,10 @@ async fn test_tracing_instrumentation() {
     }
 
     // Test successful execution
-    instrumented_function("vm-123", "krun", vec![1, 2, 3])
-        .await
-        .expect("Should succeed");
+    instrumented_function("vm-123", "krun", vec![1, 2, 3]).await.expect("Should succeed");
 
     // Test with different parameters
-    instrumented_function("vm-456", "qemu", vec![])
-        .await
-        .expect("Should succeed");
+    instrumented_function("vm-456", "qemu", vec![]).await.expect("Should succeed");
 
     // Test error tracing
     let result = failing_function(false).await;
@@ -546,11 +506,7 @@ async fn test_observability_high_throughput() {
     let elapsed = start.elapsed();
 
     // Should complete quickly (< 1 second for 1000 operations)
-    assert!(
-        elapsed < Duration::from_secs(1),
-        "High throughput test took too long: {:?}",
-        elapsed
-    );
+    assert!(elapsed < Duration::from_secs(1), "High throughput test took too long: {:?}", elapsed);
 }
 
 /// Test metrics with complex label combinations.
@@ -662,12 +618,8 @@ async fn test_full_vm_lifecycle_observability() {
     let health_checker = HealthChecker::new();
 
     // Register subsystems
-    health_checker
-        .register_subsystem("vm_manager".to_string())
-        .await;
-    health_checker
-        .register_subsystem("network".to_string())
-        .await;
+    health_checker.register_subsystem("vm_manager".to_string()).await;
+    health_checker.register_subsystem("network".to_string()).await;
 
     // Simulate VM creation
     let vm_span = tracing::info_span!("vm_lifecycle", vm_id = "vm-test-001", adapter = "krun");
@@ -684,10 +636,7 @@ async fn test_full_vm_lifecycle_observability() {
     record_vm_boot(boot_duration, "krun");
     set_vm_count("running", 1);
 
-    tracing::info!(
-        duration_secs = boot_duration,
-        "VM booted successfully"
-    );
+    tracing::info!(duration_secs = boot_duration, "VM booted successfully");
 
     // Verify health
     let health = health_checker.get_health().await;
@@ -695,20 +644,14 @@ async fn test_full_vm_lifecycle_observability() {
 
     // Simulate network issue
     health_checker
-        .update_subsystem(
-            "network",
-            HealthStatus::Degraded,
-            Some("High latency".to_string()),
-        )
+        .update_subsystem("network", HealthStatus::Degraded, Some("High latency".to_string()))
         .await;
 
     tracing::warn!("Network degradation detected");
 
     // Simulate recovery
     tokio::time::sleep(Duration::from_millis(5)).await;
-    health_checker
-        .update_subsystem("network", HealthStatus::Healthy, None)
-        .await;
+    health_checker.update_subsystem("network", HealthStatus::Healthy, None).await;
 
     tracing::info!("Network recovered");
 

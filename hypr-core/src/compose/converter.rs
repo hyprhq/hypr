@@ -7,7 +7,7 @@ use super::types::*;
 use crate::error::{HyprError, Result};
 use crate::types::{
     DiskConfig, DiskFormat, NetworkConfig, NetworkStackConfig, PortMapping, Protocol,
-    ServiceConfig, StackConfig, VmConfig, VmResources, VolumeConfig, VolumeSource, VolumeMount,
+    ServiceConfig, StackConfig, VmConfig, VmResources, VolumeConfig, VolumeMount, VolumeSource,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -39,12 +39,7 @@ impl ComposeConverter {
         // Validate dependency graph (no cycles)
         Self::validate_dependencies(&services)?;
 
-        Ok(StackConfig {
-            name,
-            services,
-            volumes,
-            network,
-        })
+        Ok(StackConfig { name, services, volumes, network })
     }
 
     /// Convert compose services to service configurations.
@@ -84,10 +79,7 @@ impl ComposeConverter {
 
         // Create disk config for rootfs
         let rootfs = DiskConfig {
-            path: PathBuf::from(format!(
-                "/var/lib/hypr/images/{}/rootfs.squashfs",
-                service.image
-            )),
+            path: PathBuf::from(format!("/var/lib/hypr/images/{}/rootfs.squashfs", service.image)),
             readonly: true,
             format: DiskFormat::Squashfs,
         };
@@ -109,10 +101,7 @@ impl ComposeConverter {
         Ok(VmConfig {
             id: vm_id.clone(),
             name: name.to_string(),
-            resources: VmResources {
-                cpus,
-                memory_mb,
-            },
+            resources: VmResources { cpus, memory_mb },
             kernel_path: None, // Use default kernel
             kernel_args: vec![],
             disks,
@@ -184,11 +173,7 @@ impl ComposeConverter {
                         }
                     };
 
-                    mappings.push(PortMapping {
-                        host_port,
-                        vm_port: guest_port,
-                        protocol,
-                    });
+                    mappings.push(PortMapping { host_port, vm_port: guest_port, protocol });
                 } else {
                     warn!("Invalid port spec: {}", spec);
                 }
@@ -209,11 +194,7 @@ impl ComposeConverter {
                         _ => Protocol::Tcp,
                     };
 
-                    mappings.push(PortMapping {
-                        host_port: port,
-                        vm_port: port,
-                        protocol,
-                    });
+                    mappings.push(PortMapping { host_port: port, vm_port: port, protocol });
                 } else {
                     warn!("Invalid port spec: {}", spec);
                 }
@@ -328,10 +309,7 @@ impl ComposeConverter {
         let mut graph: HashMap<&str, Vec<&str>> = HashMap::new();
 
         for service in services {
-            graph.insert(
-                &service.name,
-                service.depends_on.iter().map(|s| s.as_str()).collect(),
-            );
+            graph.insert(&service.name, service.depends_on.iter().map(|s| s.as_str()).collect());
         }
 
         // Check for missing dependencies
@@ -352,9 +330,7 @@ impl ComposeConverter {
             let mut stack = HashSet::new();
 
             if Self::has_cycle(&graph, &service.name, &mut visited, &mut stack) {
-                return Err(HyprError::CircularDependency {
-                    service: service.name.clone(),
-                });
+                return Err(HyprError::CircularDependency { service: service.name.clone() });
             }
         }
 
@@ -575,10 +551,7 @@ mod tests {
 
         let result = ComposeConverter::validate_dependencies(&services);
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            HyprError::CircularDependency { .. }
-        ));
+        assert!(matches!(result.unwrap_err(), HyprError::CircularDependency { .. }));
     }
 
     #[test]
@@ -605,10 +578,7 @@ mod tests {
 
         let result = ComposeConverter::validate_dependencies(&services);
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            HyprError::MissingDependency { .. }
-        ));
+        assert!(matches!(result.unwrap_err(), HyprError::MissingDependency { .. }));
     }
 
     #[test]
@@ -634,10 +604,7 @@ mod tests {
 
     #[test]
     fn test_resource_defaults() {
-        let service = Service {
-            image: "test".to_string(),
-            ..Default::default()
-        };
+        let service = Service { image: "test".to_string(), ..Default::default() };
 
         let (cpus, memory_mb) = ComposeConverter::parse_resources(&service).unwrap();
         assert_eq!(cpus, 1); // Default
@@ -646,29 +613,22 @@ mod tests {
 
     #[test]
     fn test_volume_parsing() {
-        let volume_defs = HashMap::from([
-            (
-                "db-data".to_string(),
-                VolumeDefinition {
-                    driver: None,
-                    driver_opts: HashMap::new(),
-                },
-            ),
-        ]);
+        let volume_defs = HashMap::from([(
+            "db-data".to_string(),
+            VolumeDefinition { driver: None, driver_opts: HashMap::new() },
+        )]);
 
-        let services = HashMap::from([
-            (
-                "db".to_string(),
-                Service {
-                    image: "postgres".to_string(),
-                    volumes: vec![
-                        "db-data:/var/lib/postgresql/data".to_string(),
-                        "./config:/etc/config:ro".to_string(),
-                    ],
-                    ..Default::default()
-                },
-            ),
-        ]);
+        let services = HashMap::from([(
+            "db".to_string(),
+            Service {
+                image: "postgres".to_string(),
+                volumes: vec![
+                    "db-data:/var/lib/postgresql/data".to_string(),
+                    "./config:/etc/config:ro".to_string(),
+                ],
+                ..Default::default()
+            },
+        )]);
 
         let volumes = ComposeConverter::convert_volumes(&volume_defs, &services);
 

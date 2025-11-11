@@ -1,10 +1,12 @@
 //! gRPC server implementation
 
+use crate::orchestrator::StackOrchestrator;
 use hypr_api::hypr::v1::hypr_service_server::{HyprService, HyprServiceServer};
 use hypr_api::hypr::v1::*;
 use hypr_core::adapters::VmmAdapter;
 use hypr_core::{HyprError, Result, StateManager, Vm, VmConfig, VmStatus};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::net::UnixListener;
@@ -18,11 +20,13 @@ use tracing::{info, instrument};
 pub struct HyprServiceImpl {
     state: Arc<StateManager>,
     adapter: Arc<dyn VmmAdapter>,
+    orchestrator: Arc<StackOrchestrator>,
 }
 
 impl HyprServiceImpl {
     pub fn new(state: Arc<StateManager>, adapter: Arc<dyn VmmAdapter>) -> Self {
-        Self { state, adapter }
+        let orchestrator = Arc::new(StackOrchestrator::new(state.clone(), adapter.clone()));
+        Self { state, adapter, orchestrator }
     }
 }
 
@@ -38,19 +42,13 @@ impl HyprService for HyprServiceImpl {
         let req = request.into_inner();
 
         // Convert proto → domain types
-        let config = req
-            .config
-            .ok_or_else(|| Status::invalid_argument("config required"))?;
-        let vm_config: VmConfig = config
-            .try_into()
-            .map_err(|e: HyprError| Status::invalid_argument(e.to_string()))?;
+        let config = req.config.ok_or_else(|| Status::invalid_argument("config required"))?;
+        let vm_config: VmConfig =
+            config.try_into().map_err(|e: HyprError| Status::invalid_argument(e.to_string()))?;
 
         // Create VM via adapter
-        let handle = self
-            .adapter
-            .create(&vm_config)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let handle =
+            self.adapter.create(&vm_config).await.map_err(|e| Status::internal(e.to_string()))?;
 
         // Create VM state
         let vm = Vm {
@@ -68,15 +66,10 @@ impl HyprService for HyprServiceImpl {
         };
 
         // Save to state
-        self.state
-            .insert_vm(&vm)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        self.state.insert_vm(&vm).await.map_err(|e| Status::internal(e.to_string()))?;
 
         // Convert domain → proto
-        let response = CreateVmResponse {
-            vm: Some(vm.into()),
-        };
+        let response = CreateVmResponse { vm: Some(vm.into()) };
 
         Ok(Response::new(response))
     }
@@ -91,11 +84,7 @@ impl HyprService for HyprServiceImpl {
         let req = request.into_inner();
 
         // Get VM from state
-        let vm = self
-            .state
-            .get_vm(&req.id)
-            .await
-            .map_err(|e| Status::not_found(e.to_string()))?;
+        let vm = self.state.get_vm(&req.id).await.map_err(|e| Status::not_found(e.to_string()))?;
 
         // Create handle for adapter
         let handle = hypr_core::VmHandle {
@@ -105,10 +94,7 @@ impl HyprService for HyprServiceImpl {
         };
 
         // Start via adapter
-        self.adapter
-            .start(&handle)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        self.adapter.start(&handle).await.map_err(|e| Status::internal(e.to_string()))?;
 
         // Update state
         self.state
@@ -117,15 +103,9 @@ impl HyprService for HyprServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         // Fetch updated VM
-        let vm = self
-            .state
-            .get_vm(&req.id)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let vm = self.state.get_vm(&req.id).await.map_err(|e| Status::internal(e.to_string()))?;
 
-        let response = StartVmResponse {
-            vm: Some(vm.into()),
-        };
+        let response = StartVmResponse { vm: Some(vm.into()) };
 
         Ok(Response::new(response))
     }
@@ -141,11 +121,7 @@ impl HyprService for HyprServiceImpl {
         let timeout = Duration::from_secs(req.timeout_sec.unwrap_or(30) as u64);
 
         // Get VM from state
-        let vm = self
-            .state
-            .get_vm(&req.id)
-            .await
-            .map_err(|e| Status::not_found(e.to_string()))?;
+        let vm = self.state.get_vm(&req.id).await.map_err(|e| Status::not_found(e.to_string()))?;
 
         // Create handle for adapter
         let handle = hypr_core::VmHandle {
@@ -155,10 +131,7 @@ impl HyprService for HyprServiceImpl {
         };
 
         // Stop via adapter
-        self.adapter
-            .stop(&handle, timeout)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        self.adapter.stop(&handle, timeout).await.map_err(|e| Status::internal(e.to_string()))?;
 
         // Update state
         self.state
@@ -167,15 +140,9 @@ impl HyprService for HyprServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         // Fetch updated VM
-        let vm = self
-            .state
-            .get_vm(&req.id)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let vm = self.state.get_vm(&req.id).await.map_err(|e| Status::internal(e.to_string()))?;
 
-        let response = StopVmResponse {
-            vm: Some(vm.into()),
-        };
+        let response = StopVmResponse { vm: Some(vm.into()) };
 
         Ok(Response::new(response))
     }
@@ -190,11 +157,7 @@ impl HyprService for HyprServiceImpl {
         let req = request.into_inner();
 
         // Get VM from state
-        let vm = self
-            .state
-            .get_vm(&req.id)
-            .await
-            .map_err(|e| Status::not_found(e.to_string()))?;
+        let vm = self.state.get_vm(&req.id).await.map_err(|e| Status::not_found(e.to_string()))?;
 
         // If force=false and VM is running, reject
         if !req.force && vm.status == VmStatus::Running {
@@ -211,16 +174,10 @@ impl HyprService for HyprServiceImpl {
         };
 
         // Delete via adapter
-        self.adapter
-            .delete(&handle)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        self.adapter.delete(&handle).await.map_err(|e| Status::internal(e.to_string()))?;
 
         // Delete from state
-        self.state
-            .delete_vm(&req.id)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        self.state.delete_vm(&req.id).await.map_err(|e| Status::internal(e.to_string()))?;
 
         let response = DeleteVmResponse { success: true };
 
@@ -234,15 +191,9 @@ impl HyprService for HyprServiceImpl {
     ) -> std::result::Result<Response<ListVmsResponse>, Status> {
         info!("gRPC: ListVMs");
 
-        let vms = self
-            .state
-            .list_vms()
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let vms = self.state.list_vms().await.map_err(|e| Status::internal(e.to_string()))?;
 
-        let response = ListVmsResponse {
-            vms: vms.into_iter().map(|vm| vm.into()).collect(),
-        };
+        let response = ListVmsResponse { vms: vms.into_iter().map(|vm| vm.into()).collect() };
 
         Ok(Response::new(response))
     }
@@ -256,15 +207,9 @@ impl HyprService for HyprServiceImpl {
 
         let req = request.into_inner();
 
-        let vm = self
-            .state
-            .get_vm(&req.id)
-            .await
-            .map_err(|e| Status::not_found(e.to_string()))?;
+        let vm = self.state.get_vm(&req.id).await.map_err(|e| Status::not_found(e.to_string()))?;
 
-        let response = GetVmResponse {
-            vm: Some(vm.into()),
-        };
+        let response = GetVmResponse { vm: Some(vm.into()) };
 
         Ok(Response::new(response))
     }
@@ -276,15 +221,10 @@ impl HyprService for HyprServiceImpl {
     ) -> std::result::Result<Response<ListImagesResponse>, Status> {
         info!("gRPC: ListImages");
 
-        let images = self
-            .state
-            .list_images()
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let images = self.state.list_images().await.map_err(|e| Status::internal(e.to_string()))?;
 
-        let response = ListImagesResponse {
-            images: images.into_iter().map(|img| img.into()).collect(),
-        };
+        let response =
+            ListImagesResponse { images: images.into_iter().map(|img| img.into()).collect() };
 
         Ok(Response::new(response))
     }
@@ -300,11 +240,7 @@ impl HyprService for HyprServiceImpl {
 
         // TODO: Check if image is in use by any VMs
         if !req.force {
-            let vms = self
-                .state
-                .list_vms()
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+            let vms = self.state.list_vms().await.map_err(|e| Status::internal(e.to_string()))?;
 
             if vms.iter().any(|vm| vm.image_id == req.id) {
                 return Err(Status::failed_precondition(
@@ -313,10 +249,7 @@ impl HyprService for HyprServiceImpl {
             }
         }
 
-        self.state
-            .delete_image(&req.id)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        self.state.delete_image(&req.id).await.map_err(|e| Status::internal(e.to_string()))?;
 
         let response = DeleteImageResponse { success: true };
 
@@ -338,6 +271,90 @@ impl HyprService for HyprServiceImpl {
             version: env!("CARGO_PKG_VERSION").to_string(),
             details,
         };
+
+        Ok(Response::new(response))
+    }
+
+    #[instrument(skip(self))]
+    async fn deploy_stack(
+        &self,
+        request: Request<DeployStackRequest>,
+    ) -> std::result::Result<Response<DeployStackResponse>, Status> {
+        info!("gRPC: DeployStack");
+
+        let req = request.into_inner();
+
+        let compose_path = PathBuf::from(&req.compose_file);
+        let stack_name = req.stack_name.filter(|s| !s.is_empty());
+
+        let stack_id = self
+            .orchestrator
+            .deploy_stack(compose_path, stack_name)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Get stack info
+        let stack_info = self
+            .orchestrator
+            .get_stack(&stack_id)
+            .await
+            .ok_or_else(|| Status::internal("Stack created but not found"))?;
+
+        let response = DeployStackResponse { stack: Some(stack_info.into()) };
+
+        Ok(Response::new(response))
+    }
+
+    #[instrument(skip(self))]
+    async fn destroy_stack(
+        &self,
+        request: Request<DestroyStackRequest>,
+    ) -> std::result::Result<Response<DestroyStackResponse>, Status> {
+        info!("gRPC: DestroyStack");
+
+        let req = request.into_inner();
+
+        self.orchestrator
+            .destroy_stack(&req.stack_name)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let response = DestroyStackResponse { success: true };
+
+        Ok(Response::new(response))
+    }
+
+    #[instrument(skip(self))]
+    async fn list_stacks(
+        &self,
+        _request: Request<ListStacksRequest>,
+    ) -> std::result::Result<Response<ListStacksResponse>, Status> {
+        info!("gRPC: ListStacks");
+
+        let stacks = self.orchestrator.list_stacks().await;
+
+        let response =
+            ListStacksResponse { stacks: stacks.into_iter().map(|s| s.into()).collect() };
+
+        Ok(Response::new(response))
+    }
+
+    #[instrument(skip(self))]
+    async fn get_stack(
+        &self,
+        request: Request<GetStackRequest>,
+    ) -> std::result::Result<Response<GetStackResponse>, Status> {
+        info!("gRPC: GetStack");
+
+        let req = request.into_inner();
+
+        let stack = self
+            .orchestrator
+            .get_stack(&req.stack_name)
+            .await
+            .ok_or_else(|| Status::not_found(format!("Stack {} not found", req.stack_name)))?;
+
+        let response = GetStackResponse { stack: Some(stack.into()) };
 
         Ok(Response::new(response))
     }
