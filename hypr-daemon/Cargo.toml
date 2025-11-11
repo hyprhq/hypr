@@ -8,5 +8,14 @@ repository.workspace = true
 
 [dependencies]
 hypr-core = { path = "../hypr-core" }
+hypr-api = { path = "../hypr-api" }
 tokio = { workspace = true, features = ["full"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = "0.11"
 tracing = { workspace = true }
+anyhow = { workspace = true }
+tower = "0.4"
+
+[features]
+# libkrun-efi support (macOS Metal GPU, Phase 4)
+krun = ["hypr-core/krun"]
