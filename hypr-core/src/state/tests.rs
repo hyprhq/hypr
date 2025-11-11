@@ -1,8 +1,11 @@
 #[cfg(test)]
 mod tests {
     use crate::error::HyprError;
+    use crate::network::port::PortMapping;
     use crate::state::StateManager;
+    use crate::types::network::Protocol;
     use crate::types::{NetworkConfig, Vm, VmConfig, VmResources, VmStatus};
+    use std::net::Ipv4Addr;
     use std::time::SystemTime;
 
     #[tokio::test]
@@ -131,10 +134,7 @@ mod tests {
         manager.insert_vm(&vm).await.unwrap();
 
         // Update status
-        manager
-            .update_vm_status("vm-test-456", VmStatus::Running)
-            .await
-            .unwrap();
+        manager.update_vm_status("vm-test-456", VmStatus::Running).await.unwrap();
 
         // Verify update
         let updated = manager.get_vm("vm-test-456").await.unwrap();
@@ -189,5 +189,170 @@ mod tests {
         if let Err(e) = result {
             assert!(matches!(e, HyprError::VmNotFound { .. }));
         }
+    }
+
+    // Port mapping tests
+
+    #[tokio::test]
+    async fn test_insert_and_list_port_mappings() {
+        let manager = StateManager::new_in_memory().await.unwrap();
+
+        let mapping1 = PortMapping::new(8080, Ipv4Addr::new(100, 64, 0, 10), 80, Protocol::Tcp);
+
+        let mapping2 = PortMapping::with_vm_id(
+            8443,
+            Ipv4Addr::new(100, 64, 0, 11),
+            443,
+            Protocol::Tcp,
+            "vm-123".to_string(),
+        );
+
+        // Insert mappings
+        manager.insert_port_mapping(&mapping1).await.unwrap();
+        manager.insert_port_mapping(&mapping2).await.unwrap();
+
+        // List all mappings
+        let mappings = manager.list_port_mappings().await.unwrap();
+        assert_eq!(mappings.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_vm_port_mappings() {
+        let manager = StateManager::new_in_memory().await.unwrap();
+
+        let mapping1 = PortMapping::with_vm_id(
+            8080,
+            Ipv4Addr::new(100, 64, 0, 10),
+            80,
+            Protocol::Tcp,
+            "vm-123".to_string(),
+        );
+
+        let mapping2 = PortMapping::with_vm_id(
+            8443,
+            Ipv4Addr::new(100, 64, 0, 10),
+            443,
+            Protocol::Tcp,
+            "vm-123".to_string(),
+        );
+
+        let mapping3 = PortMapping::with_vm_id(
+            9090,
+            Ipv4Addr::new(100, 64, 0, 11),
+            90,
+            Protocol::Tcp,
+            "vm-456".to_string(),
+        );
+
+        // Insert mappings
+        manager.insert_port_mapping(&mapping1).await.unwrap();
+        manager.insert_port_mapping(&mapping2).await.unwrap();
+        manager.insert_port_mapping(&mapping3).await.unwrap();
+
+        // Get mappings for vm-123
+        let vm_mappings = manager.get_vm_port_mappings("vm-123").await.unwrap();
+        assert_eq!(vm_mappings.len(), 2);
+
+        // Get mappings for vm-456
+        let vm_mappings = manager.get_vm_port_mappings("vm-456").await.unwrap();
+        assert_eq!(vm_mappings.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_delete_port_mapping() {
+        let manager = StateManager::new_in_memory().await.unwrap();
+
+        let mapping = PortMapping::new(8080, Ipv4Addr::new(100, 64, 0, 10), 80, Protocol::Tcp);
+
+        // Insert
+        manager.insert_port_mapping(&mapping).await.unwrap();
+
+        // Verify it exists
+        let mappings = manager.list_port_mappings().await.unwrap();
+        assert_eq!(mappings.len(), 1);
+
+        // Delete
+        manager.delete_port_mapping(8080, Protocol::Tcp).await.unwrap();
+
+        // Verify it's gone
+        let mappings = manager.list_port_mappings().await.unwrap();
+        assert_eq!(mappings.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_delete_vm_port_mappings() {
+        let manager = StateManager::new_in_memory().await.unwrap();
+
+        let mapping1 = PortMapping::with_vm_id(
+            8080,
+            Ipv4Addr::new(100, 64, 0, 10),
+            80,
+            Protocol::Tcp,
+            "vm-123".to_string(),
+        );
+
+        let mapping2 = PortMapping::with_vm_id(
+            8443,
+            Ipv4Addr::new(100, 64, 0, 10),
+            443,
+            Protocol::Tcp,
+            "vm-123".to_string(),
+        );
+
+        let mapping3 = PortMapping::with_vm_id(
+            9090,
+            Ipv4Addr::new(100, 64, 0, 11),
+            90,
+            Protocol::Tcp,
+            "vm-456".to_string(),
+        );
+
+        // Insert mappings
+        manager.insert_port_mapping(&mapping1).await.unwrap();
+        manager.insert_port_mapping(&mapping2).await.unwrap();
+        manager.insert_port_mapping(&mapping3).await.unwrap();
+
+        // Delete all mappings for vm-123
+        manager.delete_vm_port_mappings("vm-123").await.unwrap();
+
+        // Verify vm-123 mappings are gone
+        let vm_mappings = manager.get_vm_port_mappings("vm-123").await.unwrap();
+        assert_eq!(vm_mappings.len(), 0);
+
+        // Verify vm-456 mapping still exists
+        let vm_mappings = manager.get_vm_port_mappings("vm-456").await.unwrap();
+        assert_eq!(vm_mappings.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_port_mapping_persistence() {
+        // Create a temp file for the database
+        let db_path = std::env::temp_dir().join(format!("hypr-test-{}.db", uuid::Uuid::new_v4()));
+
+        {
+            let manager = StateManager::new(&db_path).await.unwrap();
+
+            let mapping = PortMapping::with_vm_id(
+                8080,
+                Ipv4Addr::new(100, 64, 0, 10),
+                80,
+                Protocol::Tcp,
+                "vm-123".to_string(),
+            );
+
+            manager.insert_port_mapping(&mapping).await.unwrap();
+        }
+
+        // Reopen database
+        {
+            let manager = StateManager::new(&db_path).await.unwrap();
+            let mappings = manager.list_port_mappings().await.unwrap();
+            assert_eq!(mappings.len(), 1);
+            assert_eq!(mappings[0].host_port, 8080);
+            assert_eq!(mappings[0].vm_id, Some("vm-123".to_string()));
+        }
+
+        // Cleanup
+        let _ = std::fs::remove_file(&db_path);
     }
 }

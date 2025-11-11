@@ -18,33 +18,23 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await
-    .map_err(|e| HyprError::MigrationFailed {
-        reason: e.to_string(),
-    })?;
+    .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
 
     // Get current schema version
     let current_version: Option<i64> =
         sqlx::query_scalar("SELECT version FROM schema_version LIMIT 1")
             .fetch_optional(pool)
             .await
-            .map_err(|e| HyprError::MigrationFailed {
-                reason: e.to_string(),
-            })?;
+            .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
 
     let current_version = current_version.unwrap_or(0);
 
     if current_version >= SCHEMA_VERSION {
-        info!(
-            "Database schema is up to date (version {})",
-            current_version
-        );
+        info!("Database schema is up to date (version {})", current_version);
         return Ok(());
     }
 
-    info!(
-        "Migrating database from version {} to {}",
-        current_version, SCHEMA_VERSION
-    );
+    info!("Migrating database from version {} to {}", current_version, SCHEMA_VERSION);
 
     // Run migrations
     if current_version < 1 {
@@ -75,16 +65,12 @@ async fn migrate_to_v1(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await
-    .map_err(|e| HyprError::MigrationFailed {
-        reason: e.to_string(),
-    })?;
+    .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_images_name_tag ON images(name, tag)")
         .execute(pool)
         .await
-        .map_err(|e| HyprError::MigrationFailed {
-            reason: e.to_string(),
-        })?;
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
 
     // VMs table
     sqlx::query(
@@ -106,23 +92,17 @@ async fn migrate_to_v1(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await
-    .map_err(|e| HyprError::MigrationFailed {
-        reason: e.to_string(),
-    })?;
+    .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_vms_status ON vms(status)")
         .execute(pool)
         .await
-        .map_err(|e| HyprError::MigrationFailed {
-            reason: e.to_string(),
-        })?;
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_vms_ip ON vms(ip_address)")
         .execute(pool)
         .await
-        .map_err(|e| HyprError::MigrationFailed {
-            reason: e.to_string(),
-        })?;
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
 
     // Volumes table
     sqlx::query(
@@ -139,9 +119,7 @@ async fn migrate_to_v1(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await
-    .map_err(|e| HyprError::MigrationFailed {
-        reason: e.to_string(),
-    })?;
+    .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
 
     // VM-Volume join table
     sqlx::query(
@@ -156,9 +134,7 @@ async fn migrate_to_v1(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await
-    .map_err(|e| HyprError::MigrationFailed {
-        reason: e.to_string(),
-    })?;
+    .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
 
     // Networks table
     sqlx::query(
@@ -174,9 +150,7 @@ async fn migrate_to_v1(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await
-    .map_err(|e| HyprError::MigrationFailed {
-        reason: e.to_string(),
-    })?;
+    .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
 
     // Stacks table
     sqlx::query(
@@ -192,9 +166,7 @@ async fn migrate_to_v1(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await
-    .map_err(|e| HyprError::MigrationFailed {
-        reason: e.to_string(),
-    })?;
+    .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
 
     // Stack-VM join table
     sqlx::query(
@@ -209,25 +181,19 @@ async fn migrate_to_v1(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await
-    .map_err(|e| HyprError::MigrationFailed {
-        reason: e.to_string(),
-    })?;
+    .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
 
     // Update schema version
     sqlx::query("DELETE FROM schema_version")
         .execute(pool)
         .await
-        .map_err(|e| HyprError::MigrationFailed {
-            reason: e.to_string(),
-        })?;
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
 
     sqlx::query("INSERT INTO schema_version (version) VALUES (?)")
         .bind(1i64)
         .execute(pool)
         .await
-        .map_err(|e| HyprError::MigrationFailed {
-            reason: e.to_string(),
-        })?;
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
 
     info!("Migration to schema version 1 complete");
     Ok(())
