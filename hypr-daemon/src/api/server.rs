@@ -1,10 +1,12 @@
 //! gRPC server implementation
 
+use crate::orchestrator::StackOrchestrator;
 use hypr_api::hypr::v1::hypr_service_server::{HyprService, HyprServiceServer};
 use hypr_api::hypr::v1::*;
 use hypr_core::adapters::VmmAdapter;
 use hypr_core::{HyprError, Result, StateManager, Vm, VmConfig, VmStatus};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::net::UnixListener;
@@ -18,11 +20,13 @@ use tracing::{info, instrument};
 pub struct HyprServiceImpl {
     state: Arc<StateManager>,
     adapter: Arc<dyn VmmAdapter>,
+    orchestrator: Arc<StackOrchestrator>,
 }
 
 impl HyprServiceImpl {
     pub fn new(state: Arc<StateManager>, adapter: Arc<dyn VmmAdapter>) -> Self {
-        Self { state, adapter }
+        let orchestrator = Arc::new(StackOrchestrator::new(state.clone(), adapter.clone()));
+        Self { state, adapter, orchestrator }
     }
 }
 
@@ -278,13 +282,27 @@ impl HyprService for HyprServiceImpl {
     ) -> std::result::Result<Response<DeployStackResponse>, Status> {
         info!("gRPC: DeployStack");
 
-        let _req = request.into_inner();
+        let req = request.into_inner();
 
-        // TODO: Implement with StackOrchestrator (Task 2.10)
-        // For now, return unimplemented
-        Err(Status::unimplemented(
-            "Stack deployment will be available after Task 2.10 restoration",
-        ))
+        let compose_path = PathBuf::from(&req.compose_file);
+        let stack_name = req.stack_name.filter(|s| !s.is_empty());
+
+        let stack_id = self
+            .orchestrator
+            .deploy_stack(compose_path, stack_name)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Get stack info
+        let stack_info = self
+            .orchestrator
+            .get_stack(&stack_id)
+            .await
+            .ok_or_else(|| Status::internal("Stack created but not found"))?;
+
+        let response = DeployStackResponse { stack: Some(stack_info.into()) };
+
+        Ok(Response::new(response))
     }
 
     #[instrument(skip(self))]
@@ -294,12 +312,16 @@ impl HyprService for HyprServiceImpl {
     ) -> std::result::Result<Response<DestroyStackResponse>, Status> {
         info!("gRPC: DestroyStack");
 
-        let _req = request.into_inner();
+        let req = request.into_inner();
 
-        // TODO: Implement with StackOrchestrator (Task 2.10)
-        Err(Status::unimplemented(
-            "Stack destruction will be available after Task 2.10 restoration",
-        ))
+        self.orchestrator
+            .destroy_stack(&req.stack_name)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let response = DestroyStackResponse { success: true };
+
+        Ok(Response::new(response))
     }
 
     #[instrument(skip(self))]
@@ -309,10 +331,12 @@ impl HyprService for HyprServiceImpl {
     ) -> std::result::Result<Response<ListStacksResponse>, Status> {
         info!("gRPC: ListStacks");
 
-        // TODO: Implement with StackOrchestrator (Task 2.10)
-        Err(Status::unimplemented(
-            "Stack listing will be available after Task 2.10 restoration",
-        ))
+        let stacks = self.orchestrator.list_stacks().await;
+
+        let response =
+            ListStacksResponse { stacks: stacks.into_iter().map(|s| s.into()).collect() };
+
+        Ok(Response::new(response))
     }
 
     #[instrument(skip(self))]
@@ -322,12 +346,17 @@ impl HyprService for HyprServiceImpl {
     ) -> std::result::Result<Response<GetStackResponse>, Status> {
         info!("gRPC: GetStack");
 
-        let _req = request.into_inner();
+        let req = request.into_inner();
 
-        // TODO: Implement with StackOrchestrator (Task 2.10)
-        Err(Status::unimplemented(
-            "Stack retrieval will be available after Task 2.10 restoration",
-        ))
+        let stack = self
+            .orchestrator
+            .get_stack(&req.stack_name)
+            .await
+            .ok_or_else(|| Status::not_found(format!("Stack {} not found", req.stack_name)))?;
+
+        let response = GetStackResponse { stack: Some(stack.into()) };
+
+        Ok(Response::new(response))
     }
 }
 

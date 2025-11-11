@@ -7,6 +7,8 @@ use hypr_core::{adapters::VmmAdapter, shutdown_observability};
 
 #[allow(unused_imports)]
 mod api;
+mod orchestrator;
+mod proto_convert;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -5,4 +5,4 @@
 
 pub mod stack;
 
-pub use stack::{StackInfo, StackOrchestrator, StackState};
+pub use stack::{ServiceStatus, StackInfo, StackOrchestrator, StackState};
