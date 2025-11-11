@@ -1,0 +1,2 @@
+# Warn on all clippy lints by default
+msrv = "1.75"
