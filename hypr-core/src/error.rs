@@ -46,12 +46,7 @@ pub enum HyprError {
 
     // Compose errors
     #[error("Invalid compose file at {path:?}: {reason}")]
-    InvalidCompose {
-        path: PathBuf,
-        line: Option<usize>,
-        message: String,
-        reason: String,
-    },
+    InvalidCompose { path: PathBuf, line: Option<usize>, message: String, reason: String },
 
     #[error("Compose parse error: {reason}")]
     ComposeParseError { reason: String },
@@ -69,11 +64,10 @@ pub enum HyprError {
     #[error("Circular dependency detected in service: {service}")]
     CircularDependency { service: String },
 
-    #[error("Missing dependency: service '{service}' depends on '{dependency}' which does not exist")]
-    MissingDependency {
-        service: String,
-        dependency: String,
-    },
+    #[error(
+        "Missing dependency: service '{service}' depends on '{dependency}' which does not exist"
+    )]
+    MissingDependency { service: String, dependency: String },
 
     // Network errors
     #[error("Port {port} already in use")]
@@ -84,6 +78,19 @@ pub enum HyprError {
 
     #[error("Failed to create TAP device: {reason}")]
     TapDeviceError { reason: String },
+
+    // eBPF errors
+    #[error("Failed to load eBPF program: {0}")]
+    EbpfLoadError(String),
+
+    #[error("Failed to attach eBPF program: {0}")]
+    EbpfAttachError(String),
+
+    #[error("eBPF map operation failed: {0}")]
+    EbpfMapError(String),
+
+    #[error("Unsupported platform: {0}")]
+    UnsupportedPlatform(String),
 
     // GPU errors
     #[error("GPU not available: {reason}")]
