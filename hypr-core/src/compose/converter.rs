@@ -167,7 +167,7 @@ impl ComposeConverter {
 
                 let (guest_str, protocol) = if guest_spec.contains('/') {
                     let guest_parts: Vec<&str> = guest_spec.split('/').collect();
-                    (guest_parts[0], guest_parts.get(1).unwrap_or(&"tcp"))
+                    (guest_parts[0], *guest_parts.get(1).unwrap_or(&"tcp"))
                 } else {
                     (guest_spec, "tcp")
                 };
@@ -197,7 +197,7 @@ impl ComposeConverter {
                 let guest_spec = parts[0];
                 let (guest_str, protocol) = if guest_spec.contains('/') {
                     let guest_parts: Vec<&str> = guest_spec.split('/').collect();
-                    (guest_parts[0], guest_parts.get(1).unwrap_or(&"tcp"))
+                    (guest_parts[0], *guest_parts.get(1).unwrap_or(&"tcp"))
                 } else {
                     (guest_spec, "tcp")
                 };
@@ -617,13 +617,12 @@ mod tests {
             image: "test".to_string(),
             deploy: Some(DeployConfig {
                 resources: Some(Resources {
-                    limits: Some(ResourceSpec {
-                        cpus: Some(2.5),
-                        memory_mb: Some(1024),
+                    limits: Some(ResourceLimit {
+                        cpus: Some("2.5".to_string()),
+                        memory: Some("1024m".to_string()),
                     }),
                     reservations: None,
                 }),
-                replicas: None,
             }),
             ..Default::default()
         };
@@ -652,7 +651,7 @@ mod tests {
                 "db-data".to_string(),
                 VolumeDefinition {
                     driver: None,
-                    driver_opts: None,
+                    driver_opts: HashMap::new(),
                 },
             ),
         ]);
