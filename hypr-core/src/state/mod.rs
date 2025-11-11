@@ -40,6 +40,17 @@ impl StateManager {
         let db_path = db_path.as_ref();
         info!("Initializing state manager at {:?}", db_path);
 
+        // Create parent directory if it doesn't exist (but not for :memory:)
+        if db_path != Path::new(":memory:") {
+            if let Some(parent) = db_path.parent() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| HyprError::InvalidConfig {
+                        reason: format!("Failed to create directory {}: {}", parent.display(), e),
+                    })?;
+            }
+        }
+
         // Configure SQLite connection
         let mut options = SqliteConnectOptions::from_str(
             db_path
