@@ -1,14 +1,18 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! HYPR Core Library
+//!
+//! Shared types, traits, and utilities for the HYPR microVM orchestration engine.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod adapters;
+pub mod error;
+pub mod observability;
+pub mod types;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+// Re-export commonly used items
+pub use error::{HyprError, Result};
+pub use observability::{
+    health::HealthChecker, init as init_observability, shutdown as shutdown_observability,
+};
+pub use types::{
+    Image, ImageManifest, Network, NetworkConfig, PortMapping, Service, Stack, Vm, VmConfig,
+    VmHandle, VmResources, VmStatus, Volume, VolumeMount,
+};

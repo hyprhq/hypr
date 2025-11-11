@@ -7,3 +7,6 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+hypr-core = { path = "../hypr-core" }
+tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true }

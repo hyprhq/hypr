@@ -1,0 +1,81 @@
+//! VMM (Virtual Machine Monitor) adapter abstraction.
+//!
+//! HYPR supports multiple hypervisors via the `VmmAdapter` trait:
+//! - Linux: cloud-hypervisor (primary)
+//! - macOS: libkrun-efi (primary), HVF (fallback)
+//! - Windows: WSL2 wrapper (future)
+
+use crate::error::Result;
+use crate::types::vm::{DiskConfig, GpuConfig, VmConfig, VmHandle};
+use crate::types::network::NetworkConfig;
+use async_trait::async_trait;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::Duration;
+
+/// VMM adapter trait.
+///
+/// All hypervisor integrations must implement this trait.
+/// Methods are instrumented by implementations (not here) to maintain observability.
+#[async_trait]
+pub trait VmmAdapter: Send + Sync {
+    /// Create a new VM (allocate resources, configure).
+    ///
+    /// This prepares the VM but does not start it. Call `start()` to boot.
+    async fn create(&self, config: &VmConfig) -> Result<VmHandle>;
+
+    /// Start an existing VM.
+    ///
+    /// Boots the VM and waits for it to reach running state.
+    async fn start(&self, handle: &VmHandle) -> Result<()>;
+
+    /// Stop a running VM gracefully.
+    ///
+    /// Sends shutdown signal and waits up to `timeout` for clean shutdown.
+    /// Falls back to `kill()` if timeout expires.
+    async fn stop(&self, handle: &VmHandle, timeout: Duration) -> Result<()>;
+
+    /// Force kill a VM immediately.
+    ///
+    /// Does not wait for clean shutdown. Use only when `stop()` fails.
+    async fn kill(&self, handle: &VmHandle) -> Result<()>;
+
+    /// Delete VM resources.
+    ///
+    /// VM must be stopped before calling this.
+    async fn delete(&self, handle: &VmHandle) -> Result<()>;
+
+    /// Attach a disk device (virtio-blk).
+    async fn attach_disk(&self, handle: &VmHandle, disk: &DiskConfig) -> Result<()>;
+
+    /// Attach a network device (virtio-net).
+    async fn attach_network(&self, handle: &VmHandle, net: &NetworkConfig) -> Result<()>;
+
+    /// Attach GPU (VFIO on Linux, Metal on macOS).
+    async fn attach_gpu(&self, handle: &VmHandle, gpu: &GpuConfig) -> Result<()>;
+
+    /// Get vsock path for guest communication.
+    fn vsock_path(&self, handle: &VmHandle) -> PathBuf;
+
+    /// Get adapter capabilities (for feature detection).
+    fn capabilities(&self) -> AdapterCapabilities;
+
+    /// Get adapter name (for logging/metrics).
+    fn name(&self) -> &str;
+}
+
+/// Adapter capabilities.
+#[derive(Debug, Clone, Default)]
+pub struct AdapterCapabilities {
+    /// Supports GPU passthrough
+    pub gpu_passthrough: bool,
+
+    /// Supports virtio-fs
+    pub virtio_fs: bool,
+
+    /// Supports hotplug devices
+    pub hotplug_devices: bool,
+
+    /// Additional metadata
+    pub metadata: HashMap<String, String>,
+}
