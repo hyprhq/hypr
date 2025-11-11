@@ -1,11 +1,11 @@
 //! Health check endpoints.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Overall system health status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HealthStatus {
     Healthy,
@@ -14,7 +14,7 @@ pub enum HealthStatus {
 }
 
 /// Health check result.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthCheck {
     pub status: HealthStatus,
     pub version: &'static str,
@@ -22,7 +22,7 @@ pub struct HealthCheck {
 }
 
 /// Subsystem health status.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubsystemHealth {
     pub name: String,
     pub status: HealthStatus,
