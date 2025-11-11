@@ -79,3 +79,9 @@ pub struct AdapterCapabilities {
     /// Additional metadata
     pub metadata: HashMap<String, String>,
 }
+
+#[cfg(all(target_os = "macos", feature = "krun"))]
+pub mod krun;
+
+#[cfg(all(target_os = "macos", feature = "krun"))]
+pub use krun::KrunAdapter;
