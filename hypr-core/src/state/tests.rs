@@ -131,10 +131,7 @@ mod tests {
         manager.insert_vm(&vm).await.unwrap();
 
         // Update status
-        manager
-            .update_vm_status("vm-test-456", VmStatus::Running)
-            .await
-            .unwrap();
+        manager.update_vm_status("vm-test-456", VmStatus::Running).await.unwrap();
 
         // Verify update
         let updated = manager.get_vm("vm-test-456").await.unwrap();

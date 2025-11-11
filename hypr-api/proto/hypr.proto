@@ -21,6 +21,12 @@ service HyprService {
   rpc ListImages(ListImagesRequest) returns (ListImagesResponse);
   rpc DeleteImage(DeleteImageRequest) returns (DeleteImageResponse);
 
+  // Stack operations
+  rpc DeployStack(DeployStackRequest) returns (DeployStackResponse);
+  rpc DestroyStack(DestroyStackRequest) returns (DestroyStackResponse);
+  rpc ListStacks(ListStacksRequest) returns (ListStacksResponse);
+  rpc GetStack(GetStackRequest) returns (GetStackResponse);
+
   // Health
   rpc Health(HealthRequest) returns (HealthResponse);
 }
@@ -214,6 +220,61 @@ message DeleteImageRequest {
 
 message DeleteImageResponse {
   bool success = 1;
+}
+
+// Stack Operations
+
+message DeployStackRequest {
+  string compose_file = 1; // Path to docker-compose.yml
+  optional string stack_name = 2; // Optional stack name (defaults to directory name)
+  bool detach = 3; // Run in background
+  bool force_recreate = 4; // Force recreate even if exists
+  bool build = 5; // Build images before deploying
+}
+
+message DeployStackResponse {
+  Stack stack = 1;
+}
+
+message DestroyStackRequest {
+  string stack_name = 1;
+  bool force = 2; // Force destroy even if running
+}
+
+message DestroyStackResponse {
+  bool success = 1;
+}
+
+message ListStacksRequest {
+  optional string filter = 1;
+}
+
+message ListStacksResponse {
+  repeated Stack stacks = 1;
+}
+
+message GetStackRequest {
+  string stack_name = 1;
+}
+
+message GetStackResponse {
+  Stack stack = 1;
+}
+
+// Stack Types
+
+message Stack {
+  string id = 1;
+  string name = 2;
+  repeated StackService services = 3;
+  optional string compose_path = 4;
+  int64 created_at = 5;
+}
+
+message StackService {
+  string name = 1;
+  string vm_id = 2;
+  string status = 3; // "creating", "running", "stopped", "failed"
 }
 
 // Health Check

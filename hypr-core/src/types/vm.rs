@@ -126,10 +126,7 @@ pub struct VmResources {
 
 impl Default for VmResources {
     fn default() -> Self {
-        Self {
-            cpus: 2,
-            memory_mb: 512,
-        }
+        Self { cpus: 2, memory_mb: 512 }
     }
 }
 

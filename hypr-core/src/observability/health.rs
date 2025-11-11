@@ -37,23 +37,22 @@ pub struct HealthChecker {
 
 impl HealthChecker {
     pub fn new() -> Self {
-        Self {
-            subsystems: Arc::new(RwLock::new(Vec::new())),
-        }
+        Self { subsystems: Arc::new(RwLock::new(Vec::new())) }
     }
 
     /// Register a subsystem for health tracking.
     pub async fn register_subsystem(&self, name: String) {
         let mut subsystems = self.subsystems.write().await;
-        subsystems.push(SubsystemHealth {
-            name,
-            status: HealthStatus::Healthy,
-            message: None,
-        });
+        subsystems.push(SubsystemHealth { name, status: HealthStatus::Healthy, message: None });
     }
 
     /// Update subsystem health status.
-    pub async fn update_subsystem(&self, name: &str, status: HealthStatus, message: Option<String>) {
+    pub async fn update_subsystem(
+        &self,
+        name: &str,
+        status: HealthStatus,
+        message: Option<String>,
+    ) {
         let mut subsystems = self.subsystems.write().await;
         if let Some(subsystem) = subsystems.iter_mut().find(|s| s.name == name) {
             subsystem.status = status;
@@ -78,11 +77,7 @@ impl HealthChecker {
             HealthStatus::Healthy
         };
 
-        HealthCheck {
-            status,
-            version: env!("CARGO_PKG_VERSION"),
-            subsystems,
-        }
+        HealthCheck { status, version: env!("CARGO_PKG_VERSION"), subsystems }
     }
 
     /// Simple liveness check - is the process alive?

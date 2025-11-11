@@ -26,10 +26,7 @@ pub async fn run(
     let config = VmConfig {
         id: vm_id.clone(),
         name: vm_name.clone(),
-        resources: VmResources {
-            cpus: cpus.unwrap_or(2),
-            memory_mb: memory_mb.unwrap_or(512),
-        },
+        resources: VmResources { cpus: cpus.unwrap_or(2), memory_mb: memory_mb.unwrap_or(512) },
         kernel_path: None, // Use default
         kernel_args: vec![],
         disks: vec![

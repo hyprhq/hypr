@@ -33,11 +33,8 @@ impl ComposeParser {
     pub fn parse(content: &str) -> Result<ComposeFile> {
         info!("Parsing docker-compose.yml");
 
-        let compose: ComposeFile = serde_yaml::from_str(content).map_err(|e| {
-            HyprError::ComposeParseError {
-                reason: e.to_string(),
-            }
-        })?;
+        let compose: ComposeFile = serde_yaml::from_str(content)
+            .map_err(|e| HyprError::ComposeParseError { reason: e.to_string() })?;
 
         // Validate version (support v2, v3)
         Self::validate_version(&compose.version)?;
@@ -83,18 +80,14 @@ impl ComposeParser {
         if version.is_empty() || version.starts_with('2') || version.starts_with('3') {
             Ok(())
         } else {
-            Err(HyprError::UnsupportedComposeVersion {
-                version: version.to_string(),
-            })
+            Err(HyprError::UnsupportedComposeVersion { version: version.to_string() })
         }
     }
 
     /// Validate that services are properly defined.
     fn validate_services(services: &HashMap<String, Service>) -> Result<()> {
         if services.is_empty() {
-            return Err(HyprError::ComposeParseError {
-                reason: "No services defined".to_string(),
-            });
+            return Err(HyprError::ComposeParseError { reason: "No services defined".to_string() });
         }
 
         for (name, service) in services {

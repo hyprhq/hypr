@@ -43,27 +43,19 @@ impl StateManager {
         // Create parent directory if it doesn't exist (but not for :memory:)
         if db_path != Path::new(":memory:") {
             if let Some(parent) = db_path.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .map_err(|e| HyprError::InvalidConfig {
-                        reason: format!("Failed to create directory {}: {}", parent.display(), e),
-                    })?;
+                tokio::fs::create_dir_all(parent).await.map_err(|e| HyprError::InvalidConfig {
+                    reason: format!("Failed to create directory {}: {}", parent.display(), e),
+                })?;
             }
         }
 
         // Configure SQLite connection
-        let mut options = SqliteConnectOptions::from_str(
-            db_path
-                .to_str()
-                .ok_or_else(|| HyprError::InvalidConfig {
-                    reason: "Invalid database path".to_string(),
-                })?,
-        )
+        let mut options = SqliteConnectOptions::from_str(db_path.to_str().ok_or_else(|| {
+            HyprError::InvalidConfig { reason: "Invalid database path".to_string() }
+        })?)
         .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
 
-        options = options
-            .create_if_missing(true)
-            .log_statements(tracing::log::LevelFilter::Debug);
+        options = options.create_if_missing(true).log_statements(tracing::log::LevelFilter::Debug);
 
         // Create connection pool
         let pool = SqlitePoolOptions::new()
@@ -97,15 +89,11 @@ impl StateManager {
     /// Insert a new VM.
     #[instrument(skip(self), fields(vm_id = %vm.id))]
     pub async fn insert_vm(&self, vm: &Vm) -> Result<()> {
-        let config_json = serde_json::to_string(&vm.config).map_err(|e| {
-            HyprError::DatabaseError(format!("Failed to serialize config: {}", e))
-        })?;
+        let config_json = serde_json::to_string(&vm.config)
+            .map_err(|e| HyprError::DatabaseError(format!("Failed to serialize config: {}", e)))?;
 
-        let created_at = vm
-            .created_at
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        let created_at =
+            vm.created_at.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as i64;
 
         sqlx::query(
             r#"
@@ -147,9 +135,7 @@ impl StateManager {
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| HyprError::DatabaseError(e.to_string()))?
-            .ok_or_else(|| HyprError::VmNotFound {
-                vm_id: id.to_string(),
-            })?;
+            .ok_or_else(|| HyprError::VmNotFound { vm_id: id.to_string() })?;
 
         self.row_to_vm(row)
     }
@@ -226,9 +212,7 @@ impl StateManager {
             config,
             ip_address: row.get("ip_address"),
             pid: row.get::<Option<i64>, _>("pid").map(|p| p as u32),
-            vsock_path: row
-                .get::<Option<String>, _>("vsock_path")
-                .map(|p| p.into()),
+            vsock_path: row.get::<Option<String>, _>("vsock_path").map(|p| p.into()),
             created_at,
             started_at,
             stopped_at,
@@ -246,11 +230,8 @@ impl StateManager {
             HyprError::DatabaseError(format!("Failed to serialize manifest: {}", e))
         })?;
 
-        let created_at = image
-            .created_at
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        let created_at =
+            image.created_at.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as i64;
 
         sqlx::query(
             r#"
@@ -280,9 +261,7 @@ impl StateManager {
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| HyprError::DatabaseError(e.to_string()))?
-            .ok_or_else(|| HyprError::ImageNotFound {
-                image: id.to_string(),
-            })?;
+            .ok_or_else(|| HyprError::ImageNotFound { image: id.to_string() })?;
 
         self.row_to_image(row)
     }
@@ -295,9 +274,7 @@ impl StateManager {
             .await
             .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
 
-        rows.into_iter()
-            .map(|row| self.row_to_image(row))
-            .collect()
+        rows.into_iter().map(|row| self.row_to_image(row)).collect()
     }
 
     /// Delete an image.
@@ -342,11 +319,8 @@ impl StateManager {
     /// Insert a new volume.
     #[instrument(skip(self), fields(volume_id = %volume.id))]
     pub async fn insert_volume(&self, volume: &Volume) -> Result<()> {
-        let created_at = volume
-            .created_at
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        let created_at =
+            volume.created_at.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as i64;
 
         let volume_type_str = match volume.volume_type {
             VolumeType::Ext4 => "ext4",
@@ -394,9 +368,7 @@ impl StateManager {
             .await
             .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
 
-        rows.into_iter()
-            .map(|row| self.row_to_volume(row))
-            .collect()
+        rows.into_iter().map(|row| self.row_to_volume(row)).collect()
     }
 
     /// Delete a volume.
@@ -443,11 +415,8 @@ impl StateManager {
     /// Insert a new network.
     #[instrument(skip(self), fields(network_id = %network.id))]
     pub async fn insert_network(&self, network: &Network) -> Result<()> {
-        let created_at = network
-            .created_at
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        let created_at =
+            network.created_at.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as i64;
 
         sqlx::query(
             r#"
@@ -488,9 +457,7 @@ impl StateManager {
             .await
             .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
 
-        rows.into_iter()
-            .map(|row| self.row_to_network(row))
-            .collect()
+        rows.into_iter().map(|row| self.row_to_network(row)).collect()
     }
 
     /// Delete a network.
@@ -530,11 +497,8 @@ impl StateManager {
             HyprError::DatabaseError(format!("Failed to serialize services: {}", e))
         })?;
 
-        let created_at = stack
-            .created_at
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        let created_at =
+            stack.created_at.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as i64;
 
         sqlx::query(
             r#"
@@ -575,9 +539,7 @@ impl StateManager {
             .await
             .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
 
-        rows.into_iter()
-            .map(|row| self.row_to_stack(row))
-            .collect()
+        rows.into_iter().map(|row| self.row_to_stack(row)).collect()
     }
 
     /// Delete a stack.

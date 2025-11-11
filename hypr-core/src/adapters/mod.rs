@@ -6,8 +6,8 @@
 //! - Windows: WSL2 wrapper (future)
 
 use crate::error::Result;
-use crate::types::vm::{DiskConfig, GpuConfig, VmConfig, VmHandle};
 use crate::types::network::NetworkConfig;
+use crate::types::vm::{DiskConfig, GpuConfig, VmConfig, VmHandle};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::PathBuf;

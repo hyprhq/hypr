@@ -70,13 +70,7 @@ services:
 "#;
     let compose = ComposeParser::parse(yaml).unwrap();
     let service = &compose.services["db"];
-    let resources = service
-        .deploy
-        .as_ref()
-        .unwrap()
-        .resources
-        .as_ref()
-        .unwrap();
+    let resources = service.deploy.as_ref().unwrap().resources.as_ref().unwrap();
     assert_eq!(resources.get_cpu_limit(), Some(2.0));
     assert_eq!(resources.get_memory_mb(), Some(1024));
 }
@@ -152,14 +146,8 @@ services:
 "#;
     let compose = ComposeParser::parse(yaml).unwrap();
     let service = &compose.services["app"];
-    assert_eq!(
-        service.command,
-        Some(vec!["python".to_string(), "app.py".to_string()])
-    );
-    assert_eq!(
-        service.entrypoint,
-        Some(vec!["/bin/sh".to_string(), "-c".to_string()])
-    );
+    assert_eq!(service.command, Some(vec!["python".to_string(), "app.py".to_string()]));
+    assert_eq!(service.entrypoint, Some(vec!["/bin/sh".to_string(), "-c".to_string()]));
 }
 
 #[test]
@@ -190,14 +178,8 @@ services:
     let compose = ComposeParser::parse(yaml).unwrap();
     let service = &compose.services["app"];
     assert_eq!(service.labels.len(), 2);
-    assert_eq!(
-        service.labels.get("com.example.description"),
-        Some(&"Web application".to_string())
-    );
-    assert_eq!(
-        service.labels.get("com.example.version"),
-        Some(&"1.0".to_string())
-    );
+    assert_eq!(service.labels.get("com.example.description"), Some(&"Web application".to_string()));
+    assert_eq!(service.labels.get("com.example.version"), Some(&"1.0".to_string()));
 }
 
 #[test]
@@ -316,13 +298,7 @@ services:
 "#;
     let compose = ComposeParser::parse(yaml).unwrap();
     let service = &compose.services["app"];
-    let resources = service
-        .deploy
-        .as_ref()
-        .unwrap()
-        .resources
-        .as_ref()
-        .unwrap();
+    let resources = service.deploy.as_ref().unwrap().resources.as_ref().unwrap();
 
     // Test limits
     assert_eq!(resources.get_cpu_limit(), Some(2.0));

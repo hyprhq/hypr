@@ -17,9 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize health checker
     let health_checker = HealthChecker::new();
-    health_checker
-        .register_subsystem("daemon".to_string())
-        .await;
+    health_checker.register_subsystem("daemon".to_string()).await;
 
     // Initialize state manager
     let db_path = std::env::var("HYPR_DB_PATH").unwrap_or_else(|_| {
@@ -28,22 +26,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     info!("Initializing state manager at {}", db_path);
-    let _state = Arc::new(
-        StateManager::new(&db_path)
-            .await
-            .expect("Failed to initialize state manager"),
-    );
-    health_checker
-        .register_subsystem("database".to_string())
-        .await;
+    let _state =
+        Arc::new(StateManager::new(&db_path).await.expect("Failed to initialize state manager"));
+    health_checker.register_subsystem("database".to_string()).await;
 
     // Create VMM adapter (stub for now - will use KrunAdapter on macOS with feature flag)
     #[cfg(all(target_os = "macos", feature = "krun"))]
     {
         info!("Initializing VMM adapter");
         let _adapter: Arc<dyn VmmAdapter> = Arc::new(
-            hypr_core::adapters::KrunAdapter::new()
-                .expect("Failed to create KrunAdapter"),
+            hypr_core::adapters::KrunAdapter::new().expect("Failed to create KrunAdapter"),
         );
 
         health_checker.register_subsystem("adapter".to_string()).await;

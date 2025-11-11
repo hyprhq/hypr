@@ -22,10 +22,7 @@ impl BridgeManager for MacOSBridgeManager {
     #[instrument(skip(self), fields(bridge = %config.name))]
     async fn create_bridge(&self, config: &BridgeConfig) -> Result<()> {
         info!("Creating macOS bridge using vmnet framework");
-        info!(
-            "Bridge configuration: name={}, ip={}, mtu={}",
-            config.name, config.ip, config.mtu
-        );
+        info!("Bridge configuration: name={}, ip={}, mtu={}", config.name, config.ip, config.mtu);
 
         // On macOS, we use vmnet framework instead of manual bridge
         // The actual bridge is created by vfkit/hypervisor framework
