@@ -13,9 +13,13 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 
+# Utilities
+uuid = { workspace = true }
+
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = "0.9"
 
 # Database
 sqlx = { workspace = true }

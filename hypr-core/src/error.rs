@@ -53,6 +53,28 @@ pub enum HyprError {
         reason: String,
     },
 
+    #[error("Compose parse error: {reason}")]
+    ComposeParseError { reason: String },
+
+    #[error("Unsupported compose version: {version}")]
+    UnsupportedComposeVersion { version: String },
+
+    #[error("File read error: {path}: {source}")]
+    FileReadError {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("Circular dependency detected in service: {service}")]
+    CircularDependency { service: String },
+
+    #[error("Missing dependency: service '{service}' depends on '{dependency}' which does not exist")]
+    MissingDependency {
+        service: String,
+        dependency: String,
+    },
+
     // Network errors
     #[error("Port {port} already in use")]
     PortConflict { port: u16 },
