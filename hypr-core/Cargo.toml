@@ -29,3 +29,7 @@ opentelemetry_sdk = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+
+[features]
+# libkrun-efi support (macOS Metal GPU, Phase 4)
+krun = []
