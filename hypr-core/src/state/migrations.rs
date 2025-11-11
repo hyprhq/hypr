@@ -213,8 +213,7 @@ async fn migrate_to_v2(pool: &SqlitePool) -> Result<()> {
         CREATE TABLE IF NOT EXISTS ip_allocations (
             ip_address TEXT PRIMARY KEY,
             vm_id TEXT NOT NULL UNIQUE,
-            allocated_at INTEGER NOT NULL,
-            FOREIGN KEY (vm_id) REFERENCES vms(id) ON DELETE CASCADE
+            allocated_at INTEGER NOT NULL
         )
         "#,
     )

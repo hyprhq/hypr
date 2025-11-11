@@ -638,4 +638,38 @@ impl StateManager {
             ip_str.parse().ok()
         }))
     }
+
+    // ========================
+    // Port Mapping Operations (Stubs - Not Yet Implemented)
+    // ========================
+
+    /// Insert a port mapping (STUB).
+    #[allow(dead_code)]
+    pub async fn insert_port_mapping(&self, _mapping: &crate::network::port::PortMapping) -> Result<()> {
+        unimplemented!("Port mapping persistence not yet implemented")
+    }
+
+    /// List all port mappings (STUB).
+    #[allow(dead_code)]
+    pub async fn list_port_mappings(&self) -> Result<Vec<crate::network::port::PortMapping>> {
+        unimplemented!("Port mapping persistence not yet implemented")
+    }
+
+    /// Get port mappings for a specific VM (STUB).
+    #[allow(dead_code)]
+    pub async fn get_vm_port_mappings(&self, _vm_id: &str) -> Result<Vec<crate::network::port::PortMapping>> {
+        unimplemented!("Port mapping persistence not yet implemented")
+    }
+
+    /// Delete a specific port mapping (STUB).
+    #[allow(dead_code)]
+    pub async fn delete_port_mapping(&self, _host_port: u16, _protocol: crate::types::network::Protocol) -> Result<()> {
+        unimplemented!("Port mapping persistence not yet implemented")
+    }
+
+    /// Delete all port mappings for a VM (STUB).
+    #[allow(dead_code)]
+    pub async fn delete_vm_port_mappings(&self, _vm_id: &str) -> Result<()> {
+        unimplemented!("Port mapping persistence not yet implemented")
+    }
 }
