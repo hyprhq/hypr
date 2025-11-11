@@ -5,6 +5,7 @@
 pub mod adapters;
 pub mod error;
 pub mod observability;
+pub mod proto_convert;
 pub mod state;
 pub mod types;
 

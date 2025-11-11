@@ -1,0 +1,227 @@
+// HYPR gRPC API
+// Protocol buffer definitions for HYPR daemon <-> CLI communication
+
+syntax = "proto3";
+package hypr.v1;
+
+// ============================================================================
+// Service Definition
+// ============================================================================
+
+service HyprService {
+  // VM operations
+  rpc CreateVM(CreateVMRequest) returns (CreateVMResponse);
+  rpc StartVM(StartVMRequest) returns (StartVMResponse);
+  rpc StopVM(StopVMRequest) returns (StopVMResponse);
+  rpc DeleteVM(DeleteVMRequest) returns (DeleteVMResponse);
+  rpc ListVms(ListVmsRequest) returns (ListVmsResponse);
+  rpc GetVM(GetVMRequest) returns (GetVMResponse);
+
+  // Image operations
+  rpc ListImages(ListImagesRequest) returns (ListImagesResponse);
+  rpc DeleteImage(DeleteImageRequest) returns (DeleteImageResponse);
+
+  // Health
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+// ============================================================================
+// VM Types
+// ============================================================================
+
+message VM {
+  string id = 1;
+  string name = 2;
+  string image_id = 3;
+  string status = 4; // "creating", "running", "stopped", "failed", "deleting"
+  VMConfig config = 5;
+  optional string ip_address = 6;
+  optional uint32 pid = 7;
+  int64 created_at = 8; // Unix timestamp
+  optional int64 started_at = 9;
+  optional int64 stopped_at = 10;
+}
+
+message VMConfig {
+  string id = 1;
+  string name = 2;
+  VMResources resources = 3;
+  repeated DiskConfig disks = 4;
+  NetworkConfig network = 5;
+  repeated PortMapping ports = 6;
+  map<string, string> env = 7;
+  repeated VolumeMount volumes = 8;
+  repeated string kernel_args = 9;
+  optional string kernel_path = 10;
+  optional GpuConfig gpu = 11;
+  string vsock_path = 12;
+}
+
+message VMResources {
+  uint32 cpus = 1;
+  uint32 memory_mb = 2;
+}
+
+message DiskConfig {
+  string path = 1;
+  bool readonly = 2;
+  string format = 3; // "squashfs", "ext4", "raw"
+}
+
+message NetworkConfig {
+  string mode = 1; // "bridge", "host", "none"
+  optional string cidr = 2;
+  optional string gateway = 3;
+}
+
+message PortMapping {
+  uint32 host_port = 1;
+  uint32 guest_port = 2;
+  string protocol = 3; // "tcp", "udp"
+}
+
+message VolumeMount {
+  string source = 1; // Host path or volume ID
+  string target = 2; // Guest mount point
+  bool readonly = 3;
+}
+
+message GpuConfig {
+  string vendor = 1; // "nvidia", "amd", "intel", "metal"
+  optional string pci_address = 2;
+  string model = 3;
+  bool use_sriov = 4;
+  optional uint64 gpu_memory_mb = 5;
+}
+
+// ============================================================================
+// Image Types
+// ============================================================================
+
+message Image {
+  string id = 1;
+  string name = 2;
+  string tag = 3;
+  ImageManifest manifest = 4;
+  string rootfs_path = 5;
+  uint64 size_bytes = 6;
+  int64 created_at = 7;
+}
+
+message ImageManifest {
+  string version = 1;
+  string name = 2;
+  string tag = 3;
+  string architecture = 4;
+  string os = 5;
+  repeated string entrypoint = 6;
+  repeated string cmd = 7;
+  map<string, string> env = 8;
+  string workdir = 9;
+  repeated uint32 exposed_ports = 10;
+  RuntimeConfig runtime = 11;
+  optional HealthCheckConfig health = 12;
+}
+
+message RuntimeConfig {
+  uint32 default_memory_mb = 1;
+  uint32 default_cpus = 2;
+  string kernel_channel = 3;
+  string rootfs_type = 4;
+  string restart_policy = 5; // "no", "always", "on_failure", "unless_stopped"
+}
+
+message HealthCheckConfig {
+  string check_type = 1; // "http", "tcp", "exec"
+  optional string endpoint = 2;
+  uint32 port = 3;
+  uint32 interval_sec = 4;
+  uint32 timeout_sec = 5;
+  uint32 retries = 6;
+}
+
+// ============================================================================
+// Request/Response Messages
+// ============================================================================
+
+// VM Operations
+
+message CreateVMRequest {
+  string name = 1;
+  VMConfig config = 2;
+}
+
+message CreateVMResponse {
+  VM vm = 1;
+}
+
+message StartVMRequest {
+  string id = 1;
+}
+
+message StartVMResponse {
+  VM vm = 1;
+}
+
+message StopVMRequest {
+  string id = 1;
+  optional uint32 timeout_sec = 2; // Default: 30
+}
+
+message StopVMResponse {
+  VM vm = 1;
+}
+
+message DeleteVMRequest {
+  string id = 1;
+  bool force = 2; // Force delete even if running
+}
+
+message DeleteVMResponse {
+  bool success = 1;
+}
+
+message ListVmsRequest {
+  optional string filter = 1; // Future: filter by status, image, etc.
+}
+
+message ListVmsResponse {
+  repeated VM vms = 1;
+}
+
+message GetVMRequest {
+  string id = 1;
+}
+
+message GetVMResponse {
+  VM vm = 1;
+}
+
+// Image Operations
+
+message ListImagesRequest {
+  optional string filter = 1;
+}
+
+message ListImagesResponse {
+  repeated Image images = 1;
+}
+
+message DeleteImageRequest {
+  string id = 1;
+  bool force = 2;
+}
+
+message DeleteImageResponse {
+  bool success = 1;
+}
+
+// Health Check
+
+message HealthRequest {}
+
+message HealthResponse {
+  string status = 1; // "healthy", "degraded", "unhealthy"
+  string version = 2;
+  map<string, string> details = 3;
+}

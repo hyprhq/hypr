@@ -30,6 +30,9 @@ tracing-opentelemetry = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 
+# gRPC API
+hypr-api = { path = "../hypr-api" }
+
 [features]
 # libkrun-efi support (macOS Metal GPU, Phase 4)
 krun = []
