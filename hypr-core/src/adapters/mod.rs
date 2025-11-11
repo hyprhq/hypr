@@ -79,3 +79,21 @@ pub struct AdapterCapabilities {
     /// Additional metadata
     pub metadata: HashMap<String, String>,
 }
+
+#[cfg(all(target_os = "macos", feature = "krun"))]
+pub mod krun;
+
+#[cfg(all(target_os = "macos", feature = "krun"))]
+pub use krun::KrunAdapter;
+
+#[cfg(target_os = "macos")]
+pub mod hvf;
+
+#[cfg(target_os = "macos")]
+pub use hvf::HvfAdapter;
+
+#[cfg(target_os = "linux")]
+pub mod cloudhypervisor;
+
+#[cfg(target_os = "linux")]
+pub use cloudhypervisor::CloudHypervisorAdapter;
