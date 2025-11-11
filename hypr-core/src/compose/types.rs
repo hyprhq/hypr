@@ -25,7 +25,7 @@ pub struct ComposeFile {
 }
 
 /// A service in a docker-compose file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Service {
     /// Container image to use
     pub image: String,
