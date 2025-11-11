@@ -141,7 +141,7 @@ impl VmmAdapter for HvfAdapter {
 
         // Spawn vfkit process
         let start = Instant::now();
-        let mut child = Command::new(&self.binary_path)
+        let child = Command::new(&self.binary_path)
             .args(&args)
             .spawn()
             .map_err(|e| HyprError::VmStartFailed {
@@ -175,7 +175,7 @@ impl VmmAdapter for HvfAdapter {
     }
 
     #[instrument(skip(self), fields(vm_id = %handle.id))]
-    async fn start(&self, _handle: &VmHandle) -> Result<()> {
+    async fn start(&self, handle: &VmHandle) -> Result<()> {
         info!("Starting VM");
         // vfkit boots immediately when spawned
         info!("VM started (auto-boot mode)");
@@ -229,7 +229,7 @@ impl VmmAdapter for HvfAdapter {
     }
 
     #[instrument(skip(self), fields(vm_id = %handle.id))]
-    async fn delete(&self, _handle: &VmHandle) -> Result<()> {
+    async fn delete(&self, handle: &VmHandle) -> Result<()> {
         info!("Deleting VM resources");
         // vfkit doesn't create persistent resources
         info!("VM resources deleted");
