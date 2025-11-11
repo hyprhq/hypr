@@ -80,8 +80,25 @@ pub struct AdapterCapabilities {
     pub metadata: HashMap<String, String>,
 }
 
+// Platform-specific adapters
+#[cfg(target_os = "linux")]
+pub mod cloudhypervisor;
+
+#[cfg(target_os = "macos")]
+pub mod hvf;
+
 #[cfg(all(target_os = "macos", feature = "krun"))]
 pub mod krun;
 
+// Re-export adapter types with proper cfg gates
+#[cfg(target_os = "linux")]
+pub use cloudhypervisor::CloudHypervisorAdapter;
+
+#[cfg(target_os = "macos")]
+pub use hvf::HvfAdapter;
+
 #[cfg(all(target_os = "macos", feature = "krun"))]
 pub use krun::KrunAdapter;
+
+mod factory;
+pub use factory::AdapterFactory;
