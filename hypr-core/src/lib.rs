@@ -5,6 +5,7 @@
 pub mod adapters;
 pub mod compose;
 pub mod error;
+pub mod network;
 pub mod observability;
 pub mod proto_convert;
 pub mod state;
@@ -13,6 +14,7 @@ pub mod types;
 // Re-export commonly used items
 pub use compose::{ComposeFile, ComposeParser};
 pub use error::{HyprError, Result};
+pub use network::{create_bridge_manager, BridgeConfig, BridgeManager};
 pub use observability::{
     health::HealthChecker, init as init_observability, shutdown as shutdown_observability,
 };
