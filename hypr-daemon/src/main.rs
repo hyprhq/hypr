@@ -1,7 +1,9 @@
-use hypr_core::adapters::VmmAdapter;
-use hypr_core::{init_observability, shutdown_observability, HealthChecker, StateManager};
+use hypr_core::{init_observability, HealthChecker, StateManager};
 use std::sync::Arc;
 use tracing::info;
+
+#[cfg(all(target_os = "macos", feature = "krun"))]
+use hypr_core::{adapters::VmmAdapter, shutdown_observability};
 
 #[allow(unused_imports)]
 mod api;
