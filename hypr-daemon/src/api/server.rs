@@ -270,6 +270,65 @@ impl HyprService for HyprServiceImpl {
 
         Ok(Response::new(response))
     }
+
+    #[instrument(skip(self))]
+    async fn deploy_stack(
+        &self,
+        request: Request<DeployStackRequest>,
+    ) -> std::result::Result<Response<DeployStackResponse>, Status> {
+        info!("gRPC: DeployStack");
+
+        let _req = request.into_inner();
+
+        // TODO: Implement with StackOrchestrator (Task 2.10)
+        // For now, return unimplemented
+        Err(Status::unimplemented(
+            "Stack deployment will be available after Task 2.10 restoration",
+        ))
+    }
+
+    #[instrument(skip(self))]
+    async fn destroy_stack(
+        &self,
+        request: Request<DestroyStackRequest>,
+    ) -> std::result::Result<Response<DestroyStackResponse>, Status> {
+        info!("gRPC: DestroyStack");
+
+        let _req = request.into_inner();
+
+        // TODO: Implement with StackOrchestrator (Task 2.10)
+        Err(Status::unimplemented(
+            "Stack destruction will be available after Task 2.10 restoration",
+        ))
+    }
+
+    #[instrument(skip(self))]
+    async fn list_stacks(
+        &self,
+        _request: Request<ListStacksRequest>,
+    ) -> std::result::Result<Response<ListStacksResponse>, Status> {
+        info!("gRPC: ListStacks");
+
+        // TODO: Implement with StackOrchestrator (Task 2.10)
+        Err(Status::unimplemented(
+            "Stack listing will be available after Task 2.10 restoration",
+        ))
+    }
+
+    #[instrument(skip(self))]
+    async fn get_stack(
+        &self,
+        request: Request<GetStackRequest>,
+    ) -> std::result::Result<Response<GetStackResponse>, Status> {
+        info!("gRPC: GetStack");
+
+        let _req = request.into_inner();
+
+        // TODO: Implement with StackOrchestrator (Task 2.10)
+        Err(Status::unimplemented(
+            "Stack retrieval will be available after Task 2.10 restoration",
+        ))
+    }
 }
 
 /// Start the gRPC API server on Unix socket
