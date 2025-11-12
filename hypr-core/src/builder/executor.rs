@@ -1216,6 +1216,12 @@ impl MacOsBuilder {
         std::fs::create_dir_all(&workdir_path)?;
         Ok(None)
     }
+
+    fn execute_user(&mut self, user: &str) -> BuildResult<Option<PathBuf>> {
+        // USER just tracks the user, doesn't create a layer
+        self.current_user = user.to_string();
+        Ok(None)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1260,6 +1266,9 @@ impl BuildExecutor for MacOsBuilder {
                 }
                 crate::builder::parser::Instruction::Workdir { path } => {
                     self.execute_workdir(&path)?;
+                }
+                crate::builder::parser::Instruction::User { user } => {
+                    self.execute_user(&user)?;
                 }
                 _ => {} // Skip other instructions for now
             }
