@@ -92,6 +92,12 @@ impl CloudHypervisorAdapter {
             args.push(config.kernel_args.join(" "));
         }
 
+        // Initramfs (for minimal boot environments like builder VMs)
+        if let Some(initramfs) = &config.initramfs_path {
+            args.push("--initramfs".to_string());
+            args.push(initramfs.to_string_lossy().to_string());
+        }
+
         // Disks
         for disk in &config.disks {
             args.push("--disk".to_string());
@@ -104,14 +110,24 @@ impl CloudHypervisorAdapter {
         }
 
         // virtio-fs mounts
-        for mount in &config.virtio_fs_mounts {
-            args.push("--fs".to_string());
-            args.push(format!(
-                "tag={},socket={},num_queues=1",
-                mount.tag,
-                mount.host_path.join(format!("{}-virtiofs.sock", mount.tag)).display()
-            ));
+        // TODO(Phase 3): Implement virtiofsd daemon management
+        // Cloud-hypervisor's --fs requires external virtiofsd daemons to be running
+        // For MVP, we disable virtio-fs and will use vsock for file transfer instead
+        if !config.virtio_fs_mounts.is_empty() {
+            warn!(
+                "virtio-fs mounts requested but not yet implemented (need virtiofsd daemons). \
+                 Mounts will be ignored: {:?}",
+                config.virtio_fs_mounts.iter().map(|m| &m.tag).collect::<Vec<_>>()
+            );
         }
+        // for mount in &config.virtio_fs_mounts {
+        //     args.push("--fs".to_string());
+        //     args.push(format!(
+        //         "tag={},socket={},num_queues=1",
+        //         mount.tag,
+        //         mount.host_path.join(format!("{}-virtiofs.sock", mount.tag)).display()
+        //     ));
+        // }
 
         // Network (simplified - will be enhanced in Phase 2)
         args.push("--net".to_string());
