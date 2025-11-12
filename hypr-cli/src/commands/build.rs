@@ -182,7 +182,12 @@ pub async fn build(
     println!("{} Registering image", "»".bold().blue());
 
     // Move rootfs to permanent location
-    let images_dir = PathBuf::from("/var/lib/hypr/images");
+    let images_dir = if cfg!(target_os = "linux") {
+        PathBuf::from("/var/lib/hypr/images")
+    } else {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(format!("{}/.hypr/images", home))
+    };
     let image_dir = images_dir.join(&output.image_id);
 
     // Create image directory

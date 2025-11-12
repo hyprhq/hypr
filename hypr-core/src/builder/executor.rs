@@ -1146,17 +1146,18 @@ impl MacOsVmBuilder {
         }
 
         // Execute in VM with base rootfs
-        tokio::runtime::Runtime::new()
-            .map_err(|e| BuildError::ContextError(format!("Failed to create runtime: {}", e)))?
-            .block_on(async {
+        // Use block_in_place to avoid nested runtime issues when called from async context
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
                 self.vm_builder
                     .execute_step(&step, &context_dir, &output_layer, self.base_rootfs.as_deref())
                     .await
             })
-            .map_err(|e| BuildError::InstructionFailed {
-                instruction: format!("RUN {}", command),
-                details: e.to_string(),
-            })?;
+        })
+        .map_err(|e| BuildError::InstructionFailed {
+            instruction: format!("RUN {}", command),
+            details: e.to_string(),
+        })?;
 
         Ok(output_layer)
     }
