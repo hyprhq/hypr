@@ -1318,8 +1318,14 @@ impl BuildExecutor for LinuxVmBuilder {
             .map(|m| m.len())
             .unwrap_or(0);
 
+        // Generate image ID from config hash
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(format!("{:?}", self.config).as_bytes());
+        let image_id = format!("{:x}", hasher.finalize());
+
         Ok(BuildOutput {
-            image_id: format!("{:x}", md5::compute(format!("{:?}", self.config))),
+            image_id,
             rootfs_path: squashfs_path,
             manifest,
             stats: BuildStats {
