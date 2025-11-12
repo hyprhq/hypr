@@ -56,7 +56,7 @@ use metrics::{counter, gauge};
 use tracing::{debug, error, info, instrument, warn};
 
 #[cfg(target_os = "linux")]
-use libbpf_rs::{Link, MapCore, Object, ObjectBuilder, TcHookBuilder};
+use libbpf_rs::{Link, MapCore, Object, ObjectBuilder, TcHook, TcHookBuilder, TC_INGRESS};
 #[cfg(target_os = "linux")]
 use std::os::fd::AsFd;
 
@@ -330,11 +330,14 @@ impl DriftManager {
             HyprError::EbpfAttachError(format!("Failed to get interface index: {}", e))
         })? as i32;
 
-        let mut ingress_hook = TcHookBuilder::new(ingress_prog.as_fd())
+        let mut tc_builder = TcHookBuilder::new(ingress_prog.as_fd());
+        tc_builder
             .ifindex(ifindex)
             .replace(true)
             .handle(1)
             .priority(1);
+
+        let mut ingress_hook = tc_builder.hook(TC_INGRESS);
 
         ingress_hook.create().map_err(|e| {
             error!("Failed to create TC ingress hook: {}", e);
