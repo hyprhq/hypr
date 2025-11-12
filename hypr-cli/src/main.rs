@@ -43,6 +43,9 @@ enum Commands {
     /// List all VMs
     Ps,
 
+    /// List all images
+    Images,
+
     /// Start a VM
     Start {
         /// VM ID or name
@@ -199,6 +202,10 @@ async fn main() -> Result<()> {
 
         Commands::Ps => {
             commands::ps().await?;
+        }
+
+        Commands::Images => {
+            commands::images().await?;
         }
 
         Commands::Start { vm } => {
