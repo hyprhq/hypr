@@ -151,6 +151,7 @@ pub async fn build(
     println!();
     println!("  Image ID:    {}", output.image_id.cyan());
     println!("  Name:        {}:{}", image_name.green(), image_tag.cyan());
+    println!("  Rootfs:      {}", output.rootfs_path.display().to_string().yellow());
     println!(
         "  Layers:      {} ({} cached)",
         output.stats.layer_count, output.stats.cached_layers
