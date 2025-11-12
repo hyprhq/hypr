@@ -208,10 +208,13 @@ impl DriftManager {
         debug!("Adding port mapping: {}", mapping);
 
         // Get portmap from eBPF object
-        let portmap = self.obj.map("portmap").ok_or_else(|| {
-            error!("portmap not found in eBPF object");
-            HyprError::EbpfMapError("portmap not found".to_string())
-        })?;
+        let portmap = self.obj
+            .maps()
+            .find(|m| m.name() == "portmap")
+            .ok_or_else(|| {
+                error!("portmap not found in eBPF object");
+                HyprError::EbpfMapError("portmap not found".to_string())
+            })?;
 
         // Construct key (protocol, port)
         // Key structure: [proto: u8, pad: u8, port: u16 (network byte order)]
@@ -263,10 +266,13 @@ impl DriftManager {
     pub fn remove_port_mapping(&self, protocol: Protocol, host_port: u16) -> Result<()> {
         debug!("Removing port mapping: {}:{}", protocol, host_port);
 
-        let portmap = self.obj.map("portmap").ok_or_else(|| {
-            error!("portmap not found in eBPF object");
-            HyprError::EbpfMapError("portmap not found".to_string())
-        })?;
+        let portmap = self.obj
+            .maps()
+            .find(|m| m.name() == "portmap")
+            .ok_or_else(|| {
+                error!("portmap not found in eBPF object");
+                HyprError::EbpfMapError("portmap not found".to_string())
+            })?;
 
         // Construct key
         let mut key = [0u8; 4];
@@ -308,14 +314,16 @@ impl DriftManager {
         info!("Attaching eBPF programs to interface {}", self.interface);
 
         // Get program FDs
-        let ingress_prog = self.obj.prog("drift_l4_ingress").ok_or_else(|| {
-            error!("drift_l4_ingress program not found");
-            HyprError::EbpfLoadError("drift_l4_ingress not found".to_string())
-        })?;
+        let ingress_prog = self.obj
+            .progs()
+            .find(|p| p.name() == "drift_l4_ingress")
+            .ok_or_else(|| {
+                error!("drift_l4_ingress program not found");
+                HyprError::EbpfLoadError("drift_l4_ingress not found".to_string())
+            })?;
 
         // Create TC ingress hook
-        let mut ingress_hook = TcHookBuilder::new()
-            .fd(ingress_prog.as_fd())
+        let mut ingress_hook = TcHookBuilder::new(ingress_prog.as_fd())
             .ifindex(nix::net::if_::if_nametoindex(self.interface.as_str()).map_err(|e| {
                 error!("Failed to get interface index: {}", e);
                 HyprError::EbpfAttachError(format!("Failed to get interface index: {}", e))
@@ -380,10 +388,13 @@ impl DriftManager {
     /// Returns error if stats map cannot be read.
     #[instrument(skip(self))]
     pub fn get_stats(&self) -> Result<DriftStats> {
-        let stats_map = self.obj.map("stats").ok_or_else(|| {
-            error!("stats map not found in eBPF object");
-            HyprError::EbpfMapError("stats not found".to_string())
-        })?;
+        let stats_map = self.obj
+            .maps()
+            .find(|m| m.name() == "stats")
+            .ok_or_else(|| {
+                error!("stats map not found in eBPF object");
+                HyprError::EbpfMapError("stats not found".to_string())
+            })?;
 
         let mut stats = DriftStats::default();
 
