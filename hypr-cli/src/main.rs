@@ -69,6 +69,33 @@ enum Commands {
         force: bool,
     },
 
+    /// Build an image from a Dockerfile
+    Build {
+        /// Path to build context directory
+        #[arg(default_value = ".")]
+        path: String,
+
+        /// Name and tag for the image (e.g., "myapp:latest")
+        #[arg(short, long)]
+        tag: Option<String>,
+
+        /// Path to Dockerfile (relative to context)
+        #[arg(short, long, default_value = "Dockerfile")]
+        file: String,
+
+        /// Build argument (KEY=VALUE)
+        #[arg(long)]
+        build_arg: Vec<String>,
+
+        /// Target build stage (for multi-stage builds)
+        #[arg(long)]
+        target: Option<String>,
+
+        /// Disable build cache
+        #[arg(long)]
+        no_cache: bool,
+    },
+
     /// List images
     Images,
 
@@ -185,6 +212,22 @@ async fn main() -> Result<()> {
             if success {
                 println!("VM deleted: {}", vm);
             }
+        }
+
+        Commands::Build { path, tag, file, build_arg, target, no_cache } => {
+            // Parse build args
+            let build_args: Vec<(String, String)> = build_arg
+                .iter()
+                .map(|arg| {
+                    let parts: Vec<&str> = arg.splitn(2, '=').collect();
+                    if parts.len() != 2 {
+                        return Err(anyhow::anyhow!("Invalid build-arg format: {}", arg));
+                    }
+                    Ok((parts[0].to_string(), parts[1].to_string()))
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            commands::build::build(&path, tag.as_deref(), &file, build_args, target.as_deref(), no_cache).await?;
         }
 
         Commands::Images => {
