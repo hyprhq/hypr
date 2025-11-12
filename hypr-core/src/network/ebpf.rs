@@ -57,6 +57,8 @@ use tracing::{debug, error, info, instrument, warn};
 
 #[cfg(target_os = "linux")]
 use libbpf_rs::{Link, MapCore, Object, ObjectBuilder, TcHookBuilder};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsFd;
 
 /// Network protocol for port forwarding rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -323,15 +325,16 @@ impl DriftManager {
             })?;
 
         // Create TC ingress hook
+        let ifindex = nix::net::if_::if_nametoindex(self.interface.as_str()).map_err(|e| {
+            error!("Failed to get interface index: {}", e);
+            HyprError::EbpfAttachError(format!("Failed to get interface index: {}", e))
+        })? as i32;
+
         let mut ingress_hook = TcHookBuilder::new(ingress_prog.as_fd())
-            .ifindex(nix::net::if_::if_nametoindex(self.interface.as_str()).map_err(|e| {
-                error!("Failed to get interface index: {}", e);
-                HyprError::EbpfAttachError(format!("Failed to get interface index: {}", e))
-            })? as i32)
+            .ifindex(ifindex)
             .replace(true)
             .handle(1)
-            .priority(1)
-            .build();
+            .priority(1);
 
         ingress_hook.create().map_err(|e| {
             error!("Failed to create TC ingress hook: {}", e);
