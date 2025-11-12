@@ -595,19 +595,13 @@ impl NativeBuilder {
                 info!("FROM {}: pulling base image from registry", image_str);
 
                 // Pull image using OCI client
-                let runtime = tokio::runtime::Handle::try_current()
-                    .unwrap_or_else(|_| {
-                        // Create a new runtime if not in async context
-                        tokio::runtime::Runtime::new()
-                            .expect("Failed to create tokio runtime")
-                            .handle()
-                            .clone()
-                    });
-
-                runtime.block_on(async {
-                    self.oci_client
-                        .pull_image(&image_str, &self.current_rootfs)
-                        .await
+                // Use block_in_place to avoid nested runtime issues when called from async context
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        self.oci_client
+                            .pull_image(&image_str, &self.current_rootfs)
+                            .await
+                    })
                 })?;
 
                 info!("Base image extracted successfully to {}", self.current_rootfs.display());
@@ -1130,15 +1124,11 @@ impl MacOsBuilder {
 
                 info!("FROM {}: pulling base image", image_str);
 
-                let runtime = tokio::runtime::Handle::try_current().unwrap_or_else(|_| {
-                    tokio::runtime::Runtime::new()
-                        .expect("Failed to create tokio runtime")
-                        .handle()
-                        .clone()
-                });
-
-                runtime.block_on(async {
-                    self.oci_client.pull_image(&image_str, &self.current_rootfs).await
+                // Use block_in_place to avoid nested runtime issues when called from async context
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        self.oci_client.pull_image(&image_str, &self.current_rootfs).await
+                    })
                 })?;
 
                 info!("Base image extracted");
