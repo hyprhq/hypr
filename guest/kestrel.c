@@ -38,6 +38,7 @@
 #include <sys/wait.h>
 #include <sys/mount.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <linux/vm_sockets.h>  // AF_VSOCK
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -202,14 +203,149 @@ static void mount_essentials_build(void) {
 // ============================================================================
 // BUILD MODE - HTTP PROXY (Direct vsock forwarding, no socat)
 // ============================================================================
-// TODO: Implement direct HTTP proxy via vsock
-// For now, this is a placeholder. The host proxy runs on vsock:41010.
-// Build commands will set http_proxy=http://localhost:41010 which requires
-// a local listener that forwards to vsock. This can be implemented later
-// as a background thread or we rely on the host to handle it differently.
-//
-// Current approach: Commands will connect to localhost:41010, which will
-// fail if not implemented. For MVP, we'll document this limitation.
+
+// Forward data from one fd to another
+static ssize_t forward_data(int from_fd, int to_fd, char *buf, size_t bufsize) {
+    ssize_t n = read(from_fd, buf, bufsize);
+    if (n <= 0) return n;
+
+    ssize_t written = 0;
+    while (written < n) {
+        ssize_t w = write(to_fd, buf + written, n - written);
+        if (w <= 0) return -1;
+        written += w;
+    }
+    return n;
+}
+
+// Handle one HTTP proxy connection: TCP client <-> vsock host
+static void handle_http_proxy_connection(int client_fd) {
+    // Connect to host vsock:41010
+    int vsock_fd = socket(AF_VSOCK, SOCK_STREAM, 0);
+    if (vsock_fd < 0) {
+        LOG("HTTP proxy: socket(AF_VSOCK) failed: %s", strerror(errno));
+        close(client_fd);
+        return;
+    }
+
+    struct sockaddr_vm host_addr = {
+        .svm_family = AF_VSOCK,
+        .svm_cid = 2, // Host CID
+        .svm_port = VSOCK_PORT_HTTP_PROXY,
+    };
+
+    if (connect(vsock_fd, (struct sockaddr*)&host_addr, sizeof(host_addr)) < 0) {
+        LOG("HTTP proxy: connect to host vsock:%d failed: %s",
+            VSOCK_PORT_HTTP_PROXY, strerror(errno));
+        close(vsock_fd);
+        close(client_fd);
+        return;
+    }
+
+    // Set non-blocking for select()
+    fcntl(client_fd, F_SETFL, O_NONBLOCK);
+    fcntl(vsock_fd, F_SETFL, O_NONBLOCK);
+
+    // Bidirectional forwarding loop
+    char buf[8192];
+    fd_set readfds;
+    int maxfd = (client_fd > vsock_fd) ? client_fd : vsock_fd;
+
+    for (;;) {
+        FD_ZERO(&readfds);
+        FD_SET(client_fd, &readfds);
+        FD_SET(vsock_fd, &readfds);
+
+        struct timeval timeout = {.tv_sec = 300, .tv_usec = 0}; // 5 min timeout
+        int ret = select(maxfd + 1, &readfds, NULL, NULL, &timeout);
+
+        if (ret < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (ret == 0) break; // Timeout
+
+        // Forward client → host
+        if (FD_ISSET(client_fd, &readfds)) {
+            ssize_t n = forward_data(client_fd, vsock_fd, buf, sizeof(buf));
+            if (n <= 0) break;
+        }
+
+        // Forward host → client
+        if (FD_ISSET(vsock_fd, &readfds)) {
+            ssize_t n = forward_data(vsock_fd, client_fd, buf, sizeof(buf));
+            if (n <= 0) break;
+        }
+    }
+
+    close(vsock_fd);
+    close(client_fd);
+}
+
+// Background process: HTTP proxy server (TCP localhost:41010 → vsock host:41010)
+static pid_t start_http_proxy(void) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        FATAL("Failed to fork for HTTP proxy: %s", strerror(errno));
+    }
+
+    if (pid > 0) {
+        // Parent: return child PID
+        LOG("HTTP proxy started (pid=%d): TCP localhost:41010 → vsock host:41010", pid);
+        return pid;
+    }
+
+    // Child: run HTTP proxy server
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd < 0) {
+        FATAL("HTTP proxy: socket() failed: %s", strerror(errno));
+    }
+
+    int opt = 1;
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr = {
+        .sin_family = AF_INET,
+        .sin_port = htons(VSOCK_PORT_HTTP_PROXY),
+        .sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+    };
+
+    if (bind(listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        FATAL("HTTP proxy: bind(localhost:41010) failed: %s", strerror(errno));
+    }
+
+    if (listen(listen_fd, 128) < 0) {
+        FATAL("HTTP proxy: listen() failed: %s", strerror(errno));
+    }
+
+    LOG("HTTP proxy listening on localhost:41010");
+
+    // Accept loop
+    for (;;) {
+        int client_fd = accept(listen_fd, NULL, NULL);
+        if (client_fd < 0) {
+            if (errno == EINTR) continue;
+            LOG("HTTP proxy: accept() failed: %s", strerror(errno));
+            continue;
+        }
+
+        // Fork per connection (simple, no thread pool needed for builds)
+        pid_t conn_pid = fork();
+        if (conn_pid == 0) {
+            // Connection handler child
+            close(listen_fd);
+            handle_http_proxy_connection(client_fd);
+            exit(0);
+        }
+
+        close(client_fd); // Parent closes its copy
+
+        // Reap finished connections (non-blocking)
+        while (waitpid(-1, NULL, WNOHANG) > 0);
+    }
+
+    exit(0); // Never reached
+}
 
 // ============================================================================
 // BUILD MODE - COMMAND EXECUTION
@@ -231,8 +367,7 @@ static int execute_shell_command(const char *cmd, const char *workdir) {
             exit(127);
         }
 
-        // Set HTTP proxy environment
-        // NOTE: Currently requires local listener on 41010 (not implemented yet)
+        // Set HTTP proxy environment (forwarded via vsock to host)
         setenv("http_proxy", "http://localhost:41010", 1);
         setenv("https_proxy", "http://localhost:41010", 1);
         setenv("HTTP_PROXY", "http://localhost:41010", 1);
@@ -400,9 +535,11 @@ static void run_build_mode(void) {
     // Mount essential filesystems
     mount_essentials_build();
 
-    // TODO: Start HTTP proxy forwarding thread (vsock → host:41010)
-    // For now, this is not implemented. Build commands that need HTTP
-    // will fail unless the base image has networking configured differently.
+    // Start HTTP proxy (TCP localhost:41010 → vsock host:41010)
+    start_http_proxy();
+
+    // Give proxy a moment to start listening
+    usleep(100000); // 100ms
 
     // Start vsock server for build commands
     int sock = socket(AF_VSOCK, SOCK_STREAM, 0);
