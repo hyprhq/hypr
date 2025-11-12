@@ -20,6 +20,8 @@ pub struct HvfAdapter {
     binary_path: PathBuf,
     /// Default kernel path
     kernel_path: PathBuf,
+    /// Path to empty initrd (required by vfkit)
+    initrd_path: PathBuf,
 }
 
 impl HvfAdapter {
@@ -27,10 +29,15 @@ impl HvfAdapter {
     pub fn new() -> Result<Self> {
         let binary_path = Self::find_binary()?;
         let kernel_path = PathBuf::from("/usr/local/lib/hypr/vmlinux");
+        let initrd_path = PathBuf::from("/usr/local/lib/hypr/empty-initrd.img");
+
+        // Create empty initrd if it doesn't exist
+        Self::ensure_empty_initrd(&initrd_path)?;
 
         Ok(Self {
             binary_path,
             kernel_path,
+            initrd_path,
         })
     }
 
@@ -53,6 +60,27 @@ impl HvfAdapter {
         })
     }
 
+    /// Ensure empty initrd file exists. vfkit requires an initrd even if empty.
+    fn ensure_empty_initrd(path: &PathBuf) -> Result<()> {
+        // Create parent directory if it doesn't exist
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| HyprError::IoError {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
+        }
+
+        // Create empty file if it doesn't exist
+        if !path.exists() {
+            std::fs::write(path, []).map_err(|e| HyprError::IoError {
+                path: path.clone(),
+                source: e,
+            })?;
+        }
+
+        Ok(())
+    }
+
     /// Build vfkit command-line arguments.
     #[instrument(skip(self))]
     fn build_args(&self, config: &VmConfig) -> Result<Vec<String>> {
@@ -66,15 +94,20 @@ impl HvfAdapter {
         args.push("--memory".to_string());
         args.push(format!("{}", config.resources.memory_mb));
 
-        // Bootloader (kernel + cmdline)
+        // Kernel
         let kernel = config.kernel_path.as_ref().unwrap_or(&self.kernel_path);
-        args.push("--bootloader".to_string());
-        let cmdline = if config.kernel_args.is_empty() {
-            kernel.to_string_lossy().to_string()
-        } else {
-            format!("{},{}", kernel.display(), config.kernel_args.join(" "))
-        };
-        args.push(cmdline);
+        args.push("--kernel".to_string());
+        args.push(kernel.to_string_lossy().to_string());
+
+        // Initrd (required by vfkit, even if empty)
+        args.push("--initrd".to_string());
+        args.push(self.initrd_path.to_string_lossy().to_string());
+
+        // Kernel command line
+        if !config.kernel_args.is_empty() {
+            args.push("--kernel-cmdline".to_string());
+            args.push(config.kernel_args.join(" "));
+        }
 
         // Disks
         for disk in &config.disks {
@@ -144,9 +177,12 @@ impl VmmAdapter for HvfAdapter {
         let child = Command::new(&self.binary_path)
             .args(&args)
             .spawn()
-            .map_err(|e| HyprError::VmStartFailed {
-                vm_id: config.id.clone(),
-                reason: format!("Failed to spawn vfkit: {}", e),
+            .map_err(|e| {
+                metrics::counter!("hypr_vm_start_failures_total", "adapter" => "hvf", "reason" => "spawn_failed").increment(1);
+                HyprError::VmStartFailed {
+                    vm_id: config.id.clone(),
+                    reason: format!("Failed to spawn vfkit: {}", e),
+                }
             })?;
 
         let pid = child.id().ok_or_else(|| HyprError::VmStartFailed {
@@ -217,6 +253,7 @@ impl VmmAdapter for HvfAdapter {
                 }
                 Err(e) => {
                     error!("Error killing VM process: {}", e);
+                    metrics::counter!("hypr_vm_stop_failures_total", "adapter" => "hvf", "reason" => "kill_failed").increment(1);
                     return Err(HyprError::VmStopFailed {
                         vm_id: handle.id.clone(),
                         reason: e.to_string(),
@@ -236,21 +273,27 @@ impl VmmAdapter for HvfAdapter {
         Ok(())
     }
 
+    #[instrument(skip(self, _disk), fields(vm_id = %_handle.id))]
     async fn attach_disk(&self, _handle: &VmHandle, _disk: &DiskConfig) -> Result<()> {
+        metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "hvf", "operation" => "attach_disk").increment(1);
         Err(HyprError::PlatformUnsupported {
             feature: "disk hotplug".to_string(),
             platform: "hvf (Phase 1)".to_string(),
         })
     }
 
+    #[instrument(skip(self, _net), fields(vm_id = %_handle.id))]
     async fn attach_network(&self, _handle: &VmHandle, _net: &NetworkConfig) -> Result<()> {
+        metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "hvf", "operation" => "attach_network").increment(1);
         Err(HyprError::PlatformUnsupported {
             feature: "network hotplug".to_string(),
             platform: "hvf (Phase 1)".to_string(),
         })
     }
 
+    #[instrument(skip(self, _gpu), fields(vm_id = %_handle.id))]
     async fn attach_gpu(&self, _handle: &VmHandle, _gpu: &GpuConfig) -> Result<()> {
+        metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "hvf", "operation" => "attach_gpu").increment(1);
         Err(HyprError::GpuUnavailable {
             reason: "HVF does not support GPU passthrough. Use libkrun-efi for Metal support."
                 .to_string(),

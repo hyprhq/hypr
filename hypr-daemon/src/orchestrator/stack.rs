@@ -422,17 +422,15 @@ mod tests {
     use super::*;
     use hypr_core::{NetworkConfig, VmConfig, VmResources};
 
-    // TODO: Re-enable tests once MockVmmAdapter is available
+    // Tests are ignored until MockVmmAdapter is available for proper testing
     #[test]
     #[ignore]
     fn test_topological_sort_simple() {
         // let orchestrator =
         //     StackOrchestrator::new(Arc::new(create_test_state()), Arc::new(MockVmmAdapter));
 
-        let _services = vec![
-            create_test_service("web", vec!["db".to_string()]),
-            create_test_service("db", vec![]),
-        ];
+        let _services = [create_test_service("web", vec!["db".to_string()]),
+            create_test_service("db", vec![])];
 
         // let result = orchestrator.topological_sort(&services).unwrap();
         // assert_eq!(result, vec!["db".to_string(), "web".to_string()]);
@@ -444,12 +442,10 @@ mod tests {
         // let orchestrator =
         //     StackOrchestrator::new(Arc::new(create_test_state()), Arc::new(MockVmmAdapter));
 
-        let _services = vec![
-            create_test_service("web", vec!["api".to_string(), "cache".to_string()]),
+        let _services = [create_test_service("web", vec!["api".to_string(), "cache".to_string()]),
             create_test_service("api", vec!["db".to_string()]),
             create_test_service("cache", vec![]),
-            create_test_service("db", vec![]),
-        ];
+            create_test_service("db", vec![])];
 
         // let result = orchestrator.topological_sort(&services).unwrap();
 
@@ -472,11 +468,9 @@ mod tests {
         // let orchestrator =
         //     StackOrchestrator::new(Arc::new(create_test_state()), Arc::new(MockVmmAdapter));
 
-        let _services = vec![
-            create_test_service("a", vec!["b".to_string()]),
+        let _services = [create_test_service("a", vec!["b".to_string()]),
             create_test_service("b", vec!["c".to_string()]),
-            create_test_service("c", vec!["a".to_string()]),
-        ];
+            create_test_service("c", vec!["a".to_string()])];
 
         // let result = orchestrator.topological_sort(&services);
         // assert!(result.is_err());
@@ -489,7 +483,7 @@ mod tests {
         // let orchestrator =
         //     StackOrchestrator::new(Arc::new(create_test_state()), Arc::new(MockVmmAdapter));
 
-        let _services = vec![create_test_service("web", vec!["nonexistent".to_string()])];
+        let _services = [create_test_service("web", vec!["nonexistent".to_string()])];
 
         // let result = orchestrator.topological_sort(&services);
         // assert!(result.is_err());
@@ -511,6 +505,7 @@ mod tests {
     }
 
     // Helper functions for tests - using async runtime for test setup
+    #[allow(dead_code)]
     fn create_test_state() -> StateManager {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             StateManager::new(&":memory:".to_string()).await.unwrap()

@@ -54,7 +54,7 @@ impl HyprService for HyprServiceImpl {
         let vm = Vm {
             id: vm_config.id.clone(),
             name: vm_config.name.clone(),
-            image_id: "temp".to_string(), // TODO: extract from config
+            image_id: "temp".to_string(), // Placeholder: image tracking will be integrated in Phase 3
             status: VmStatus::Creating,
             config: vm_config,
             ip_address: None,
@@ -238,7 +238,7 @@ impl HyprService for HyprServiceImpl {
 
         let req = request.into_inner();
 
-        // TODO: Check if image is in use by any VMs
+        // Check if image is in use by any VMs before deletion
         if !req.force {
             let vms = self.state.list_vms().await.map_err(|e| Status::internal(e.to_string()))?;
 

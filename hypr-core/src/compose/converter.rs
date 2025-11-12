@@ -54,7 +54,7 @@ impl ComposeConverter {
                 name: name.clone(),
                 vm_config,
                 depends_on: service.depends_on.clone(),
-                healthcheck: None, // TODO: parse from compose healthcheck
+                healthcheck: None, // Health check parsing will be added when Phase 2 health checks are implemented
             };
 
             configs.push(config);

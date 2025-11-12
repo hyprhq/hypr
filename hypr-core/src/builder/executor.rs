@@ -10,6 +10,7 @@ use crate::builder::graph::BuildGraph;
 use crate::builder::graph::BuildNode;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use tracing::{debug, info};
 
 /// Result type for build operations.
 pub type BuildResult<T> = Result<T, BuildError>;
@@ -465,23 +466,52 @@ impl NativeBuilder {
     fn copy_dir_all(src: &PathBuf, dst: &PathBuf) -> BuildResult<()> {
         use std::os::unix::fs::PermissionsExt;
 
+        debug!("copy_dir_all: Creating dest directory: {}", dst.display());
         std::fs::create_dir_all(dst).map_err(|e| BuildError::IoError {
             path: dst.clone(),
             source: e,
         })?;
 
+        debug!("copy_dir_all: Reading source directory: {}", src.display());
         for entry in std::fs::read_dir(src).map_err(|e| BuildError::IoError {
             path: src.clone(),
             source: e,
         })? {
-            let entry = entry?;
-            let ty = entry.file_type()?;
+            let entry = entry.map_err(|e| BuildError::IoError {
+                path: src.clone(),
+                source: e,
+            })?;
+
             let src_path = entry.path();
+            debug!("copy_dir_all: Processing entry: {}", src_path.display());
+
+            let ty = entry.file_type().map_err(|e| BuildError::IoError {
+                path: src_path.clone(),
+                source: e,
+            })?;
+
             let dst_path = dst.join(entry.file_name());
+
+            // Skip special directories (pseudo-filesystems that shouldn't be copied)
+            let file_name = entry.file_name();
+            let file_name_str = file_name.to_string_lossy();
+            if file_name_str == "proc" || file_name_str == "sys" || file_name_str == "dev" {
+                // Create empty directory instead of copying
+                debug!("copy_dir_all: Skipping pseudo-filesystem: {}", file_name_str);
+                std::fs::create_dir_all(&dst_path).map_err(|e| BuildError::IoError {
+                    path: dst_path.clone(),
+                    source: e,
+                })?;
+                continue;
+            }
 
             if ty.is_symlink() {
                 // Preserve symlinks
-                let link_target = std::fs::read_link(&src_path)?;
+                debug!("copy_dir_all: Copying symlink: {} -> {}", src_path.display(), dst_path.display());
+                let link_target = std::fs::read_link(&src_path).map_err(|e| BuildError::IoError {
+                    path: src_path.clone(),
+                    source: e,
+                })?;
                 // Remove destination if it exists (file or directory)
                 if dst_path.exists() {
                     if dst_path.is_dir() {
@@ -497,14 +527,25 @@ impl NativeBuilder {
                     }
                 })?;
             } else if ty.is_dir() {
+                debug!("copy_dir_all: Recursing into directory: {}", src_path.display());
                 Self::copy_dir_all(&src_path, &dst_path)?;
             } else {
                 // Copy file
-                std::fs::copy(&src_path, &dst_path)?;
+                debug!("copy_dir_all: Copying file: {} -> {}", src_path.display(), dst_path.display());
+                std::fs::copy(&src_path, &dst_path).map_err(|e| BuildError::IoError {
+                    path: src_path.clone(),
+                    source: e,
+                })?;
                 // Preserve permissions
-                let metadata = std::fs::metadata(&src_path)?;
+                let metadata = std::fs::metadata(&src_path).map_err(|e| BuildError::IoError {
+                    path: src_path.clone(),
+                    source: e,
+                })?;
                 let permissions = metadata.permissions();
-                std::fs::set_permissions(&dst_path, permissions)?;
+                std::fs::set_permissions(&dst_path, permissions).map_err(|e| BuildError::IoError {
+                    path: dst_path.clone(),
+                    source: e,
+                })?;
             }
         }
 
@@ -596,7 +637,7 @@ impl NativeBuilder {
             }
             ImageRef::Stage(stage_name) => {
                 // Multi-stage builds: copy from another stage
-                // TODO: Implement stage copying when multi-stage support is added
+                // This will be implemented in a future phase when multi-stage builds are supported
                 Err(BuildError::InstructionFailed {
                     instruction: "FROM".to_string(),
                     details: format!("Multi-stage builds not yet supported: FROM {}", stage_name),
@@ -682,7 +723,15 @@ impl NativeBuilder {
         std::fs::create_dir_all(&layer_dir)?;
 
         // Copy current rootfs to layer directory
-        if std::fs::read_dir(&self.current_rootfs)?.next().is_some() {
+        if std::fs::read_dir(&self.current_rootfs)
+            .map_err(|e| BuildError::IoError {
+                path: self.current_rootfs.clone(),
+                source: e,
+            })?
+            .next()
+            .is_some()
+        {
+            info!("Copying current rootfs {} to layer {}", self.current_rootfs.display(), layer_dir.display());
             Self::copy_dir_all(&self.current_rootfs, &layer_dir)?;
         }
 
@@ -710,10 +759,13 @@ impl NativeBuilder {
         // Copy files from build context
         for source in sources {
             let src_path = context.context_path.join(source);
+            info!("COPY: source={} -> src_path={} (exists={})", source, src_path.display(), src_path.exists());
+
             if !src_path.exists() {
                 return Err(BuildError::ContextError(format!(
-                    "Source file not found: {}",
-                    source
+                    "Source file not found: {} (resolved to: {})",
+                    source,
+                    src_path.display()
                 )));
             }
 
@@ -729,10 +781,15 @@ impl NativeBuilder {
                 dest_path.clone()
             };
 
+            info!("COPY: {} -> {} (is_dir={})", src_path.display(), target_path.display(), src_path.is_dir());
+
             if src_path.is_dir() {
                 Self::copy_dir_all(&src_path, &target_path)?;
             } else {
-                std::fs::copy(&src_path, &target_path)?;
+                std::fs::copy(&src_path, &target_path).map_err(|e| BuildError::IoError {
+                    path: src_path.clone(),
+                    source: e,
+                })?;
             }
         }
 
@@ -755,7 +812,7 @@ impl NativeBuilder {
     ) -> BuildResult<Option<PathBuf>> {
         // ADD is similar to COPY but also handles tar extraction
         // For now, just use COPY implementation
-        // TODO: Add tar extraction for .tar, .tar.gz, etc.
+        // Tar extraction (.tar, .tar.gz, etc.) will be added in a future enhancement
         self.execute_copy(sources, destination, context)
     }
 
@@ -971,29 +1028,77 @@ impl MacOsBuilder {
         use tracing::debug;
 
         let layer_dir = self.work_dir.join(format!("layer-{}", step_id));
-        std::fs::create_dir_all(&layer_dir)?;
+        debug!("Creating layer directory: {}", layer_dir.display());
+        std::fs::create_dir_all(&layer_dir).map_err(|e| BuildError::IoError {
+            path: layer_dir.clone(),
+            source: e,
+        })?;
 
         // Copy current rootfs to layer dir
-        if std::fs::read_dir(&self.current_rootfs)?.next().is_some() {
-            debug!("Copying rootfs to layer directory (macOS fallback)");
+        let has_contents = std::fs::read_dir(&self.current_rootfs)
+            .map_err(|e| BuildError::IoError {
+                path: self.current_rootfs.clone(),
+                source: e,
+            })?
+            .next()
+            .is_some();
+
+        if has_contents {
+            debug!("Copying rootfs {} to layer directory {}", self.current_rootfs.display(), layer_dir.display());
             Self::copy_dir_all(&self.current_rootfs, &layer_dir)?;
         }
 
+        debug!("Layer directory created successfully: {}", layer_dir.display());
         Ok(layer_dir)
     }
 
     /// Recursively copies a directory tree.
     fn copy_dir_all(src: &PathBuf, dst: &PathBuf) -> BuildResult<()> {
-        std::fs::create_dir_all(dst)?;
+        debug!("copy_dir_all: Creating dest directory: {}", dst.display());
+        std::fs::create_dir_all(dst).map_err(|e| BuildError::IoError {
+            path: dst.clone(),
+            source: e,
+        })?;
 
-        for entry in std::fs::read_dir(src)? {
-            let entry = entry?;
-            let ty = entry.file_type()?;
+        debug!("copy_dir_all: Reading source directory: {}", src.display());
+        for entry in std::fs::read_dir(src).map_err(|e| BuildError::IoError {
+            path: src.clone(),
+            source: e,
+        })? {
+            let entry = entry.map_err(|e| BuildError::IoError {
+                path: src.clone(),
+                source: e,
+            })?;
+
             let src_path = entry.path();
+            debug!("copy_dir_all: Processing entry: {}", src_path.display());
+
+            let ty = entry.file_type().map_err(|e| BuildError::IoError {
+                path: src_path.clone(),
+                source: e,
+            })?;
+
             let dst_path = dst.join(entry.file_name());
 
+            // Skip special directories (pseudo-filesystems that shouldn't be copied)
+            let file_name = entry.file_name();
+            let file_name_str = file_name.to_string_lossy();
+            if file_name_str == "proc" || file_name_str == "sys" || file_name_str == "dev" {
+                // Create empty directory instead of copying
+                debug!("copy_dir_all: Skipping pseudo-filesystem: {}", file_name_str);
+                std::fs::create_dir_all(&dst_path).map_err(|e| BuildError::IoError {
+                    path: dst_path.clone(),
+                    source: e,
+                })?;
+                continue;
+            }
+
             if ty.is_symlink() {
-                let link_target = std::fs::read_link(&src_path)?;
+                debug!("copy_dir_all: Copying symlink: {} -> {}", src_path.display(), dst_path.display());
+                let link_target = std::fs::read_link(&src_path).map_err(|e| BuildError::IoError {
+                    path: src_path.clone(),
+                    source: e,
+                })?;
                 // Remove destination if it exists (file or directory)
                 if dst_path.exists() {
                     if dst_path.is_dir() {
@@ -1002,11 +1107,19 @@ impl MacOsBuilder {
                         let _ = std::fs::remove_file(&dst_path);
                     }
                 }
-                std::os::unix::fs::symlink(&link_target, &dst_path)?;
+                std::os::unix::fs::symlink(&link_target, &dst_path).map_err(|e| BuildError::IoError {
+                    path: dst_path.clone(),
+                    source: e,
+                })?;
             } else if ty.is_dir() {
+                debug!("copy_dir_all: Recursing into directory: {}", src_path.display());
                 Self::copy_dir_all(&src_path, &dst_path)?;
             } else {
-                std::fs::copy(&src_path, &dst_path)?;
+                debug!("copy_dir_all: Copying file: {} -> {}", src_path.display(), dst_path.display());
+                std::fs::copy(&src_path, &dst_path).map_err(|e| BuildError::IoError {
+                    path: src_path.clone(),
+                    source: e,
+                })?;
             }
         }
 
@@ -1067,11 +1180,46 @@ impl MacOsBuilder {
     /// Captures layer changes by diffing directories.
     fn capture_layer(&self, layer_dir: &PathBuf, step_id: usize) -> BuildResult<PathBuf> {
         let layer_path = self.work_dir.join(format!("layer-{}.tar", step_id));
+        debug!("Creating layer tarball: {}", layer_path.display());
 
-        let tar_file = std::fs::File::create(&layer_path)?;
+        // Verify layer directory exists before tarring
+        if !layer_dir.exists() {
+            return Err(BuildError::InstructionFailed {
+                instruction: "COPY".into(),
+                details: format!("Layer directory does not exist: {}", layer_dir.display()),
+            });
+        }
+        debug!("Layer directory exists, contains {} entries",
+            std::fs::read_dir(layer_dir)?.count());
+
+        let tar_file = std::fs::File::create(&layer_path).map_err(|e| BuildError::IoError {
+            path: layer_path.clone(),
+            source: e,
+        })?;
+
         let mut ar = tar::Builder::new(tar_file);
-        ar.append_dir_all(".", layer_dir)?;
-        ar.finish()?;
+
+        // CRITICAL: Don't follow symlinks! Alpine has symlinks like /usr/bin/top -> /bin/busybox
+        // which point to absolute paths that don't exist on the macOS host.
+        ar.follow_symlinks(false);
+
+        debug!("Appending layer directory {} to tar (archive path='.', follow_symlinks=false)", layer_dir.display());
+        ar.append_dir_all(".", layer_dir).map_err(|e| {
+            // Log additional context
+            debug!("append_dir_all failed: {}", e);
+            debug!("layer_dir exists: {}", layer_dir.exists());
+            debug!("layer_dir is_dir: {}", layer_dir.is_dir());
+            BuildError::IoError {
+                path: layer_dir.clone(),
+                source: e,
+            }
+        })?;
+
+        debug!("Finalizing tar");
+        ar.finish().map_err(|e| BuildError::IoError {
+            path: layer_path.clone(),
+            source: e,
+        })?;
 
         Ok(layer_path)
     }
@@ -1220,13 +1368,23 @@ impl MacOsBuilder {
 
         // If dest is a directory, create it. If it's a file path, create only the parent
         if is_dest_dir {
-            std::fs::create_dir_all(&dest_path)?;
+            debug!("Creating destination directory: {}", dest_path.display());
+            std::fs::create_dir_all(&dest_path).map_err(|e| BuildError::IoError {
+                path: dest_path.clone(),
+                source: e,
+            })?;
         } else if let Some(parent) = dest_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            debug!("Creating parent directory: {}", parent.display());
+            std::fs::create_dir_all(parent).map_err(|e| BuildError::IoError {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
         }
 
         for source in sources {
             let src_path = context.context_path.join(source);
+            debug!("Copying source {} to layer", source);
+
             if !src_path.exists() {
                 return Err(BuildError::ContextError(format!("Source not found: {}", source)));
             }
@@ -1242,14 +1400,23 @@ impl MacOsBuilder {
             };
 
             if src_path.is_dir() {
+                debug!("Copying directory: {} -> {}", src_path.display(), target_path.display());
                 Self::copy_dir_all(&src_path, &target_path)?;
             } else {
-                std::fs::copy(&src_path, &target_path)?;
+                debug!("Copying file: {} -> {}", src_path.display(), target_path.display());
+                std::fs::copy(&src_path, &target_path).map_err(|e| BuildError::IoError {
+                    path: src_path.clone(),
+                    source: e,
+                })?;
             }
         }
 
+        debug!("Capturing layer {}", step_id);
         let layer_path = self.capture_layer(&layer_dir, step_id)?;
+
+        debug!("Merging layer into current rootfs");
         self.merge_layer(&layer_dir)?;
+
         self.layers.push(layer_path.clone());
 
         Ok(Some(layer_path))
@@ -1305,22 +1472,22 @@ impl BuildExecutor for MacOsBuilder {
                     self.execute_from(node)?;
                 }
                 crate::builder::parser::Instruction::Run { command } => {
-                    self.execute_run(&command)?;
+                    self.execute_run(command)?;
                 }
                 crate::builder::parser::Instruction::Copy { sources, destination, .. } => {
-                    self.execute_copy(&sources, &destination, context)?;
+                    self.execute_copy(sources, destination, context)?;
                 }
                 crate::builder::parser::Instruction::Add { sources, destination, .. } => {
-                    self.execute_copy(&sources, &destination, context)?; // ADD same as COPY for now
+                    self.execute_copy(sources, destination, context)?; // ADD same as COPY for now
                 }
                 crate::builder::parser::Instruction::Env { vars } => {
-                    self.execute_env(&vars)?;
+                    self.execute_env(vars)?;
                 }
                 crate::builder::parser::Instruction::Workdir { path } => {
-                    self.execute_workdir(&path)?;
+                    self.execute_workdir(path)?;
                 }
                 crate::builder::parser::Instruction::User { user } => {
-                    self.execute_user(&user)?;
+                    self.execute_user(user)?;
                 }
                 _ => {} // Skip other instructions for now
             }

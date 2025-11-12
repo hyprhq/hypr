@@ -122,7 +122,10 @@ impl StateManager {
         }))
         .execute(&self.pool)
         .await
-        .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
+        .map_err(|e| {
+            metrics::counter!("hypr_db_errors_total", "operation" => "insert_vm").increment(1);
+            HyprError::DatabaseError(e.to_string())
+        })?;
 
         Ok(())
     }
@@ -134,7 +137,10 @@ impl StateManager {
             .bind(id)
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| HyprError::DatabaseError(e.to_string()))?
+            .map_err(|e| {
+                metrics::counter!("hypr_db_errors_total", "operation" => "get_vm").increment(1);
+                HyprError::DatabaseError(e.to_string())
+            })?
             .ok_or_else(|| HyprError::VmNotFound { vm_id: id.to_string() })?;
 
         self.row_to_vm(row)
@@ -171,7 +177,10 @@ impl StateManager {
             .bind(id)
             .execute(&self.pool)
             .await
-            .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
+            .map_err(|e| {
+                metrics::counter!("hypr_db_errors_total", "operation" => "delete_vm").increment(1);
+                HyprError::DatabaseError(e.to_string())
+            })?;
 
         Ok(())
     }
@@ -248,7 +257,10 @@ impl StateManager {
         .bind(created_at)
         .execute(&self.pool)
         .await
-        .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
+        .map_err(|e| {
+            metrics::counter!("hypr_db_errors_total", "operation" => "insert_image").increment(1);
+            HyprError::DatabaseError(e.to_string())
+        })?;
 
         Ok(())
     }
@@ -643,33 +655,48 @@ impl StateManager {
     // Port Mapping Operations (Stubs - Not Yet Implemented)
     // ========================
 
-    /// Insert a port mapping (STUB).
+    /// Insert a port mapping (STUB - Phase 2).
+    /// Returns NotImplemented error until port mapping persistence is added in Phase 2.
     #[allow(dead_code)]
     pub async fn insert_port_mapping(&self, _mapping: &crate::network::port::PortMapping) -> Result<()> {
-        unimplemented!("Port mapping persistence not yet implemented")
+        Err(HyprError::NotImplemented {
+            feature: "Port mapping persistence (Phase 2)".into(),
+        })
     }
 
-    /// List all port mappings (STUB).
+    /// List all port mappings (STUB - Phase 2).
+    /// Returns NotImplemented error until port mapping persistence is added in Phase 2.
     #[allow(dead_code)]
     pub async fn list_port_mappings(&self) -> Result<Vec<crate::network::port::PortMapping>> {
-        unimplemented!("Port mapping persistence not yet implemented")
+        Err(HyprError::NotImplemented {
+            feature: "Port mapping persistence (Phase 2)".into(),
+        })
     }
 
-    /// Get port mappings for a specific VM (STUB).
+    /// Get port mappings for a specific VM (STUB - Phase 2).
+    /// Returns NotImplemented error until port mapping persistence is added in Phase 2.
     #[allow(dead_code)]
     pub async fn get_vm_port_mappings(&self, _vm_id: &str) -> Result<Vec<crate::network::port::PortMapping>> {
-        unimplemented!("Port mapping persistence not yet implemented")
+        Err(HyprError::NotImplemented {
+            feature: "Port mapping persistence (Phase 2)".into(),
+        })
     }
 
-    /// Delete a specific port mapping (STUB).
+    /// Delete a specific port mapping (STUB - Phase 2).
+    /// Returns NotImplemented error until port mapping persistence is added in Phase 2.
     #[allow(dead_code)]
     pub async fn delete_port_mapping(&self, _host_port: u16, _protocol: crate::types::network::Protocol) -> Result<()> {
-        unimplemented!("Port mapping persistence not yet implemented")
+        Err(HyprError::NotImplemented {
+            feature: "Port mapping persistence (Phase 2)".into(),
+        })
     }
 
-    /// Delete all port mappings for a VM (STUB).
+    /// Delete all port mappings for a VM (STUB - Phase 2).
+    /// Returns NotImplemented error until port mapping persistence is added in Phase 2.
     #[allow(dead_code)]
     pub async fn delete_vm_port_mappings(&self, _vm_id: &str) -> Result<()> {
-        unimplemented!("Port mapping persistence not yet implemented")
+        Err(HyprError::NotImplemented {
+            feature: "Port mapping persistence (Phase 2)".into(),
+        })
     }
 }

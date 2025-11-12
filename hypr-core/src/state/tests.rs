@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests {
+mod state_tests {
     use crate::error::HyprError;
     use crate::network::port::PortMapping;
     use crate::state::StateManager;

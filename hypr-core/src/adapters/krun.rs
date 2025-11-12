@@ -72,57 +72,71 @@ impl VmmAdapter for KrunAdapter {
     #[instrument(skip(self))]
     async fn create(&self, _config: &VmConfig) -> Result<VmHandle> {
         info!("Creating VM with libkrun-efi (stub)");
+        metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "libkrun", "operation" => "create").increment(1);
 
-        // Phase 1: Return error with helpful message
         Err(HyprError::PlatformUnsupported {
             feature: "libkrun-efi adapter".to_string(),
             platform: "Phase 1 (full implementation in Phase 4)".to_string(),
         })
     }
 
+    #[instrument(skip(self), fields(vm_id = %_handle.id))]
     async fn start(&self, _handle: &VmHandle) -> Result<()> {
+        metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "libkrun", "operation" => "start").increment(1);
         Err(HyprError::PlatformUnsupported {
             feature: "libkrun-efi adapter".to_string(),
             platform: "Phase 1 stub".to_string(),
         })
     }
 
+    #[instrument(skip(self), fields(vm_id = %_handle.id))]
     async fn stop(&self, _handle: &VmHandle, _timeout: Duration) -> Result<()> {
+        metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "libkrun", "operation" => "stop").increment(1);
         Err(HyprError::PlatformUnsupported {
             feature: "libkrun-efi adapter".to_string(),
             platform: "Phase 1 stub".to_string(),
         })
     }
 
+    #[instrument(skip(self), fields(vm_id = %_handle.id))]
     async fn kill(&self, _handle: &VmHandle) -> Result<()> {
+        metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "libkrun", "operation" => "kill").increment(1);
         Err(HyprError::PlatformUnsupported {
             feature: "libkrun-efi adapter".to_string(),
             platform: "Phase 1 stub".to_string(),
         })
     }
 
+    #[instrument(skip(self), fields(vm_id = %_handle.id))]
     async fn delete(&self, _handle: &VmHandle) -> Result<()> {
+        metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "libkrun", "operation" => "delete").increment(1);
         Err(HyprError::PlatformUnsupported {
             feature: "libkrun-efi adapter".to_string(),
             platform: "Phase 1 stub".to_string(),
         })
     }
 
+    #[instrument(skip(self, _disk), fields(vm_id = %_handle.id))]
     async fn attach_disk(&self, _handle: &VmHandle, _disk: &DiskConfig) -> Result<()> {
+        metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "libkrun", "operation" => "attach_disk").increment(1);
         Err(HyprError::PlatformUnsupported {
             feature: "libkrun-efi adapter".to_string(),
             platform: "Phase 1 stub".to_string(),
         })
     }
 
+    #[instrument(skip(self, _net), fields(vm_id = %_handle.id))]
     async fn attach_network(&self, _handle: &VmHandle, _net: &NetworkConfig) -> Result<()> {
+        metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "libkrun", "operation" => "attach_network").increment(1);
         Err(HyprError::PlatformUnsupported {
             feature: "libkrun-efi adapter".to_string(),
             platform: "Phase 1 stub".to_string(),
         })
     }
 
+    #[instrument(skip(self, _gpu), fields(vm_id = %_handle.id))]
     async fn attach_gpu(&self, _handle: &VmHandle, _gpu: &GpuConfig) -> Result<()> {
+        metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "libkrun", "operation" => "attach_gpu").increment(1);
         Err(HyprError::PlatformUnsupported {
             feature: "libkrun-efi GPU (Metal)".to_string(),
             platform: "Phase 1 stub - Metal support in Phase 4".to_string(),

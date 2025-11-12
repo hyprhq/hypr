@@ -9,6 +9,6 @@ mod tests {
     #[test]
     fn test_placeholder() {
         // Placeholder test to ensure test infrastructure works
-        assert!(true);
+        // This will be replaced with real integration tests in Wave 3
     }
 }

@@ -135,6 +135,7 @@ impl CloudHypervisorAdapter {
             }
 
             if start.elapsed() > timeout {
+                metrics::counter!("hypr_vm_start_failures_total", "adapter" => "cloudhypervisor", "reason" => "socket_timeout").increment(1);
                 return Err(HyprError::VmStartFailed {
                     vm_id: socket_path.to_string_lossy().to_string(),
                     reason: "API socket did not appear within timeout".to_string(),
@@ -172,9 +173,12 @@ impl VmmAdapter for CloudHypervisorAdapter {
         let child = Command::new(&self.binary_path)
             .args(&args)
             .spawn()
-            .map_err(|e| HyprError::VmStartFailed {
-                vm_id: config.id.clone(),
-                reason: format!("Failed to spawn cloud-hypervisor: {}", e),
+            .map_err(|e| {
+                metrics::counter!("hypr_vm_start_failures_total", "adapter" => "cloudhypervisor", "reason" => "spawn_failed").increment(1);
+                HyprError::VmStartFailed {
+                    vm_id: config.id.clone(),
+                    reason: format!("Failed to spawn cloud-hypervisor: {}", e),
+                }
             })?;
 
         let pid = child.id().ok_or_else(|| HyprError::VmStartFailed {
@@ -255,6 +259,7 @@ impl VmmAdapter for CloudHypervisorAdapter {
                 }
                 Err(e) => {
                     error!("Error killing VM process: {}", e);
+                    metrics::counter!("hypr_vm_stop_failures_total", "adapter" => "cloudhypervisor", "reason" => "kill_failed").increment(1);
                     return Err(HyprError::VmStopFailed {
                         vm_id: handle.id.clone(),
                         reason: e.to_string(),
@@ -283,24 +288,27 @@ impl VmmAdapter for CloudHypervisorAdapter {
         Ok(())
     }
 
+    #[instrument(skip(self, _disk), fields(vm_id = %_handle.id))]
     async fn attach_disk(&self, _handle: &VmHandle, _disk: &DiskConfig) -> Result<()> {
-        // Hotplug not implemented in Phase 1
+        metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "cloudhypervisor", "operation" => "attach_disk").increment(1);
         Err(HyprError::PlatformUnsupported {
             feature: "disk hotplug".to_string(),
             platform: "cloud-hypervisor (Phase 1)".to_string(),
         })
     }
 
+    #[instrument(skip(self, _net), fields(vm_id = %_handle.id))]
     async fn attach_network(&self, _handle: &VmHandle, _net: &NetworkConfig) -> Result<()> {
-        // Hotplug not implemented in Phase 1
+        metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "cloudhypervisor", "operation" => "attach_network").increment(1);
         Err(HyprError::PlatformUnsupported {
             feature: "network hotplug".to_string(),
             platform: "cloud-hypervisor (Phase 1)".to_string(),
         })
     }
 
+    #[instrument(skip(self, _gpu), fields(vm_id = %_handle.id))]
     async fn attach_gpu(&self, _handle: &VmHandle, _gpu: &GpuConfig) -> Result<()> {
-        // GPU support in Phase 4
+        metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "cloudhypervisor", "operation" => "attach_gpu").increment(1);
         Err(HyprError::PlatformUnsupported {
             feature: "GPU passthrough".to_string(),
             platform: "cloud-hypervisor (Phase 1)".to_string(),

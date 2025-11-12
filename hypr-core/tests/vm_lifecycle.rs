@@ -1,0 +1,375 @@
+//! Integration tests for VM lifecycle operations.
+//!
+//! These tests verify the full VM lifecycle:
+//! - Create VM
+//! - Start VM
+//! - Stop VM
+//! - Delete VM
+//!
+//! Tests use an in-memory database and mock adapter for portability.
+
+use hypr_core::{
+    adapters::{AdapterCapabilities, VmmAdapter},
+    error::{HyprError, Result},
+    types::{
+        network::NetworkConfig,
+        vm::{DiskConfig, GpuConfig, VmConfig, VmHandle, VmResources, VmStatus},
+        Vm,
+    },
+    StateManager,
+};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+
+/// Mock adapter for testing (doesn't require actual hypervisor).
+#[derive(Clone)]
+struct MockAdapter {
+    capabilities: AdapterCapabilities,
+}
+
+impl MockAdapter {
+    fn new() -> Self {
+        Self {
+            capabilities: AdapterCapabilities {
+                gpu_passthrough: false,
+                virtio_fs: true,
+                hotplug_devices: false,
+                metadata: HashMap::new(),
+            },
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl VmmAdapter for MockAdapter {
+    async fn create(&self, config: &VmConfig) -> Result<VmHandle> {
+        // Mock: Return handle without actually spawning VM
+        Ok(VmHandle {
+            id: config.id.clone(),
+            pid: Some(12345),
+            socket_path: Some(PathBuf::from("/tmp/mock.sock")),
+        })
+    }
+
+    async fn start(&self, _handle: &VmHandle) -> Result<()> {
+        // Mock: Simulate successful start
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        Ok(())
+    }
+
+    async fn stop(&self, _handle: &VmHandle, _timeout: Duration) -> Result<()> {
+        // Mock: Simulate successful stop
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        Ok(())
+    }
+
+    async fn kill(&self, _handle: &VmHandle) -> Result<()> {
+        // Mock: Simulate successful kill
+        Ok(())
+    }
+
+    async fn delete(&self, _handle: &VmHandle) -> Result<()> {
+        // Mock: Simulate successful delete
+        Ok(())
+    }
+
+    async fn attach_disk(&self, _handle: &VmHandle, _disk: &DiskConfig) -> Result<()> {
+        Err(HyprError::PlatformUnsupported {
+            feature: "disk hotplug".to_string(),
+            platform: "mock".to_string(),
+        })
+    }
+
+    async fn attach_network(&self, _handle: &VmHandle, _net: &NetworkConfig) -> Result<()> {
+        Err(HyprError::PlatformUnsupported {
+            feature: "network hotplug".to_string(),
+            platform: "mock".to_string(),
+        })
+    }
+
+    async fn attach_gpu(&self, _handle: &VmHandle, _gpu: &GpuConfig) -> Result<()> {
+        Err(HyprError::PlatformUnsupported {
+            feature: "GPU".to_string(),
+            platform: "mock".to_string(),
+        })
+    }
+
+    fn vsock_path(&self, handle: &VmHandle) -> PathBuf {
+        PathBuf::from(format!("/tmp/mock-{}.vsock", handle.id))
+    }
+
+    fn capabilities(&self) -> AdapterCapabilities {
+        self.capabilities.clone()
+    }
+
+    fn name(&self) -> &str {
+        "mock"
+    }
+}
+
+#[tokio::test]
+async fn test_vm_lifecycle_create_start_stop_delete() {
+    // Initialize state manager with in-memory database
+    let state = StateManager::new_in_memory()
+        .await
+        .expect("Failed to create state manager");
+
+    let adapter = Arc::new(MockAdapter::new());
+
+    // Create VM configuration
+    let config = VmConfig {
+        id: "test-vm-1".to_string(),
+        name: "test-vm".to_string(),
+        resources: VmResources {
+            cpus: 2,
+            memory_mb: 512,
+        },
+        kernel_path: Some(PathBuf::from("/tmp/vmlinux")),
+        kernel_args: vec!["console=ttyS0".to_string()],
+        disks: vec![],
+        network: NetworkConfig {
+            network: "default".to_string(),
+            ip_address: None,
+            mac_address: Some("52:54:00:12:34:56".to_string()),
+            dns_servers: vec![],
+        },
+        ports: vec![],
+        env: HashMap::new(),
+        volumes: vec![],
+        vsock_path: PathBuf::from("/tmp/test.vsock"),
+        gpu: None,
+    };
+
+    // Step 1: Create VM
+    let handle = adapter.create(&config).await.expect("Failed to create VM");
+
+    assert_eq!(handle.id, "test-vm-1");
+    assert!(handle.pid.is_some());
+
+    // Insert VM state
+    let vm = Vm {
+        id: config.id.clone(),
+        name: config.name.clone(),
+        image_id: "test-image".to_string(),
+        status: VmStatus::Creating,
+        config: config.clone(),
+        ip_address: None,
+        pid: handle.pid,
+        vsock_path: handle.socket_path.clone(),
+        created_at: SystemTime::now(),
+        started_at: None,
+        stopped_at: None,
+    };
+
+    state.insert_vm(&vm).await.expect("Failed to insert VM");
+
+    // Verify VM exists in state
+    let retrieved_vm = state.get_vm("test-vm-1").await.expect("Failed to get VM");
+    assert_eq!(retrieved_vm.id, "test-vm-1");
+    assert_eq!(retrieved_vm.name, "test-vm");
+    assert_eq!(retrieved_vm.status, VmStatus::Creating);
+
+    // Step 2: Start VM
+    adapter.start(&handle).await.expect("Failed to start VM");
+
+    // Update status to Running
+    state
+        .update_vm_status("test-vm-1", VmStatus::Running)
+        .await
+        .expect("Failed to update status");
+
+    let running_vm = state.get_vm("test-vm-1").await.expect("Failed to get VM");
+    assert_eq!(running_vm.status, VmStatus::Running);
+
+    // Step 3: Stop VM
+    adapter
+        .stop(&handle, Duration::from_secs(5))
+        .await
+        .expect("Failed to stop VM");
+
+    // Update status to Stopped
+    state
+        .update_vm_status("test-vm-1", VmStatus::Stopped)
+        .await
+        .expect("Failed to update status");
+
+    let stopped_vm = state.get_vm("test-vm-1").await.expect("Failed to get VM");
+    assert_eq!(stopped_vm.status, VmStatus::Stopped);
+
+    // Step 4: Delete VM
+    adapter.delete(&handle).await.expect("Failed to delete VM");
+
+    state.delete_vm("test-vm-1").await.expect("Failed to delete VM from state");
+
+    // Verify VM no longer exists
+    let result = state.get_vm("test-vm-1").await;
+    assert!(result.is_err());
+    assert!(matches!(result.unwrap_err(), HyprError::VmNotFound { .. }));
+}
+
+#[tokio::test]
+async fn test_state_persistence_across_sessions() {
+    // Create temporary database file
+    let db_path = "/tmp/hypr-test-persistence.db";
+
+    // Clean up old test database if exists
+    let _ = std::fs::remove_file(db_path);
+
+    // Session 1: Create VM and persist
+    {
+        let state = StateManager::new(db_path)
+            .await
+            .expect("Failed to create state manager");
+
+        let config = VmConfig {
+            id: "persistent-vm".to_string(),
+            name: "test-persistent".to_string(),
+            resources: VmResources {
+                cpus: 1,
+                memory_mb: 256,
+            },
+            kernel_path: Some(PathBuf::from("/tmp/vmlinux")),
+            kernel_args: vec![],
+            disks: vec![],
+            network: NetworkConfig {
+                network: "default".to_string(),
+                ip_address: None,
+                mac_address: Some("52:54:00:AB:CD:EF".to_string()),
+                dns_servers: vec![],
+            },
+            ports: vec![],
+            env: HashMap::new(),
+            volumes: vec![],
+            vsock_path: PathBuf::from("/tmp/persistent.vsock"),
+            gpu: None,
+        };
+
+        let vm = Vm {
+            id: config.id.clone(),
+            name: config.name.clone(),
+            image_id: "alpine:latest".to_string(),
+            status: VmStatus::Running,
+            config,
+            ip_address: Some("100.64.0.5".to_string()),
+            pid: Some(99999),
+            vsock_path: Some(PathBuf::from("/tmp/persistent.vsock")),
+            created_at: SystemTime::now(),
+            started_at: Some(SystemTime::now()),
+            stopped_at: None,
+        };
+
+        state.insert_vm(&vm).await.expect("Failed to insert VM");
+
+        // Verify insertion
+        let retrieved = state.get_vm("persistent-vm").await.expect("Failed to get VM");
+        assert_eq!(retrieved.name, "test-persistent");
+    }
+    // StateManager dropped here, database connection closed
+
+    // Session 2: Reopen database and verify VM still exists
+    {
+        let state = StateManager::new(db_path)
+            .await
+            .expect("Failed to reopen state manager");
+
+        // VM should still exist
+        let vm = state
+            .get_vm("persistent-vm")
+            .await
+            .expect("VM should persist across sessions");
+
+        assert_eq!(vm.id, "persistent-vm");
+        assert_eq!(vm.name, "test-persistent");
+        assert_eq!(vm.image_id, "alpine:latest");
+        assert_eq!(vm.status, VmStatus::Running);
+        assert_eq!(vm.ip_address, Some("100.64.0.5".to_string()));
+
+        // List all VMs
+        let vms = state.list_vms().await.expect("Failed to list VMs");
+        assert_eq!(vms.len(), 1);
+        assert_eq!(vms[0].id, "persistent-vm");
+
+        // Clean up
+        state.delete_vm("persistent-vm").await.expect("Failed to delete VM");
+    }
+
+    // Clean up test database
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn test_multiple_vms_concurrent_operations() {
+    let state = StateManager::new_in_memory()
+        .await
+        .expect("Failed to create state manager");
+
+    let adapter = Arc::new(MockAdapter::new());
+
+    // Create multiple VMs
+    let vm_ids = vec!["vm-1", "vm-2", "vm-3"];
+
+    for vm_id in &vm_ids {
+        let config = VmConfig {
+            id: vm_id.to_string(),
+            name: format!("test-{}", vm_id),
+            resources: VmResources {
+                cpus: 1,
+                memory_mb: 128,
+            },
+            kernel_path: Some(PathBuf::from("/tmp/vmlinux")),
+            kernel_args: vec![],
+            disks: vec![],
+            network: NetworkConfig {
+                network: "default".to_string(),
+                ip_address: None,
+                mac_address: None,
+                dns_servers: vec![],
+            },
+            ports: vec![],
+            env: HashMap::new(),
+            volumes: vec![],
+            vsock_path: PathBuf::from(format!("/tmp/{}.vsock", vm_id)),
+            gpu: None,
+        };
+
+        let handle = adapter.create(&config).await.expect("Failed to create VM");
+
+        let vm = Vm {
+            id: config.id.clone(),
+            name: config.name.clone(),
+            image_id: "test-image".to_string(),
+            status: VmStatus::Running,
+            config,
+            ip_address: None,
+            pid: handle.pid,
+            vsock_path: handle.socket_path,
+            created_at: SystemTime::now(),
+            started_at: Some(SystemTime::now()),
+            stopped_at: None,
+        };
+
+        state.insert_vm(&vm).await.expect("Failed to insert VM");
+    }
+
+    // List all VMs
+    let vms = state.list_vms().await.expect("Failed to list VMs");
+    assert_eq!(vms.len(), 3);
+
+    // Verify each VM exists
+    for vm_id in &vm_ids {
+        let vm = state.get_vm(vm_id).await.expect("VM should exist");
+        assert_eq!(vm.id, *vm_id);
+        assert_eq!(vm.status, VmStatus::Running);
+    }
+
+    // Delete all VMs
+    for vm_id in &vm_ids {
+        state.delete_vm(vm_id).await.expect("Failed to delete VM");
+    }
+
+    // Verify all deleted
+    let vms = state.list_vms().await.expect("Failed to list VMs");
+    assert_eq!(vms.len(), 0);
+}

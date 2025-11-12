@@ -35,7 +35,7 @@ fn linux_platform_resolver(manifests: &[ImageIndexEntry]) -> Option<String> {
     manifests
         .iter()
         .find(|entry| {
-            entry.platform.as_ref().map_or(false, |platform| {
+            entry.platform.as_ref().is_some_and(|platform| {
                 platform.os == "linux" && platform.architecture == arch
             })
         })

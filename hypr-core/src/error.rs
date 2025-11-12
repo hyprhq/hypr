@@ -139,6 +139,10 @@ pub enum HyprError {
     #[error("Insufficient resources: {reason}")]
     InsufficientResources { reason: String },
 
+    // Feature availability errors
+    #[error("Feature not implemented: {feature}")]
+    NotImplemented { feature: String },
+
     // Generic errors
     #[error("Internal error: {0}")]
     Internal(String),

@@ -1,9 +1,6 @@
-use hypr_core::{init_observability, HealthChecker, StateManager};
+use hypr_core::{adapters::AdapterFactory, init_observability, shutdown_observability, HealthChecker, StateManager};
 use std::sync::Arc;
-use tracing::info;
-
-#[cfg(all(target_os = "macos", feature = "krun"))]
-use hypr_core::{adapters::VmmAdapter, shutdown_observability};
+use tracing::{error, info};
 
 #[allow(unused_imports)]
 mod api;
@@ -32,34 +29,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(StateManager::new(&db_path).await.expect("Failed to initialize state manager"));
     health_checker.register_subsystem("database".to_string()).await;
 
-    // Create VMM adapter (stub for now - will use KrunAdapter on macOS with feature flag)
-    #[cfg(all(target_os = "macos", feature = "krun"))]
-    {
-        info!("Initializing VMM adapter");
-        let _adapter: Arc<dyn VmmAdapter> = Arc::new(
-            hypr_core::adapters::KrunAdapter::new().expect("Failed to create KrunAdapter"),
-        );
+    // Create VMM adapter using the factory (auto-detects platform)
+    info!("Initializing VMM adapter");
+    let _adapter = match AdapterFactory::create(None) {
+        Ok(adapter) => {
+            info!(
+                adapter = adapter.name(),
+                capabilities = ?adapter.capabilities(),
+                "VMM adapter initialized successfully"
+            );
+            adapter
+        }
+        Err(e) => {
+            error!("Failed to create VMM adapter: {}", e);
+            return Err(format!("VMM adapter initialization failed: {}", e).into());
+        }
+    };
 
-        health_checker.register_subsystem("adapter".to_string()).await;
-        info!("HYPR daemon ready");
+    health_checker.register_subsystem("adapter".to_string()).await;
+    info!("HYPR daemon ready");
 
-        // Start gRPC API server (commented out due to adapter not being ready in Phase 2.0)
-        // let api_handle = tokio::spawn(api::start_api_server(_state.clone(), _adapter.clone()));
+    // Start gRPC API server
+    let api_handle = tokio::spawn(api::start_api_server(_state.clone(), _adapter.clone()));
 
-        // Wait for shutdown signal
-        tokio::signal::ctrl_c().await?;
-        info!("Received shutdown signal");
+    // Wait for shutdown signal
+    tokio::signal::ctrl_c().await?;
+    info!("Received shutdown signal");
 
-        info!("HYPR daemon shutting down");
-        shutdown_observability();
-        Ok(())
-    }
+    // Abort API server
+    api_handle.abort();
+    let _ = api_handle.await;
 
-    #[cfg(not(all(target_os = "macos", feature = "krun")))]
-    {
-        // For Phase 2.0, we need an adapter but none is available
-        // In production, this would be cloud-hypervisor on Linux
-        tracing::error!("No VMM adapter available for this platform");
-        Err("VMM adapter not available".into())
-    }
+    info!("HYPR daemon shutting down");
+    shutdown_observability();
+    Ok(())
 }

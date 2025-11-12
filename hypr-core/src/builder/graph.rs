@@ -101,7 +101,7 @@ impl BuildGraph {
             in_degree.insert(node.id, 0);
         }
 
-        for (_, neighbors) in &self.edges {
+        for neighbors in self.edges.values() {
             for &neighbor in neighbors {
                 *in_degree.get_mut(&neighbor).unwrap() += 1;
             }
@@ -311,7 +311,7 @@ impl<'a> GraphBuilder<'a> {
     }
 
     fn add_edge(&mut self, from: usize, to: usize) {
-        self.edges.entry(from).or_insert_with(Vec::new).push(to);
+        self.edges.entry(from).or_default().push(to);
     }
 }
 

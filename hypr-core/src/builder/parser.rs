@@ -424,7 +424,7 @@ impl DockerfileParser {
         let mut image_start = 0;
 
         // Check for --platform flag
-        if args.get(0).map(|s| s.starts_with("--platform=")).unwrap_or(false) {
+        if args.first().map(|s| s.starts_with("--platform=")).unwrap_or(false) {
             platform = Some(args[0].strip_prefix("--platform=").unwrap().to_string());
             image_start = 1;
         }
@@ -565,7 +565,7 @@ impl DockerfileParser {
         let mut chown = None;
         let mut arg_start = 0;
 
-        if args.get(0).map(|s| s.starts_with("--chown=")).unwrap_or(false) {
+        if args.first().map(|s| s.starts_with("--chown=")).unwrap_or(false) {
             chown = Some(args[0].strip_prefix("--chown=").unwrap().to_string());
             arg_start = 1;
         }
@@ -837,9 +837,9 @@ impl DockerfileParser {
         let mut current = String::new();
         let mut in_quotes = false;
         let mut in_json = 0;
-        let mut chars = s.chars().peekable();
+        let chars = s.chars().peekable();
 
-        while let Some(c) = chars.next() {
+        for c in chars {
             match c {
                 '"' if in_json == 0 => {
                     in_quotes = !in_quotes;

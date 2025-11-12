@@ -376,8 +376,10 @@ mod tests {
     #[test]
     fn test_capability_validation() {
         // Create a config that requires GPU passthrough
-        let mut required_caps = AdapterCapabilities::default();
-        required_caps.gpu_passthrough = true;
+        let required_caps = AdapterCapabilities {
+            gpu_passthrough: true,
+            ..Default::default()
+        };
 
         let config = AdapterConfig {
             adapter_override: None,
