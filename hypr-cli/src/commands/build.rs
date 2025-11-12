@@ -144,6 +144,7 @@ pub async fn build(
     // Execute the actual build
     let output = builder
         .execute(&graph, &context, &mut cache)
+        .await
         .with_context(|| "Build failed")?;
 
     pb.finish_with_message("Build complete");

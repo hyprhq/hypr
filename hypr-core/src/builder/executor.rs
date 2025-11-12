@@ -8,6 +8,7 @@
 use crate::builder::cache::CacheManager;
 use crate::builder::graph::BuildGraph;
 use crate::builder::parser::Instruction;
+use async_trait::async_trait;
 use sha2::Digest;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -148,9 +149,10 @@ pub struct BuildStats {
 }
 
 /// Platform-agnostic build executor trait.
-pub trait BuildExecutor {
+#[async_trait]
+pub trait BuildExecutor: Send {
     /// Executes a build from a graph.
-    fn execute(
+    async fn execute(
         &mut self,
         graph: &BuildGraph,
         context: &BuildContext,
@@ -845,9 +847,10 @@ impl NativeBuilder {
 }
 
 #[cfg(target_os = "linux")]
+#[async_trait]
 impl BuildExecutor for NativeBuilder {
     #[instrument(skip(self, graph, cache), fields(no_cache = context.no_cache))]
-    fn execute(
+    async fn execute(
         &mut self,
         graph: &BuildGraph,
         context: &BuildContext,
@@ -1156,8 +1159,9 @@ impl MacOsVmBuilder {
 }
 
 #[cfg(target_os = "macos")]
+#[async_trait]
 impl BuildExecutor for MacOsVmBuilder {
-    fn execute(
+    async fn execute(
         &mut self,
         graph: &BuildGraph,
         context: &BuildContext,
@@ -1222,11 +1226,7 @@ impl BuildExecutor for MacOsVmBuilder {
                             std::fs::create_dir_all(&base_dir)?;
 
                             // Pull and extract image
-                            tokio::runtime::Runtime::new()
-                                .map_err(|e| BuildError::ContextError(format!("Failed to create runtime: {}", e)))?
-                                .block_on(async {
-                                    self.oci_client.pull_image(&image_str, &base_dir).await
-                                })?;
+                            self.oci_client.pull_image(&image_str, &base_dir).await?;
 
                             info!("Base image extracted to {}", base_dir.display());
                             self.base_rootfs = Some(base_dir);
