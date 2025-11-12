@@ -1025,12 +1025,6 @@ impl NativeBuilder {
     }
 }
 
-/// VM-based builder for macOS (uses HVF via vfkit + minimal build VM).
-///
-/// Executes builds in isolated Linux VMs. Base images are pulled on the host
-/// and shared via virtio-fs. The build VM pivots root into the base image.
-/// All HTTP traffic is proxied via vsock to the host's BuilderHttpProxy.
-#[cfg(target_os = "macos")]
 /// Linux VM-based builder using cloud-hypervisor.
 ///
 /// Executes build steps in isolated VMs with cloud-hypervisor,
@@ -1053,6 +1047,12 @@ pub struct LinuxVmBuilder {
     base_rootfs: Option<PathBuf>,
 }
 
+/// macOS VM-based builder using vfkit/HVF.
+///
+/// Executes builds in isolated Linux VMs. Base images are pulled on the host
+/// and shared via virtio-fs. The build VM pivots root into the base image.
+/// All HTTP traffic is proxied via vsock to the host's BuilderHttpProxy.
+#[cfg(target_os = "macos")]
 pub struct MacOsVmBuilder {
     /// VM builder for executing build steps
     vm_builder: crate::builder::VmBuilder,
