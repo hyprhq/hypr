@@ -1018,9 +1018,10 @@ impl NativeBuilder {
     }
 }
 
-/// VM-based builder for macOS (uses HVF via vfkit + Alpine VM).
+/// VM-based builder for macOS (uses HVF via vfkit + minimal build VM).
 ///
-/// Executes builds in isolated Alpine Linux VMs with no network interface.
+/// Executes builds in isolated Linux VMs. Base images are pulled on the host
+/// and shared via virtio-fs. The build VM pivots root into the base image.
 /// All HTTP traffic is proxied via vsock to the host's BuilderHttpProxy.
 #[cfg(target_os = "macos")]
 pub struct MacOsVmBuilder {
@@ -1034,6 +1035,10 @@ pub struct MacOsVmBuilder {
     workdir: String,
     /// Image configuration being built
     config: ImageConfig,
+    /// OCI registry client for pulling base images
+    oci_client: crate::builder::oci::OciClient,
+    /// Path to current base image rootfs (shared via virtio-fs)
+    base_rootfs: Option<PathBuf>,
 }
 
 #[cfg(target_os = "macos")]
@@ -1049,30 +1054,28 @@ impl MacOsVmBuilder {
             source: e,
         })?;
 
-        // Locate builder rootfs and kernel
+        // Locate kernel (initramfs will be generated on-the-fly)
         let hypr_dir = home_dir()
             .ok_or_else(|| BuildError::ContextError("Could not find home directory".into()))?
             .join(".hypr");
 
-        let builder_rootfs = hypr_dir.join("builder").join("alpine-builder.squashfs");
         let kernel_path = hypr_dir.join("kernel").join("vmlinuz");
 
-        // Check if builder rootfs exists
-        if !builder_rootfs.exists() {
-            return Err(BuildError::ContextError(format!(
-                "Builder rootfs not found at: {}\n\
-                 Please run: hypr builder init",
-                builder_rootfs.display()
-            )));
-        }
-
+        // TODO: Download/bundle default kernel if not present
+        // For now, require manual kernel setup
         if !kernel_path.exists() {
             return Err(BuildError::ContextError(format!(
                 "Kernel not found at: {}\n\
-                 Please run: hypr builder init",
+                 Please download a Linux kernel and place at:\n\
+                 mkdir -p ~/.hypr/kernel\n\
+                 curl -L https://... -o ~/.hypr/kernel/vmlinuz",
                 kernel_path.display()
             )));
         }
+
+        // Placeholder: builder_rootfs will be replaced by on-the-fly initramfs
+        // For now, use a dummy path (VmBuilder will be refactored to use initramfs)
+        let builder_rootfs = PathBuf::from("/tmp/dummy-will-be-initramfs");
 
         // Create VMM adapter for macOS (HVF)
         let adapter = HvfAdapter::new().map_err(|e| BuildError::ContextError(format!(
@@ -1085,6 +1088,8 @@ impl MacOsVmBuilder {
             kernel_path,
             work_dir.clone(),
         );
+
+        let oci_client = crate::builder::oci::OciClient::new()?;
 
         Ok(Self {
             vm_builder,
@@ -1101,6 +1106,8 @@ impl MacOsVmBuilder {
                 volumes: Vec::new(),
                 labels: HashMap::new(),
             },
+            oci_client,
+            base_rootfs: None,
         })
     }
 
@@ -1171,9 +1178,54 @@ impl BuildExecutor for MacOsVmBuilder {
             // Execute instruction
             let layer_path_opt = match &node.instruction {
                 Instruction::From { image, .. } => {
-                    info!("Pulling base image: {:?}", image);
-                    // Base image handling would go here
-                    // For now, skip (would pull from OCI registry)
+                    use crate::builder::parser::ImageRef;
+
+                    match image {
+                        ImageRef::Scratch => {
+                            info!("FROM scratch: using minimal rootfs");
+                            // Create minimal directory structure
+                            let scratch_dir = self.work_dir.join("rootfs-scratch");
+                            std::fs::create_dir_all(&scratch_dir)?;
+                            std::fs::create_dir_all(scratch_dir.join("tmp"))?;
+                            std::fs::create_dir_all(scratch_dir.join("etc"))?;
+                            std::fs::create_dir_all(scratch_dir.join("proc"))?;
+                            std::fs::create_dir_all(scratch_dir.join("sys"))?;
+                            std::fs::create_dir_all(scratch_dir.join("dev"))?;
+                            self.base_rootfs = Some(scratch_dir);
+                        }
+                        ImageRef::Stage(_) => {
+                            return Err(BuildError::InstructionFailed {
+                                instruction: "FROM".to_string(),
+                                details: "Multi-stage builds not yet supported".into(),
+                            });
+                        }
+                        ImageRef::Image { name, tag, digest } => {
+                            // Construct full image reference
+                            let image_str = if let Some(digest) = digest {
+                                format!("{}@{}", name, digest)
+                            } else {
+                                format!("{}:{}", name, tag.as_deref().unwrap_or("latest"))
+                            };
+
+                            info!("FROM {}: pulling base image from registry", image_str);
+
+                            // Create directory for base image
+                            let base_dir = self.work_dir.join("rootfs-base");
+                            std::fs::create_dir_all(&base_dir)?;
+
+                            // Pull and extract image
+                            tokio::runtime::Runtime::new()
+                                .map_err(|e| BuildError::ContextError(format!("Failed to create runtime: {}", e)))?
+                                .block_on(async {
+                                    self.oci_client.pull_image(&image_str, &base_dir).await
+                                })?;
+
+                            info!("Base image extracted to {}", base_dir.display());
+                            self.base_rootfs = Some(base_dir);
+                        }
+                    }
+
+                    // FROM doesn't create a layer itself
                     None
                 }
                 Instruction::Run { command } => {

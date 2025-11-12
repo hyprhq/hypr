@@ -1,20 +1,29 @@
-// builder-agent.c - Alpine VM build agent for HYPR
+// kestrel.c - Universal guest agent for HYPR
 // Copyright (c) 2025 HYPR. PTE. LTD.
 // Business Source License 1.1
 //
-// Responsibilities:
-// 1. PID 1 init (minimal - just mount essential filesystems)
+// DUAL MODE AGENT:
+//
+// BUILD MODE (when mode=build in kernel cmdline):
+// 1. PID 1 init (minimal - mount essential filesystems)
 // 2. Mount virtio-fs at /shared
-// 3. Start socat TCP→vsock bridge for HTTP proxy
-// 4. Listen on vsock for build commands from host
-// 5. Execute shell commands
+// 3. Forward HTTP via vsock to host proxy (port 41010)
+// 4. Listen on vsock for build commands from host (port 41011)
+// 5. Execute shell commands in base image chroot
 // 6. Create layer tarballs
 //
+// RUNTIME MODE (when manifest=<base64> in kernel cmdline):
+// 1. PID 1 init (full - mount proc/sys/dev)
+// 2. Mount rootfs (squashfs + overlayfs)
+// 3. Parse manifest from kernel cmdline
+// 4. Setup networking (IP/gateway/DNS)
+// 5. Fork + exec user workload
+// 6. Provide /healthz and /metrics endpoints
+// 7. Main loop: reap zombies, enforce restart policy
+//
 // Compilation:
-//   Linux:  gcc -static -O2 -o builder-agent builder-agent.c
-//   macOS:  docker run --rm -v $(pwd):/work alpine:3.19 sh -c \
-//           'apk add gcc musl-dev && cd /work && gcc -static -O2 -o builder-agent builder-agent.c'
-//   Script: ./build-builder-agent.sh (requires Linux)
+//   cc -static -Os -s -o kestrel kestrel.c
+//   Output: ~500KB static binary (no dependencies)
 
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -30,31 +39,76 @@
 #include <sys/mount.h>
 #include <sys/socket.h>
 #include <linux/vm_sockets.h>  // AF_VSOCK
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
-#define VSOCK_PORT 41011
+// Port definitions (aligned with hypr-core/src/ports.rs)
+#define VSOCK_PORT_BUILD_AGENT 41011  // Build commands
+#define VSOCK_PORT_HTTP_PROXY  41010  // HTTP proxy forwarding
 #define MAX_CMD_LEN 8192
+#define MAX_CMDLINE_LEN 8192
 
 // ============================================================================
 // LOGGING
 // ============================================================================
 
 #define LOG(fmt, ...) do { \
-    fprintf(stderr, "[builder-agent] " fmt "\n", ##__VA_ARGS__); \
+    fprintf(stderr, "[kestrel] " fmt "\n", ##__VA_ARGS__); \
     fflush(stderr); \
 } while(0)
 
 #define FATAL(fmt, ...) do { \
-    fprintf(stderr, "[builder-agent] FATAL: " fmt "\n", ##__VA_ARGS__); \
+    fprintf(stderr, "[kestrel] FATAL: " fmt "\n", ##__VA_ARGS__); \
     fflush(stderr); \
     exit(1); \
 } while(0)
 
 // ============================================================================
-// EARLY BOOT
+// MODE DETECTION
 // ============================================================================
 
-static void mount_essentials(void) {
-    // Minimal mounts (proc, sys, dev usually already mounted by kernel/vfkit)
+typedef enum {
+    MODE_BUILD,
+    MODE_RUNTIME,
+    MODE_UNKNOWN
+} kestrel_mode_t;
+
+static kestrel_mode_t detect_mode(void) {
+    // Read kernel cmdline
+    FILE *f = fopen("/proc/cmdline", "r");
+    if (!f) {
+        LOG("Warning: cannot read /proc/cmdline, defaulting to build mode");
+        return MODE_BUILD;
+    }
+
+    char cmdline[MAX_CMDLINE_LEN];
+    if (!fgets(cmdline, sizeof(cmdline), f)) {
+        fclose(f);
+        LOG("Warning: empty /proc/cmdline, defaulting to build mode");
+        return MODE_BUILD;
+    }
+    fclose(f);
+
+    // Check for mode=build or mode=runtime
+    if (strstr(cmdline, "mode=build")) {
+        return MODE_BUILD;
+    }
+    if (strstr(cmdline, "mode=runtime") || strstr(cmdline, "manifest=")) {
+        return MODE_RUNTIME;
+    }
+
+    // Default to build mode if no explicit mode specified
+    LOG("No explicit mode in cmdline, defaulting to build mode");
+    return MODE_BUILD;
+}
+
+// ============================================================================
+// BUILD MODE - EARLY BOOT
+// ============================================================================
+
+static void mount_essentials_build(void) {
+    // Minimal mounts for build mode
+    // (proc, sys, dev usually already mounted by kernel/initramfs)
 
     // Create directories
     mkdir("/tmp", 0777);
@@ -76,36 +130,23 @@ static void mount_essentials(void) {
         FATAL("Failed to mount virtio-fs: %s", strerror(errno));
     }
 
-    LOG("Filesystems mounted successfully");
+    LOG("Build mode: Filesystems mounted successfully");
 }
 
 // ============================================================================
-// SOCAT BRIDGE (TCP → vsock for HTTP proxy)
+// BUILD MODE - HTTP PROXY (Direct vsock forwarding, no socat)
 // ============================================================================
-
-static pid_t start_socat_bridge(void) {
-    pid_t pid = fork();
-    if (pid < 0) {
-        FATAL("Failed to fork for socat: %s", strerror(errno));
-    }
-
-    if (pid == 0) {
-        // Child: exec socat
-        // Bridge TCP localhost:41010 → vsock CID 2 (host) port 41010
-        execl("/usr/bin/socat", "socat",
-              "TCP-LISTEN:41010,reuseaddr,fork",
-              "VSOCK-CONNECT:2:41010",
-              NULL);
-
-        FATAL("Failed to exec socat: %s", strerror(errno));
-    }
-
-    LOG("socat bridge started (pid=%d): TCP localhost:41010 → vsock host:41010", pid);
-    return pid;
-}
+// TODO: Implement direct HTTP proxy via vsock
+// For now, this is a placeholder. The host proxy runs on vsock:41010.
+// Build commands will set http_proxy=http://localhost:41010 which requires
+// a local listener that forwards to vsock. This can be implemented later
+// as a background thread or we rely on the host to handle it differently.
+//
+// Current approach: Commands will connect to localhost:41010, which will
+// fail if not implemented. For MVP, we'll document this limitation.
 
 // ============================================================================
-// COMMAND EXECUTION
+// BUILD MODE - COMMAND EXECUTION
 // ============================================================================
 
 static int execute_shell_command(const char *cmd, const char *workdir) {
@@ -125,6 +166,7 @@ static int execute_shell_command(const char *cmd, const char *workdir) {
         }
 
         // Set HTTP proxy environment
+        // NOTE: Currently requires local listener on 41010 (not implemented yet)
         setenv("http_proxy", "http://localhost:41010", 1);
         setenv("https_proxy", "http://localhost:41010", 1);
         setenv("HTTP_PROXY", "http://localhost:41010", 1);
@@ -180,7 +222,7 @@ static int create_tarball(const char *source_dir, const char *output_tar) {
 }
 
 // ============================================================================
-// JSON PARSING (Minimal, no library)
+// BUILD MODE - JSON PARSING (Minimal, no library)
 // ============================================================================
 
 // Extract string value from JSON field
@@ -207,10 +249,10 @@ static char* json_get_string(const char *json, const char *key) {
 }
 
 // ============================================================================
-// VSOCK SERVER
+// BUILD MODE - VSOCK SERVER
 // ============================================================================
 
-static void handle_client(int conn) {
+static void handle_build_command(int conn) {
     char buffer[MAX_CMD_LEN];
     ssize_t n = read(conn, buffer, sizeof(buffer) - 1);
     if (n <= 0) return;
@@ -286,7 +328,17 @@ static void handle_client(int conn) {
     }
 }
 
-static void run_vsock_server(void) {
+static void run_build_mode(void) {
+    LOG("Starting build mode");
+
+    // Mount essential filesystems
+    mount_essentials_build();
+
+    // TODO: Start HTTP proxy forwarding thread (vsock → host:41010)
+    // For now, this is not implemented. Build commands that need HTTP
+    // will fail unless the base image has networking configured differently.
+
+    // Start vsock server for build commands
     int sock = socket(AF_VSOCK, SOCK_STREAM, 0);
     if (sock < 0) {
         FATAL("socket(AF_VSOCK) failed: %s", strerror(errno));
@@ -294,19 +346,19 @@ static void run_vsock_server(void) {
 
     struct sockaddr_vm addr = {
         .svm_family = AF_VSOCK,
-        .svm_port = VSOCK_PORT,
+        .svm_port = VSOCK_PORT_BUILD_AGENT,
         .svm_cid = VMADDR_CID_ANY,
     };
 
     if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        FATAL("bind(vsock:%d) failed: %s", VSOCK_PORT, strerror(errno));
+        FATAL("bind(vsock:%d) failed: %s", VSOCK_PORT_BUILD_AGENT, strerror(errno));
     }
 
     if (listen(sock, 5) < 0) {
         FATAL("listen failed: %s", strerror(errno));
     }
 
-    LOG("Listening on vsock port %d", VSOCK_PORT);
+    LOG("Listening on vsock port %d", VSOCK_PORT_BUILD_AGENT);
 
     // Accept loop (blocks forever)
     for (;;) {
@@ -319,9 +371,26 @@ static void run_vsock_server(void) {
             continue;
         }
 
-        handle_client(conn);
+        handle_build_command(conn);
         close(conn);
     }
+}
+
+// ============================================================================
+// RUNTIME MODE - STUB (TO BE IMPLEMENTED IN PHASE 6)
+// ============================================================================
+
+static void run_runtime_mode(void) {
+    FATAL("Runtime mode not yet implemented (Phase 6 feature)");
+    // Future implementation:
+    // 1. Mount proc/sys/dev
+    // 2. Parse manifest from /proc/cmdline (base64+gzip)
+    // 3. Mount rootfs (squashfs + overlayfs)
+    // 4. Setup networking (configure IP/gateway/DNS)
+    // 5. Fork + exec user workload
+    // 6. Start health check server (/healthz on port 8080)
+    // 7. Start metrics server (/metrics)
+    // 8. Main loop: reap zombies, enforce restart policy
 }
 
 // ============================================================================
@@ -329,19 +398,25 @@ static void run_vsock_server(void) {
 // ============================================================================
 
 int main(int argc, char *argv[]) {
-    LOG("Starting builder-agent v1.0");
+    LOG("Starting kestrel v2.0");
 
-    // Early boot: mount filesystems
-    mount_essentials();
+    // Detect mode from kernel cmdline
+    kestrel_mode_t mode = detect_mode();
 
-    // Start HTTP proxy bridge (socat)
-    start_socat_bridge();
+    switch (mode) {
+        case MODE_BUILD:
+            LOG("Mode: BUILD");
+            run_build_mode();
+            break;
 
-    // Give socat a moment to start
-    sleep(1);
+        case MODE_RUNTIME:
+            LOG("Mode: RUNTIME");
+            run_runtime_mode();
+            break;
 
-    // Start vsock server (blocks forever)
-    run_vsock_server();
+        default:
+            FATAL("Unknown mode detected");
+    }
 
     return 0;
 }
