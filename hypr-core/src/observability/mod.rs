@@ -43,7 +43,7 @@ pub fn init() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     // 3. Set up Prometheus metrics exporter
-    PrometheusBuilder::new().with_http_listener(([0, 0, 0, 0], 9090)).install()?;
+    PrometheusBuilder::new().with_http_listener(([0, 0, 0, 0], crate::ports::PORT_DAEMON_METRICS)).install()?;
 
     // 4. Register core metrics
     metrics::register_core_metrics();
