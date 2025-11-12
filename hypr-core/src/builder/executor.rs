@@ -7,9 +7,11 @@
 
 use crate::builder::cache::CacheManager;
 use crate::builder::graph::BuildGraph;
+use crate::builder::parser::Instruction;
+use sha2::Digest;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use tracing::instrument;
+use tracing::{debug, info, instrument, warn};
 
 /// Result type for build operations.
 pub type BuildResult<T> = Result<T, BuildError>;
@@ -1016,13 +1018,307 @@ impl NativeBuilder {
     }
 }
 
-// MacOsBuilder removed - implementing proper VM-based builder per master plan
-// See COMPREHENSIVE_AUDIT_2025-11-12.md for security rationale
+/// VM-based builder for macOS (uses HVF via vfkit + Alpine VM).
+///
+/// Executes builds in isolated Alpine Linux VMs with no network interface.
+/// All HTTP traffic is proxied via vsock to the host's BuilderHttpProxy.
+#[cfg(target_os = "macos")]
+pub struct MacOsVmBuilder {
+    /// VM builder for executing build steps
+    vm_builder: crate::builder::VmBuilder,
+    /// Working directory for builds
+    work_dir: PathBuf,
+    /// Current environment variables (accumulated from ENV instructions)
+    env: HashMap<String, String>,
+    /// Current working directory (from WORKDIR instructions)
+    workdir: String,
+    /// Image configuration being built
+    config: ImageConfig,
+}
 
 #[cfg(target_os = "macos")]
-pub struct MacOsBuilder {
-    // REMOVED: Security violation - executed builds on host instead of in VM
-    // Proper VM-based builder will be implemented in vm_builder.rs
+impl MacOsVmBuilder {
+    /// Create a new macOS VM-based builder.
+    pub fn new() -> BuildResult<Self> {
+        use crate::adapters::HvfAdapter;
+        use dirs::home_dir;
+
+        let work_dir = std::env::temp_dir().join(format!("hypr-build-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&work_dir).map_err(|e| BuildError::IoError {
+            path: work_dir.clone(),
+            source: e,
+        })?;
+
+        // Locate builder rootfs and kernel
+        let hypr_dir = home_dir()
+            .ok_or_else(|| BuildError::ContextError("Could not find home directory".into()))?
+            .join(".hypr");
+
+        let builder_rootfs = hypr_dir.join("builder").join("alpine-builder.squashfs");
+        let kernel_path = hypr_dir.join("kernel").join("vmlinuz");
+
+        // Check if builder rootfs exists
+        if !builder_rootfs.exists() {
+            return Err(BuildError::ContextError(format!(
+                "Builder rootfs not found at: {}\n\
+                 Please run: hypr builder init",
+                builder_rootfs.display()
+            )));
+        }
+
+        if !kernel_path.exists() {
+            return Err(BuildError::ContextError(format!(
+                "Kernel not found at: {}\n\
+                 Please run: hypr builder init",
+                kernel_path.display()
+            )));
+        }
+
+        // Create VMM adapter for macOS (HVF)
+        let adapter = HvfAdapter::new().map_err(|e| BuildError::ContextError(format!(
+            "Failed to create HVF adapter: {}", e
+        )))?;
+
+        let vm_builder = crate::builder::VmBuilder::new(
+            Box::new(adapter),
+            builder_rootfs,
+            kernel_path,
+            work_dir.clone(),
+        );
+
+        Ok(Self {
+            vm_builder,
+            work_dir,
+            env: HashMap::new(),
+            workdir: "/workspace".to_string(),
+            config: ImageConfig {
+                entrypoint: None,
+                cmd: None,
+                env: HashMap::new(),
+                workdir: None,
+                user: None,
+                exposed_ports: Vec::new(),
+                volumes: Vec::new(),
+                labels: HashMap::new(),
+            },
+        })
+    }
+
+    /// Execute a RUN instruction in a builder VM.
+    fn execute_run(&mut self, command: &str) -> BuildResult<PathBuf> {
+        use crate::builder::BuildStep;
+
+        let layer_id = format!("layer-{}", uuid::Uuid::new_v4());
+        let output_dir = self.work_dir.join("layers");
+        std::fs::create_dir_all(&output_dir).map_err(|e| BuildError::IoError {
+            path: output_dir.clone(),
+            source: e,
+        })?;
+
+        let output_layer = output_dir.join(format!("{}.tar", layer_id));
+        let context_dir = self.work_dir.join("context");
+
+        let step = BuildStep::Run {
+            command: command.to_string(),
+            workdir: self.workdir.clone(),
+        };
+
+        // Execute in VM
+        tokio::runtime::Runtime::new()
+            .map_err(|e| BuildError::ContextError(format!("Failed to create runtime: {}", e)))?
+            .block_on(async {
+                self.vm_builder
+                    .execute_step(&step, &context_dir, &output_layer)
+                    .await
+            })
+            .map_err(|e| BuildError::InstructionFailed {
+                instruction: format!("RUN {}", command),
+                details: e.to_string(),
+            })?;
+
+        Ok(output_layer)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl BuildExecutor for MacOsVmBuilder {
+    fn execute(
+        &mut self,
+        graph: &BuildGraph,
+        context: &BuildContext,
+        cache: &mut CacheManager,
+    ) -> BuildResult<BuildOutput> {
+        info!("Starting macOS VM-based build");
+
+        let mut final_layers: Vec<PathBuf> = Vec::new();
+
+        // Execute each node in topological order
+        for node in &graph.nodes {
+            debug!("Executing node: {:?}", node.instruction);
+
+            // Check cache first
+            if !context.no_cache {
+                match cache.lookup(&node.cache_key)? {
+                    crate::builder::cache::CacheLookupResult::Hit { layer_path, metadata: _ } => {
+                        info!("Cache hit for: {:?}", node.instruction);
+                        final_layers.push(layer_path);
+                        continue;
+                    }
+                    crate::builder::cache::CacheLookupResult::Miss => {}
+                }
+            }
+
+            // Execute instruction
+            let layer_path_opt = match &node.instruction {
+                Instruction::From { image, .. } => {
+                    info!("Pulling base image: {:?}", image);
+                    // Base image handling would go here
+                    // For now, skip (would pull from OCI registry)
+                    None
+                }
+                Instruction::Run { command } => {
+                    let command_str = match command {
+                        crate::builder::parser::RunCommand::Shell(cmd) => cmd.clone(),
+                        crate::builder::parser::RunCommand::Exec(args) => {
+                            // Convert exec form to shell form for builder VM
+                            args.join(" ")
+                        }
+                    };
+                    info!("Executing RUN: {}", command_str);
+                    let layer = self.execute_run(&command_str)?;
+
+                    // Cache insertion would go here (needs layer bytes, not path)
+                    // For now, we skip caching in VM builder
+
+                    Some(layer)
+                }
+                Instruction::Env { vars } => {
+                    // Update environment
+                    for (key, value) in vars {
+                        self.env.insert(key.clone(), value.clone());
+                        self.config.env.insert(key.clone(), value.clone());
+                    }
+                    None
+                }
+                Instruction::Workdir { path } => {
+                    self.workdir = path.clone();
+                    self.config.workdir = Some(path.clone());
+                    None
+                }
+                Instruction::Cmd { command } => {
+                    let cmd_vec = match command {
+                        crate::builder::parser::RunCommand::Shell(cmd) => vec!["/bin/sh".to_string(), "-c".to_string(), cmd.clone()],
+                        crate::builder::parser::RunCommand::Exec(args) => args.clone(),
+                    };
+                    self.config.cmd = Some(cmd_vec);
+                    None
+                }
+                Instruction::Entrypoint { command } => {
+                    let entry_vec = match command {
+                        crate::builder::parser::RunCommand::Shell(cmd) => vec!["/bin/sh".to_string(), "-c".to_string(), cmd.clone()],
+                        crate::builder::parser::RunCommand::Exec(args) => args.clone(),
+                    };
+                    self.config.entrypoint = Some(entry_vec);
+                    None
+                }
+                Instruction::Expose { ports } => {
+                    for port_spec in ports {
+                        let port_str = format!("{}", port_spec.port);
+                        if !self.config.exposed_ports.contains(&port_str) {
+                            self.config.exposed_ports.push(port_str);
+                        }
+                    }
+                    None
+                }
+                _ => {
+                    warn!("Unsupported instruction (skipping): {:?}", node.instruction);
+                    None
+                }
+            };
+
+            if let Some(layer_path) = layer_path_opt {
+                final_layers.push(layer_path);
+            }
+        }
+
+        // Merge layers into final rootfs
+        info!("Merging {} layers into final rootfs", final_layers.len());
+        let final_rootfs = self.work_dir.join("rootfs");
+        std::fs::create_dir_all(&final_rootfs).map_err(|e| BuildError::IoError {
+            path: final_rootfs.clone(),
+            source: e,
+        })?;
+
+        // Extract all layer tarballs
+        for layer in &final_layers {
+            debug!("Extracting layer: {}", layer.display());
+            let status = std::process::Command::new("tar")
+                .args(["-xf", layer.to_str().unwrap(), "-C", final_rootfs.to_str().unwrap()])
+                .status()
+                .map_err(|e| BuildError::IoError {
+                    path: layer.clone(),
+                    source: e,
+                })?;
+
+            if !status.success() {
+                return Err(BuildError::LayerExtractionFailed {
+                    path: layer.clone(),
+                    reason: "tar extraction failed".into(),
+                });
+            }
+        }
+
+        // Create SquashFS from final rootfs
+        info!("Creating SquashFS image");
+        let squashfs_path = self.work_dir.join("final.squashfs");
+        let status = std::process::Command::new("mksquashfs")
+            .args([
+                final_rootfs.to_str().unwrap(),
+                squashfs_path.to_str().unwrap(),
+                "-noappend",
+                "-comp",
+                "zstd",
+            ])
+            .status()
+            .map_err(|e| BuildError::IoError {
+                path: squashfs_path.clone(),
+                source: e,
+            })?;
+
+        if !status.success() {
+            return Err(BuildError::ContextError("mksquashfs failed".into()));
+        }
+
+        // Generate manifest
+        let manifest = ImageManifest {
+            name: "built-image".to_string(),
+            tag: "latest".to_string(),
+            config: self.config.clone(),
+            created: chrono::Utc::now().to_rfc3339(),
+            architecture: "x86_64".to_string(),
+            os: "linux".to_string(),
+        };
+
+        // Compute image ID (SHA256 of manifest)
+        let manifest_json = serde_json::to_string(&manifest).map_err(|e| {
+            BuildError::ContextError(format!("Failed to serialize manifest: {}", e))
+        })?;
+        let image_id = format!("{:x}", sha2::Sha256::digest(manifest_json.as_bytes()));
+
+        info!("Build complete: {}", image_id);
+
+        Ok(BuildOutput {
+            image_id,
+            rootfs_path: squashfs_path,
+            manifest,
+            stats: BuildStats {
+                duration_secs: 0.0,
+                layer_count: final_layers.len(),
+                cached_layers: 0,
+                total_size: 0,
+            },
+        })
+    }
 }
 
 #[instrument]
@@ -1035,13 +1331,8 @@ pub fn create_builder() -> BuildResult<Box<dyn BuildExecutor>> {
 
     #[cfg(target_os = "macos")]
     {
-        tracing::error!("macOS builds temporarily disabled - implementing VM-based builder for security");
-        Err(BuildError::PlatformNotSupported(
-            "macOS builds temporarily disabled while implementing proper VM-based builder. \
-             Previous implementation executed builds on host (security risk). \
-             VM-based builder with proper isolation coming soon. \
-             For now, please use Linux for builds.".to_string()
-        ))
+        info!("Creating macOS VM-based builder (HVF + Alpine)");
+        Ok(Box::new(MacOsVmBuilder::new()?))
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
