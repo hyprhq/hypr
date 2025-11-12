@@ -5,12 +5,11 @@
 //! - Linux: Native builder with chroot isolation
 //! - macOS: VM-based builder with HVF/vfkit
 
-use crate::builder::graph::{BuildGraph, BuildNode};
-use crate::builder::parser::{Instruction, RunCommand};
 use crate::builder::cache::CacheManager;
+use crate::builder::graph::BuildGraph;
+use crate::builder::graph::BuildNode;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use tracing::{debug, info, warn};
 
 /// Result type for build operations.
 pub type BuildResult<T> = Result<T, BuildError>;
@@ -38,6 +37,34 @@ pub enum BuildError {
 
     #[error("Cache error: {0}")]
     Cache(#[from] crate::builder::cache::CacheError),
+
+    #[error("Manifest error: {0}")]
+    Manifest(#[from] crate::builder::manifest::ManifestError),
+
+    #[error("Image pull failed: {image}\n{reason}")]
+    ImagePullFailed { image: String, reason: String },
+
+    #[error("Invalid image reference: {image}\n{reason}")]
+    InvalidImageRef { image: String, reason: String },
+
+    #[error("Layer extraction failed: {path}\n{reason}")]
+    LayerExtractionFailed { path: PathBuf, reason: String },
+
+    #[error("I/O error at {path}: {source}")]
+    IoError {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
+    #[error("Mount failed: {target}\n{reason}")]
+    MountFailed { target: PathBuf, reason: String },
+
+    #[error("Command execution failed: {command}\nExit code: {exit_code}\n{stderr}")]
+    CommandFailed {
+        command: String,
+        exit_code: i32,
+        stderr: String,
+    },
 }
 
 /// Build context containing source files and configuration.
@@ -129,11 +156,23 @@ pub trait BuildExecutor {
     ) -> BuildResult<BuildOutput>;
 }
 
-/// Native builder for Linux (uses chroot).
+/// Native builder for Linux (uses overlayfs + chroot).
 #[cfg(target_os = "linux")]
 pub struct NativeBuilder {
     /// Working directory for builds
     work_dir: PathBuf,
+    /// Current rootfs (merged from all layers)
+    current_rootfs: PathBuf,
+    /// Overlay layers (lower dirs)
+    layers: Vec<PathBuf>,
+    /// Current environment variables
+    env: HashMap<String, String>,
+    /// Current working directory
+    current_workdir: String,
+    /// Current user
+    current_user: String,
+    /// OCI registry client for pulling base images
+    oci_client: crate::builder::oci::OciClient,
 }
 
 #[cfg(target_os = "linux")]
@@ -141,7 +180,20 @@ impl NativeBuilder {
     /// Creates a new native builder.
     pub fn new() -> BuildResult<Self> {
         let work_dir = Self::create_work_dir()?;
-        Ok(Self { work_dir })
+        let current_rootfs = work_dir.join("rootfs");
+        std::fs::create_dir_all(&current_rootfs)?;
+
+        let oci_client = crate::builder::oci::OciClient::new()?;
+
+        Ok(Self {
+            work_dir,
+            current_rootfs,
+            layers: Vec::new(),
+            env: HashMap::new(),
+            current_workdir: "/".to_string(),
+            current_user: "root".to_string(),
+            oci_client,
+        })
     }
 
     /// Creates a temporary working directory for builds.
@@ -152,23 +204,311 @@ impl NativeBuilder {
         Ok(work_dir)
     }
 
+    /// Creates a REAL overlay filesystem for a build step using Linux kernel mount().
+    ///
+    /// This uses the Linux overlayfs to create a union mount with:
+    /// - lower: read-only base (current_rootfs)
+    /// - upper: writable layer (captures changes)
+    /// - work: kernel scratch space
+    /// - merged: the combined view (where chroot happens)
+    ///
+    /// Returns (merged_dir, upper_dir, work_dir)
+    fn create_overlay(&self, step_id: usize) -> BuildResult<(PathBuf, PathBuf, PathBuf)> {
+        use nix::mount::{mount, MsFlags};
+        use tracing::{debug, info};
+
+        let overlay_dir = self.work_dir.join(format!("overlay-{}", step_id));
+        let lower_dir = &self.current_rootfs; // Use current rootfs as lower (read-only)
+        let upper_dir = overlay_dir.join("upper");
+        let work_dir = overlay_dir.join("work");
+        let merged_dir = overlay_dir.join("merged");
+
+        // Create overlay directories
+        std::fs::create_dir_all(&upper_dir).map_err(|e| BuildError::IoError {
+            path: upper_dir.clone(),
+            source: e,
+        })?;
+        std::fs::create_dir_all(&work_dir).map_err(|e| BuildError::IoError {
+            path: work_dir.clone(),
+            source: e,
+        })?;
+        std::fs::create_dir_all(&merged_dir).map_err(|e| BuildError::IoError {
+            path: merged_dir.clone(),
+            source: e,
+        })?;
+
+        // Mount overlayfs using Linux kernel mount() syscall
+        let options = format!(
+            "lowerdir={},upperdir={},workdir={}",
+            lower_dir.display(),
+            upper_dir.display(),
+            work_dir.display()
+        );
+
+        debug!(
+            lower = %lower_dir.display(),
+            upper = %upper_dir.display(),
+            work = %work_dir.display(),
+            merged = %merged_dir.display(),
+            "Mounting overlayfs"
+        );
+
+        mount(
+            Some("overlay"),
+            &merged_dir,
+            Some("overlay"),
+            MsFlags::empty(),
+            Some(options.as_str()),
+        )
+        .map_err(|e| BuildError::MountFailed {
+            target: merged_dir.clone(),
+            reason: format!("overlayfs mount failed: {}", e),
+        })?;
+
+        info!(
+            merged = %merged_dir.display(),
+            "Overlayfs mounted successfully"
+        );
+
+        Ok((merged_dir, upper_dir, work_dir))
+    }
+
+    /// Unmounts an overlayfs mount point.
+    fn unmount_overlay(&self, merged_dir: &Path) -> BuildResult<()> {
+        use nix::mount::{umount, MntFlags};
+        use tracing::debug;
+
+        debug!(path = %merged_dir.display(), "Unmounting overlayfs");
+
+        umount(merged_dir).map_err(|e| BuildError::MountFailed {
+            target: merged_dir.to_path_buf(),
+            reason: format!("unmount failed: {}", e),
+        })?;
+
+        Ok(())
+    }
+
+    /// Executes a command in a REAL chroot environment with proper bind mounts.
+    ///
+    /// Sets up:
+    /// - /proc bind mount (process info)
+    /// - /sys bind mount (sysfs)
+    /// - /dev bind mount (devices)
+    /// - Then chroots and executes command
+    fn execute_in_chroot(
+        &self,
+        rootfs: &PathBuf,
+        command: &[String],
+        env: &HashMap<String, String>,
+        workdir: &str,
+    ) -> BuildResult<()> {
+        use nix::mount::{mount, umount, MsFlags};
+        use std::process::Command;
+        use tracing::{debug, info};
+
+        // Create mount points inside chroot
+        let proc_dir = rootfs.join("proc");
+        let sys_dir = rootfs.join("sys");
+        let dev_dir = rootfs.join("dev");
+
+        std::fs::create_dir_all(&proc_dir).map_err(|e| BuildError::IoError {
+            path: proc_dir.clone(),
+            source: e,
+        })?;
+        std::fs::create_dir_all(&sys_dir).map_err(|e| BuildError::IoError {
+            path: sys_dir.clone(),
+            source: e,
+        })?;
+        std::fs::create_dir_all(&dev_dir).map_err(|e| BuildError::IoError {
+            path: dev_dir.clone(),
+            source: e,
+        })?;
+
+        debug!("Bind mounting /proc /sys /dev into chroot");
+
+        // Bind mount /proc
+        mount(
+            Some("/proc"),
+            &proc_dir,
+            Some("proc"),
+            MsFlags::MS_BIND | MsFlags::MS_REC,
+            None::<&str>,
+        )
+        .map_err(|e| BuildError::MountFailed {
+            target: proc_dir.clone(),
+            reason: format!("/proc bind mount failed: {}", e),
+        })?;
+
+        // Bind mount /sys
+        mount(
+            Some("/sys"),
+            &sys_dir,
+            Some("sysfs"),
+            MsFlags::MS_BIND | MsFlags::MS_REC,
+            None::<&str>,
+        )
+        .map_err(|e| {
+            let _ = umount(&proc_dir); // cleanup
+            BuildError::MountFailed {
+                target: sys_dir.clone(),
+                reason: format!("/sys bind mount failed: {}", e),
+            }
+        })?;
+
+        // Bind mount /dev
+        mount(
+            Some("/dev"),
+            &dev_dir,
+            Some("devtmpfs"),
+            MsFlags::MS_BIND | MsFlags::MS_REC,
+            None::<&str>,
+        )
+        .map_err(|e| {
+            let _ = umount(&proc_dir); // cleanup
+            let _ = umount(&sys_dir); // cleanup
+            BuildError::MountFailed {
+                target: dev_dir.clone(),
+                reason: format!("/dev bind mount failed: {}", e),
+            }
+        })?;
+
+        // Create working directory if needed
+        let workdir_in_rootfs = rootfs.join(workdir.trim_start_matches('/'));
+        std::fs::create_dir_all(&workdir_in_rootfs).map_err(|e| BuildError::IoError {
+            path: workdir_in_rootfs.clone(),
+            source: e,
+        })?;
+
+        // Build chroot command
+        let mut cmd = Command::new("chroot");
+        cmd.arg(rootfs);
+        for arg in command {
+            cmd.arg(arg);
+        }
+
+        // Set environment
+        cmd.env_clear();
+        cmd.env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+        cmd.env("HOME", "/root");
+        cmd.env("DEBIAN_FRONTEND", "noninteractive"); // Prevent interactive prompts
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+
+        info!(command = ?command, "Executing in chroot");
+
+        // Execute command
+        let output = cmd.output().map_err(|e| {
+            // Cleanup mounts on error
+            let _ = umount(&dev_dir);
+            let _ = umount(&sys_dir);
+            let _ = umount(&proc_dir);
+            BuildError::InstructionFailed {
+                instruction: format!("{:?}", command),
+                details: format!("Failed to execute chroot: {}", e),
+            }
+        })?;
+
+        // Cleanup: unmount in reverse order
+        debug!("Cleaning up bind mounts");
+        umount(&dev_dir).map_err(|e| BuildError::MountFailed {
+            target: dev_dir.clone(),
+            reason: format!("unmount /dev failed: {}", e),
+        })?;
+        umount(&sys_dir).map_err(|e| BuildError::MountFailed {
+            target: sys_dir.clone(),
+            reason: format!("unmount /sys failed: {}", e),
+        })?;
+        umount(&proc_dir).map_err(|e| BuildError::MountFailed {
+            target: proc_dir.clone(),
+            reason: format!("unmount /proc failed: {}", e),
+        })?;
+
+        // Check command exit status
+        if !output.status.success() {
+            let exit_code = output.status.code().unwrap_or(-1);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(BuildError::CommandFailed {
+                command: format!("{:?}", command),
+                exit_code,
+                stderr: stderr.to_string(),
+            });
+        }
+
+        info!("Command completed successfully");
+        Ok(())
+    }
+
+    /// Captures a layer by creating a tarball of the upper directory.
+    fn capture_layer(&self, upper_dir: &PathBuf, step_id: usize) -> BuildResult<PathBuf> {
+        let layer_path = self.work_dir.join(format!("layer-{}.tar", step_id));
+
+        // Create tarball of upper directory
+        let tar_gz = std::fs::File::create(&layer_path)?;
+        let mut ar = tar::Builder::new(tar_gz);
+        ar.append_dir_all(".", upper_dir)?;
+        ar.finish()?;
+
+        Ok(layer_path)
+    }
+
+    /// Merges a layer into the current rootfs.
+    fn merge_layer(&mut self, upper_dir: &PathBuf) -> BuildResult<()> {
+        // Copy upper dir contents to current rootfs
+        if std::fs::read_dir(upper_dir)?.next().is_some() {
+            Self::copy_dir_all(upper_dir, &self.current_rootfs)?;
+        }
+        Ok(())
+    }
+
+    /// Recursively copies a directory tree, preserving structure and permissions.
+    fn copy_dir_all(src: &PathBuf, dst: &PathBuf) -> BuildResult<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::create_dir_all(dst)?;
+
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let ty = entry.file_type()?;
+            let src_path = entry.path();
+            let dst_path = dst.join(entry.file_name());
+
+            if ty.is_symlink() {
+                // Preserve symlinks
+                let link_target = std::fs::read_link(&src_path)?;
+                let _ = std::fs::remove_file(&dst_path); // Remove if exists
+                std::os::unix::fs::symlink(&link_target, &dst_path)?;
+            } else if ty.is_dir() {
+                Self::copy_dir_all(&src_path, &dst_path)?;
+            } else {
+                // Copy file
+                std::fs::copy(&src_path, &dst_path)?;
+                // Preserve permissions
+                let metadata = std::fs::metadata(&src_path)?;
+                let permissions = metadata.permissions();
+                std::fs::set_permissions(&dst_path, permissions)?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Executes a single build node.
+    ///
+    /// Returns (layer_path, was_cached)
     fn execute_node(
         &mut self,
         node: &BuildNode,
         context: &BuildContext,
         cache: &mut CacheManager,
-    ) -> BuildResult<Option<PathBuf>> {
+    ) -> BuildResult<(Option<PathBuf>, bool)> {
         // Check cache first (unless no-cache is set)
         if !context.no_cache {
             match cache.lookup(&node.cache_key)? {
-                crate::builder::cache::CacheLookupResult::Hit { layer_path, metadata } => {
-                    info!("Cache hit for {}: {}", node.cache_key, metadata.step_description);
-                    return Ok(Some(layer_path));
+                crate::builder::cache::CacheLookupResult::Hit { layer_path, metadata: _ } => {
+                    return Ok((Some(layer_path), true));
                 }
-                crate::builder::cache::CacheLookupResult::Miss => {
-                    debug!("Cache miss for {}", node.cache_key);
-                }
+                crate::builder::cache::CacheLookupResult::Miss => {}
             }
         }
 
@@ -197,7 +537,7 @@ impl NativeBuilder {
                 self.execute_user(user)?
             }
             // Other instructions don't create layers, just update metadata
-            _ => return Ok(None),
+            _ => return Ok((None, false)),
         };
 
         // Cache the layer
@@ -207,26 +547,111 @@ impl NativeBuilder {
             cache.insert(&node.cache_key, &data, description, node.stage_index)?;
         }
 
-        Ok(layer_path)
+        Ok((layer_path, false))
     }
 
     fn execute_from(&mut self, node: &BuildNode) -> BuildResult<Option<PathBuf>> {
-        // TODO: Pull base image from registry or local storage
-        // For now, return placeholder
-        warn!("FROM instruction not yet fully implemented");
-        Ok(None)
+        use crate::builder::parser::{ImageRef, Instruction};
+        use tracing::{info, instrument};
+
+        // Extract image reference from instruction
+        let image_ref = match &node.instruction {
+            Instruction::From { image, .. } => image,
+            _ => {
+                return Err(BuildError::InstructionFailed {
+                    instruction: "FROM".to_string(),
+                    details: "Expected FROM instruction".to_string(),
+                })
+            }
+        };
+
+        match image_ref {
+            ImageRef::Scratch => {
+                info!("FROM scratch: initializing empty rootfs");
+                // Create minimal directory structure for scratch builds
+                std::fs::create_dir_all(self.current_rootfs.join("tmp"))?;
+                std::fs::create_dir_all(self.current_rootfs.join("etc"))?;
+                std::fs::create_dir_all(self.current_rootfs.join("proc"))?;
+                std::fs::create_dir_all(self.current_rootfs.join("sys"))?;
+                std::fs::create_dir_all(self.current_rootfs.join("dev"))?;
+                Ok(None)
+            }
+            ImageRef::Stage(stage_name) => {
+                // Multi-stage builds: copy from another stage
+                // TODO: Implement stage copying when multi-stage support is added
+                Err(BuildError::InstructionFailed {
+                    instruction: "FROM".to_string(),
+                    details: format!("Multi-stage builds not yet supported: FROM {}", stage_name),
+                })
+            }
+            ImageRef::Image { name, tag, digest } => {
+                // Construct full image reference
+                let image_str = if let Some(digest) = digest {
+                    format!("{}@{}", name, digest)
+                } else {
+                    format!("{}:{}", name, tag.as_deref().unwrap_or("latest"))
+                };
+
+                info!("FROM {}: pulling base image from registry", image_str);
+
+                // Pull image using OCI client
+                let runtime = tokio::runtime::Handle::try_current()
+                    .unwrap_or_else(|_| {
+                        // Create a new runtime if not in async context
+                        tokio::runtime::Runtime::new()
+                            .expect("Failed to create tokio runtime")
+                            .handle()
+                            .clone()
+                    });
+
+                runtime.block_on(async {
+                    self.oci_client
+                        .pull_image(&image_str, &self.current_rootfs)
+                        .await
+                })?;
+
+                info!("Base image extracted successfully to {}", self.current_rootfs.display());
+
+                // FROM doesn't create a layer itself, just sets up the base
+                Ok(None)
+            }
+        }
     }
 
     fn execute_run(&mut self, command: &RunCommand) -> BuildResult<Option<PathBuf>> {
-        // TODO: Execute command in chroot environment
-        // For now, return placeholder
-        let cmd_str = match command {
-            RunCommand::Shell(s) => s.clone(),
-            RunCommand::Exec(args) => args.join(" "),
+        use crate::builder::parser::RunCommand;
+
+        // Convert RunCommand to actual command args
+        let cmd_args: Vec<String> = match command {
+            RunCommand::Shell(cmd) => {
+                vec!["/bin/sh".to_string(), "-c".to_string(), cmd.clone()]
+            }
+            RunCommand::Exec(args) => args.clone(),
         };
 
-        debug!("Would execute RUN: {}", cmd_str);
-        Ok(None)
+        // Create overlay for this step
+        let step_id = self.layers.len();
+        let (merged_dir, upper_dir, _work_dir) = self.create_overlay(step_id)?;
+
+        // Execute command in chroot (cleanup overlayfs on error or success)
+        let exec_result = self.execute_in_chroot(&merged_dir, &cmd_args, &self.env, &self.current_workdir);
+
+        // CRITICAL: Unmount overlayfs regardless of success/failure
+        self.unmount_overlay(&merged_dir)?;
+
+        // Propagate execution error if it occurred
+        exec_result?;
+
+        // Capture the layer
+        let layer_path = self.capture_layer(&upper_dir, step_id)?;
+
+        // Merge changes into current rootfs
+        self.merge_layer(&upper_dir)?;
+
+        // Track this layer
+        self.layers.push(layer_path.clone());
+
+        Ok(Some(layer_path))
     }
 
     fn execute_copy(
@@ -235,8 +660,57 @@ impl NativeBuilder {
         destination: &str,
         context: &BuildContext,
     ) -> BuildResult<Option<PathBuf>> {
-        debug!("Would copy {:?} to {}", sources, destination);
-        Ok(None)
+        use tracing::info;
+
+        let step_id = self.layers.len();
+
+        // COPY doesn't need overlayfs mount - just create a layer directory
+        let layer_dir = self.work_dir.join(format!("layer-{}", step_id));
+        std::fs::create_dir_all(&layer_dir)?;
+
+        // Resolve destination path
+        let dest_path = if destination.starts_with('/') {
+            layer_dir.join(destination.trim_start_matches('/'))
+        } else {
+            layer_dir.join(self.current_workdir.trim_start_matches('/')).join(destination)
+        };
+
+        std::fs::create_dir_all(&dest_path)?;
+
+        info!(sources = ?sources, destination = %destination, "Copying files");
+
+        // Copy files from build context
+        for source in sources {
+            let src_path = context.context_path.join(source);
+            if !src_path.exists() {
+                return Err(BuildError::ContextError(format!(
+                    "Source file not found: {}",
+                    source
+                )));
+            }
+
+            let file_name = src_path.file_name().ok_or_else(|| {
+                BuildError::ContextError(format!("Invalid source path: {}", source))
+            })?;
+
+            let target_path = dest_path.join(file_name);
+
+            if src_path.is_dir() {
+                Self::copy_dir_all(&src_path, &target_path)?;
+            } else {
+                std::fs::copy(&src_path, &target_path)?;
+            }
+        }
+
+        // Capture the layer
+        let layer_path = self.capture_layer(&layer_dir, step_id)?;
+
+        // Merge changes into current rootfs
+        self.merge_layer(&layer_dir)?;
+
+        self.layers.push(layer_path.clone());
+
+        Ok(Some(layer_path))
     }
 
     fn execute_add(
@@ -245,22 +719,34 @@ impl NativeBuilder {
         destination: &str,
         context: &BuildContext,
     ) -> BuildResult<Option<PathBuf>> {
-        debug!("Would add {:?} to {}", sources, destination);
-        Ok(None)
+        // ADD is similar to COPY but also handles tar extraction
+        // For now, just use COPY implementation
+        // TODO: Add tar extraction for .tar, .tar.gz, etc.
+        self.execute_copy(sources, destination, context)
     }
 
     fn execute_env(&mut self, vars: &HashMap<String, String>) -> BuildResult<Option<PathBuf>> {
-        debug!("Would set env vars: {:?}", vars);
+        // ENV doesn't create a layer, just updates environment
+        for (key, value) in vars {
+            self.env.insert(key.clone(), value.clone());
+        }
         Ok(None)
     }
 
     fn execute_workdir(&mut self, path: &str) -> BuildResult<Option<PathBuf>> {
-        debug!("Would set workdir: {}", path);
+        // WORKDIR creates the directory and sets it as current
+        self.current_workdir = path.to_string();
+
+        // Create the directory in the current rootfs
+        let workdir_path = self.current_rootfs.join(path.trim_start_matches('/'));
+        std::fs::create_dir_all(&workdir_path)?;
+
         Ok(None)
     }
 
     fn execute_user(&mut self, user: &str) -> BuildResult<Option<PathBuf>> {
-        debug!("Would set user: {}", user);
+        // USER just tracks the user, doesn't create a layer
+        self.current_user = user.to_string();
         Ok(None)
     }
 }
@@ -288,44 +774,49 @@ impl BuildExecutor for NativeBuilder {
             let node = graph.get_node(node_id)
                 .ok_or_else(|| BuildError::ContextError(format!("Node {} not found", node_id)))?;
 
-            debug!("Executing node {}: {:?}", node_id, node.instruction);
+            let (layer_path, was_cached) = self.execute_node(node, context, cache)?;
 
-            if let Some(_layer_path) = self.execute_node(node, context, cache)? {
+            if layer_path.is_some() {
                 total_layers += 1;
-                // Check if it was a cache hit
-                // (We'd need to track this more carefully in production)
+                if was_cached {
+                    cached_layers += 1;
+                }
             }
         }
 
         let duration = start.elapsed();
 
-        // TODO: Generate final rootfs and manifest
-        // For now, return placeholder
+        // Generate final SquashFS image
+        let squashfs_path = self.generate_squashfs()?;
+
+        // Calculate total size
+        let total_size = std::fs::metadata(&squashfs_path)?.len();
+
+        // Generate image ID (SHA256 of squashfs)
+        use sha2::{Digest, Sha256};
+        let squashfs_data = std::fs::read(&squashfs_path)?;
+        let mut hasher = Sha256::new();
+        hasher.update(&squashfs_data);
+        let image_id = format!("{:x}", hasher.finalize());
+
+        // Generate manifest using ManifestGenerator
+        use crate::builder::manifest::ManifestGenerator;
+        let mut manifest_gen = ManifestGenerator::new();
+
+        // Parse tag from context or use defaults
+        let (name, tag) = ("myimage".to_string(), "latest".to_string());
+
+        let manifest = manifest_gen.generate(graph, name, tag, None)?;
+
         let output = BuildOutput {
-            image_id: "placeholder".to_string(),
-            rootfs_path: self.work_dir.join("rootfs.squashfs"),
-            manifest: ImageManifest {
-                name: "myimage".to_string(),
-                tag: "latest".to_string(),
-                created: chrono::Utc::now().to_rfc3339(),
-                architecture: "x86_64".to_string(),
-                os: "linux".to_string(),
-                config: ImageConfig {
-                    entrypoint: None,
-                    cmd: None,
-                    env: HashMap::new(),
-                    workdir: None,
-                    user: None,
-                    exposed_ports: Vec::new(),
-                    volumes: Vec::new(),
-                    labels: HashMap::new(),
-                },
-            },
+            image_id: image_id[..12].to_string(), // Short ID like Docker
+            rootfs_path: squashfs_path,
+            manifest,
             stats: BuildStats {
                 duration_secs: duration.as_secs_f64(),
                 layer_count: total_layers,
                 cached_layers,
-                total_size: 0,
+                total_size,
             },
         };
 
@@ -333,35 +824,475 @@ impl BuildExecutor for NativeBuilder {
     }
 }
 
-/// VM-based builder for macOS (uses HVF/vfkit).
+#[cfg(target_os = "linux")]
+impl NativeBuilder {
+    /// Generates a SquashFS image from the current rootfs.
+    fn generate_squashfs(&self) -> BuildResult<PathBuf> {
+        use tracing::{info, instrument};
+
+        let squashfs_path = self.work_dir.join("rootfs.squashfs");
+
+        info!(
+            rootfs = %self.current_rootfs.display(),
+            output = %squashfs_path.display(),
+            "Generating SquashFS image"
+        );
+
+        // Use mksquashfs command to create SquashFS with zstd compression
+        // -comp zstd: Fast compression, good ratio
+        // -noappend: Overwrite if exists
+        // -no-progress: Suppress progress output
+        let output = std::process::Command::new("mksquashfs")
+            .arg(&self.current_rootfs)
+            .arg(&squashfs_path)
+            .arg("-comp")
+            .arg("zstd")      // zstd is faster than xz with similar compression
+            .arg("-noappend")
+            .arg("-no-progress")
+            .output()
+            .map_err(|e| BuildError::InstructionFailed {
+                instruction: "mksquashfs".to_string(),
+                details: format!(
+                    "Failed to run mksquashfs: {}.\n\
+                     Make sure squashfs-tools is installed:\n\
+                     - Ubuntu/Debian: sudo apt install squashfs-tools\n\
+                     - Fedora: sudo dnf install squashfs-tools\n\
+                     - Arch: sudo pacman -S squashfs-tools",
+                    e
+                ),
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(BuildError::InstructionFailed {
+                instruction: "mksquashfs".to_string(),
+                details: format!("mksquashfs failed:\n{}", stderr),
+            });
+        }
+
+        let size_mb = std::fs::metadata(&squashfs_path)?.len() as f64 / (1024.0 * 1024.0);
+        info!(
+            path = %squashfs_path.display(),
+            size_mb = format!("{:.2}", size_mb),
+            "SquashFS image generated successfully"
+        );
+
+        Ok(squashfs_path)
+    }
+}
+
+/// macOS builder - uses simple chroot without overlayfs.
+///
+/// This is a development-friendly builder for macOS that doesn't use overlayfs
+/// (which doesn't exist on macOS). Instead it uses directory copying for layers.
+/// For production builds, use Linux with NativeBuilder.
 #[cfg(target_os = "macos")]
-pub struct VmBuilder {
-    /// Path to builder VM image
-    #[allow(dead_code)]
-    vm_image: PathBuf,
+pub struct MacOsBuilder {
+    /// Working directory for builds
+    work_dir: PathBuf,
+    /// Current rootfs (merged from all layers)
+    current_rootfs: PathBuf,
+    /// Layers (captured tarballs)
+    layers: Vec<PathBuf>,
+    /// Current environment variables
+    env: HashMap<String, String>,
+    /// Current working directory
+    current_workdir: String,
+    /// Current user
+    current_user: String,
+    /// OCI registry client for pulling base images
+    oci_client: crate::builder::oci::OciClient,
 }
 
 #[cfg(target_os = "macos")]
-impl VmBuilder {
+impl MacOsBuilder {
     pub fn new() -> BuildResult<Self> {
-        // TODO: Set up builder VM
-        Err(BuildError::PlatformNotSupported(
-            "VM builder not yet implemented".to_string(),
-        ))
+        let work_dir = Self::create_work_dir()?;
+        let current_rootfs = work_dir.join("rootfs");
+        std::fs::create_dir_all(&current_rootfs)?;
+
+        let oci_client = crate::builder::oci::OciClient::new()?;
+
+        Ok(Self {
+            work_dir,
+            current_rootfs,
+            layers: Vec::new(),
+            env: HashMap::new(),
+            current_workdir: "/".to_string(),
+            current_user: "root".to_string(),
+            oci_client,
+        })
+    }
+
+    fn create_work_dir() -> BuildResult<PathBuf> {
+        let temp = std::env::temp_dir();
+        let work_dir = temp.join(format!("hypr-build-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&work_dir)?;
+        Ok(work_dir)
+    }
+
+    /// Creates a layer directory by copying current rootfs.
+    /// (macOS doesn't have overlayfs, so we copy instead)
+    fn create_layer_dir(&self, step_id: usize) -> BuildResult<PathBuf> {
+        use tracing::debug;
+
+        let layer_dir = self.work_dir.join(format!("layer-{}", step_id));
+        std::fs::create_dir_all(&layer_dir)?;
+
+        // Copy current rootfs to layer dir
+        if std::fs::read_dir(&self.current_rootfs)?.next().is_some() {
+            debug!("Copying rootfs to layer directory (macOS fallback)");
+            Self::copy_dir_all(&self.current_rootfs, &layer_dir)?;
+        }
+
+        Ok(layer_dir)
+    }
+
+    /// Recursively copies a directory tree.
+    fn copy_dir_all(src: &PathBuf, dst: &PathBuf) -> BuildResult<()> {
+        std::fs::create_dir_all(dst)?;
+
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let ty = entry.file_type()?;
+            let src_path = entry.path();
+            let dst_path = dst.join(entry.file_name());
+
+            if ty.is_symlink() {
+                let link_target = std::fs::read_link(&src_path)?;
+                let _ = std::fs::remove_file(&dst_path);
+                std::os::unix::fs::symlink(&link_target, &dst_path)?;
+            } else if ty.is_dir() {
+                Self::copy_dir_all(&src_path, &dst_path)?;
+            } else {
+                std::fs::copy(&src_path, &dst_path)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Executes a command in chroot (without overlayfs).
+    /// On macOS this is less isolated but still works for builds.
+    fn execute_in_chroot(
+        &self,
+        rootfs: &PathBuf,
+        command: &[String],
+        env: &HashMap<String, String>,
+        workdir: &str,
+    ) -> BuildResult<()> {
+        use std::process::Command;
+        use tracing::info;
+
+        // Create working directory
+        let workdir_in_rootfs = rootfs.join(workdir.trim_start_matches('/'));
+        std::fs::create_dir_all(&workdir_in_rootfs)?;
+
+        // Build chroot command
+        let mut cmd = Command::new("chroot");
+        cmd.arg(rootfs);
+        for arg in command {
+            cmd.arg(arg);
+        }
+
+        // Set environment
+        cmd.env_clear();
+        cmd.env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+        cmd.env("HOME", "/root");
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+
+        info!(command = ?command, "Executing in chroot (macOS)");
+
+        let output = cmd.output().map_err(|e| BuildError::InstructionFailed {
+            instruction: format!("{:?}", command),
+            details: format!("Failed to execute chroot: {}. Note: chroot may require sudo on macOS.", e),
+        })?;
+
+        if !output.status.success() {
+            let exit_code = output.status.code().unwrap_or(-1);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(BuildError::CommandFailed {
+                command: format!("{:?}", command),
+                exit_code,
+                stderr: stderr.to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Captures layer changes by diffing directories.
+    fn capture_layer(&self, layer_dir: &PathBuf, step_id: usize) -> BuildResult<PathBuf> {
+        let layer_path = self.work_dir.join(format!("layer-{}.tar", step_id));
+
+        let tar_file = std::fs::File::create(&layer_path)?;
+        let mut ar = tar::Builder::new(tar_file);
+        ar.append_dir_all(".", layer_dir)?;
+        ar.finish()?;
+
+        Ok(layer_path)
+    }
+
+    /// Merges layer into current rootfs.
+    fn merge_layer(&mut self, layer_dir: &PathBuf) -> BuildResult<()> {
+        if std::fs::read_dir(layer_dir)?.next().is_some() {
+            // Clear current rootfs
+            for entry in std::fs::read_dir(&self.current_rootfs)? {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    std::fs::remove_dir_all(entry.path())?;
+                } else {
+                    std::fs::remove_file(entry.path())?;
+                }
+            }
+            // Copy layer to rootfs
+            Self::copy_dir_all(layer_dir, &self.current_rootfs)?;
+        }
+        Ok(())
+    }
+
+    /// Generate SquashFS (requires squashfs-tools on macOS: brew install squashfs)
+    fn generate_squashfs(&self) -> BuildResult<PathBuf> {
+        use tracing::info;
+
+        let squashfs_path = self.work_dir.join("rootfs.squashfs");
+
+        info!(
+            rootfs = %self.current_rootfs.display(),
+            output = %squashfs_path.display(),
+            "Generating SquashFS image (macOS)"
+        );
+
+        let output = std::process::Command::new("mksquashfs")
+            .arg(&self.current_rootfs)
+            .arg(&squashfs_path)
+            .arg("-comp")
+            .arg("zstd")
+            .arg("-noappend")
+            .arg("-no-progress")
+            .output()
+            .map_err(|e| BuildError::InstructionFailed {
+                instruction: "mksquashfs".to_string(),
+                details: format!(
+                    "Failed to run mksquashfs: {}.\n\
+                     Install with: brew install squashfs",
+                    e
+                ),
+            })?;
+
+        if !output.status.success() {
+            return Err(BuildError::InstructionFailed {
+                instruction: "mksquashfs".to_string(),
+                details: format!("mksquashfs failed:\n{}", String::from_utf8_lossy(&output.stderr)),
+            });
+        }
+
+        let size_mb = std::fs::metadata(&squashfs_path)?.len() as f64 / (1024.0 * 1024.0);
+        info!(size_mb = format!("{:.2}", size_mb), "SquashFS generated");
+
+        Ok(squashfs_path)
+    }
+
+    // Reuse FROM implementation from Linux builder
+    fn execute_from(&mut self, node: &BuildNode) -> BuildResult<Option<PathBuf>> {
+        use crate::builder::parser::{ImageRef, Instruction};
+        use tracing::info;
+
+        let image_ref = match &node.instruction {
+            Instruction::From { image, .. } => image,
+            _ => {
+                return Err(BuildError::InstructionFailed {
+                    instruction: "FROM".to_string(),
+                    details: "Expected FROM instruction".to_string(),
+                })
+            }
+        };
+
+        match image_ref {
+            ImageRef::Scratch => {
+                info!("FROM scratch: initializing empty rootfs");
+                std::fs::create_dir_all(self.current_rootfs.join("tmp"))?;
+                std::fs::create_dir_all(self.current_rootfs.join("etc"))?;
+                Ok(None)
+            }
+            ImageRef::Stage(stage_name) => Err(BuildError::InstructionFailed {
+                instruction: "FROM".to_string(),
+                details: format!("Multi-stage builds not yet supported: FROM {}", stage_name),
+            }),
+            ImageRef::Image { name, tag, digest } => {
+                let image_str = if let Some(digest) = digest {
+                    format!("{}@{}", name, digest)
+                } else {
+                    format!("{}:{}", name, tag.as_deref().unwrap_or("latest"))
+                };
+
+                info!("FROM {}: pulling base image", image_str);
+
+                let runtime = tokio::runtime::Handle::try_current().unwrap_or_else(|_| {
+                    tokio::runtime::Runtime::new()
+                        .expect("Failed to create tokio runtime")
+                        .handle()
+                        .clone()
+                });
+
+                runtime.block_on(async {
+                    self.oci_client.pull_image(&image_str, &self.current_rootfs).await
+                })?;
+
+                info!("Base image extracted");
+                Ok(None)
+            }
+        }
+    }
+
+    fn execute_run(&mut self, command: &crate::builder::parser::RunCommand) -> BuildResult<Option<PathBuf>> {
+        use crate::builder::parser::RunCommand;
+
+        let cmd_args: Vec<String> = match command {
+            RunCommand::Shell(cmd) => vec!["/bin/sh".to_string(), "-c".to_string(), cmd.clone()],
+            RunCommand::Exec(args) => args.clone(),
+        };
+
+        let step_id = self.layers.len();
+        let layer_dir = self.create_layer_dir(step_id)?;
+
+        self.execute_in_chroot(&layer_dir, &cmd_args, &self.env, &self.current_workdir)?;
+
+        let layer_path = self.capture_layer(&layer_dir, step_id)?;
+        self.merge_layer(&layer_dir)?;
+        self.layers.push(layer_path.clone());
+
+        Ok(Some(layer_path))
+    }
+
+    fn execute_copy(&mut self, sources: &[String], destination: &str, context: &BuildContext) -> BuildResult<Option<PathBuf>> {
+        let step_id = self.layers.len();
+        let layer_dir = self.work_dir.join(format!("layer-{}", step_id));
+        std::fs::create_dir_all(&layer_dir)?;
+
+        let dest_path = if destination.starts_with('/') {
+            layer_dir.join(destination.trim_start_matches('/'))
+        } else {
+            layer_dir.join(self.current_workdir.trim_start_matches('/')).join(destination)
+        };
+
+        std::fs::create_dir_all(&dest_path)?;
+
+        for source in sources {
+            let src_path = context.context_path.join(source);
+            if !src_path.exists() {
+                return Err(BuildError::ContextError(format!("Source not found: {}", source)));
+            }
+
+            let file_name = src_path.file_name().ok_or_else(|| BuildError::ContextError("Invalid path".into()))?;
+            let target_path = dest_path.join(file_name);
+
+            if src_path.is_dir() {
+                Self::copy_dir_all(&src_path, &target_path)?;
+            } else {
+                std::fs::copy(&src_path, &target_path)?;
+            }
+        }
+
+        let layer_path = self.capture_layer(&layer_dir, step_id)?;
+        self.merge_layer(&layer_dir)?;
+        self.layers.push(layer_path.clone());
+
+        Ok(Some(layer_path))
+    }
+
+    fn execute_env(&mut self, vars: &HashMap<String, String>) -> BuildResult<Option<PathBuf>> {
+        for (key, value) in vars {
+            self.env.insert(key.clone(), value.clone());
+        }
+        Ok(None)
+    }
+
+    fn execute_workdir(&mut self, path: &str) -> BuildResult<Option<PathBuf>> {
+        self.current_workdir = path.to_string();
+        let workdir_path = self.current_rootfs.join(path.trim_start_matches('/'));
+        std::fs::create_dir_all(&workdir_path)?;
+        Ok(None)
     }
 }
 
 #[cfg(target_os = "macos")]
-impl BuildExecutor for VmBuilder {
+impl BuildExecutor for MacOsBuilder {
     fn execute(
         &mut self,
-        _graph: &BuildGraph,
-        _context: &BuildContext,
+        graph: &BuildGraph,
+        context: &BuildContext,
         _cache: &mut CacheManager,
     ) -> BuildResult<BuildOutput> {
-        Err(BuildError::PlatformNotSupported(
-            "VM builder not yet implemented".to_string(),
-        ))
+        use sha2::{Digest, Sha256};
+        use std::time::Instant;
+        use tracing::info;
+
+        info!("Starting build (macOS mode - no overlayfs, less isolated)");
+
+        let start = Instant::now();
+
+        // Execute all nodes in topological order
+        let node_ids = graph.topological_sort().map_err(|e| BuildError::InstructionFailed {
+            instruction: "topological_sort".to_string(),
+            details: format!("Failed to sort build graph: {}", e),
+        })?;
+
+        for node_id in node_ids {
+            let node = &graph.nodes[node_id];
+            match &node.instruction {
+                crate::builder::parser::Instruction::From { .. } => {
+                    self.execute_from(node)?;
+                }
+                crate::builder::parser::Instruction::Run { command } => {
+                    self.execute_run(&command)?;
+                }
+                crate::builder::parser::Instruction::Copy { sources, destination, .. } => {
+                    self.execute_copy(&sources, &destination, context)?;
+                }
+                crate::builder::parser::Instruction::Add { sources, destination, .. } => {
+                    self.execute_copy(&sources, &destination, context)?; // ADD same as COPY for now
+                }
+                crate::builder::parser::Instruction::Env { vars } => {
+                    self.execute_env(&vars)?;
+                }
+                crate::builder::parser::Instruction::Workdir { path } => {
+                    self.execute_workdir(&path)?;
+                }
+                _ => {} // Skip other instructions for now
+            }
+        }
+
+        let duration = start.elapsed();
+
+        // Generate SquashFS
+        let squashfs_path = self.generate_squashfs()?;
+        let total_size = std::fs::metadata(&squashfs_path)?.len();
+
+        // Generate image ID (SHA256 of squashfs)
+        let squashfs_data = std::fs::read(&squashfs_path)?;
+        let mut hasher = Sha256::new();
+        hasher.update(&squashfs_data);
+        let image_id = format!("{:x}", hasher.finalize());
+
+        // Generate manifest
+        let mut manifest_gen = crate::builder::manifest::ManifestGenerator::new();
+        let (name, tag) = ("myimage".to_string(), "latest".to_string());
+        let manifest = manifest_gen.generate(graph, name, tag, None)?;
+
+        Ok(BuildOutput {
+            image_id: image_id[..12].to_string(), // Short ID like Docker
+            rootfs_path: squashfs_path,
+            manifest,
+            stats: BuildStats {
+                duration_secs: duration.as_secs_f64(),
+                layer_count: self.layers.len(),
+                cached_layers: 0, // No caching on macOS builder yet
+                total_size,
+            },
+        })
     }
 }
 
@@ -374,13 +1305,13 @@ pub fn create_builder() -> BuildResult<Box<dyn BuildExecutor>> {
 
     #[cfg(target_os = "macos")]
     {
-        Ok(Box::new(VmBuilder::new()?))
+        Ok(Box::new(MacOsBuilder::new()?))
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         Err(BuildError::PlatformNotSupported(
-            std::env::consts::OS.to_string(),
+            format!("Builds not supported on {}. Supported: Linux, macOS", std::env::consts::OS)
         ))
     }
 }

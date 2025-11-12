@@ -7,6 +7,7 @@ pub mod cache;
 pub mod executor;
 pub mod graph;
 pub mod manifest;
+pub mod oci;
 pub mod parser;
 
 pub use cache::{CacheError, CacheLookupResult, CacheManager, LayerMetadata};
