@@ -1313,13 +1313,21 @@ impl BuildExecutor for LinuxVmBuilder {
         // Generate manifest
         let manifest = crate::builder::manifest::ImageManifest::from_config(&self.config);
 
+        // Calculate total size
+        let total_size = std::fs::metadata(&squashfs_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+
         Ok(BuildOutput {
+            image_id: format!("{:x}", md5::compute(format!("{:?}", self.config))),
             rootfs_path: squashfs_path,
             manifest,
-            image_id: format!("{:x}", md5::compute(format!("{:?}", self.config))),
-            layers: final_layers.len(),
-            cached_layers: 0,
-            total_size_bytes: 0,
+            stats: BuildStats {
+                duration_secs: 0.0, // Will be calculated by caller
+                layer_count: final_layers.len(),
+                cached_layers: 0,
+                total_size,
+            },
         })
     }
 
