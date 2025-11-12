@@ -115,6 +115,16 @@ impl HvfAdapter {
             args.push(format!("virtio-blk,path={}", disk.path.display()));
         }
 
+        // virtio-fs mounts
+        for mount in &config.virtio_fs_mounts {
+            args.push("--device".to_string());
+            args.push(format!(
+                "virtio-fs,sharedDir={},mountTag={}",
+                mount.host_path.display(),
+                mount.tag
+            ));
+        }
+
         // Network (NAT mode)
         args.push("--device".to_string());
         let mac = config

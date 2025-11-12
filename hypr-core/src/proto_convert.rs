@@ -145,6 +145,7 @@ impl TryFrom<ProtoVmConfig> for VmConfig {
             volumes: proto.volumes.into_iter().map(|v| v.try_into()).collect::<Result<Vec<_>>>()?,
             gpu: proto.gpu.map(|g| g.try_into()).transpose()?,
             vsock_path: PathBuf::from(proto.vsock_path),
+            virtio_fs_mounts: vec![], // Proto support for virtio-fs not yet added to hypr.proto
         })
     }
 }

@@ -112,6 +112,9 @@ pub struct VmConfig {
 
     /// Path to vsock socket
     pub vsock_path: PathBuf,
+
+    /// virtio-fs shared directory mounts
+    pub virtio_fs_mounts: Vec<VirtioFsMount>,
 }
 
 /// VM resource allocation.
@@ -150,6 +153,20 @@ pub enum DiskFormat {
     Squashfs,
     Ext4,
     Raw,
+}
+
+/// virtio-fs shared directory mount.
+///
+/// Allows sharing a host directory with the guest VM using virtio-fs.
+/// The guest can mount it with: `mount -t virtiofs <tag> <mount_point>`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VirtioFsMount {
+    /// Host directory path to share
+    pub host_path: PathBuf,
+
+    /// Mount tag (used by guest to identify the mount)
+    /// Example: "shared" → guest runs `mount -t virtiofs shared /mnt/shared`
+    pub tag: String,
 }
 
 /// GPU configuration.

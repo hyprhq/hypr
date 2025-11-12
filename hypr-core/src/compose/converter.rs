@@ -111,6 +111,7 @@ impl ComposeConverter {
             volumes,
             gpu: None,
             vsock_path: PathBuf::from(format!("/var/run/hypr/{}.vsock", vm_id)),
+            virtio_fs_mounts: vec![],
         })
     }
 

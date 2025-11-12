@@ -9,6 +9,7 @@ pub mod graph;
 pub mod manifest;
 pub mod oci;
 pub mod parser;
+// vm_builder removed - will be reimplemented with proper VM isolation
 
 pub use cache::{CacheError, CacheLookupResult, CacheManager, LayerMetadata};
 pub use executor::{

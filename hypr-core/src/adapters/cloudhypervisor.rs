@@ -103,6 +103,16 @@ impl CloudHypervisorAdapter {
             args.push(disk_arg);
         }
 
+        // virtio-fs mounts
+        for mount in &config.virtio_fs_mounts {
+            args.push("--fs".to_string());
+            args.push(format!(
+                "tag={},socket={},num_queues=1",
+                mount.tag,
+                mount.host_path.join(format!("{}-virtiofs.sock", mount.tag)).display()
+            ));
+        }
+
         // Network (simplified - will be enhanced in Phase 2)
         args.push("--net".to_string());
         args.push(format!(

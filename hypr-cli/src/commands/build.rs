@@ -46,8 +46,12 @@ pub async fn build(
         anyhow::bail!("Dockerfile not found: {}", dockerfile_path.display());
     }
 
-    // Parse tag
-    let (image_name, image_tag) = parse_tag(tag)?;
+    // Parse tag (use directory name if not provided)
+    let default_name = context_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("image");
+    let (image_name, image_tag) = parse_tag(tag, default_name)?;
 
     println!(
         "{} Building image {}:{}",
@@ -257,9 +261,9 @@ pub async fn build(
 /// - None -> ("myimage", "latest")
 /// - "myapp" -> ("myapp", "latest")
 /// - "myapp:v1.0" -> ("myapp", "v1.0")
-fn parse_tag(tag: Option<&str>) -> Result<(String, String)> {
+fn parse_tag(tag: Option<&str>, default_name: &str) -> Result<(String, String)> {
     match tag {
-        None => Ok(("myimage".to_string(), "latest".to_string())),
+        None => Ok((default_name.to_string(), "latest".to_string())),
         Some(t) => {
             let parts: Vec<&str> = t.splitn(2, ':').collect();
             match parts.len() {
