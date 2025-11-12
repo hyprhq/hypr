@@ -6,10 +6,11 @@
 pub mod cache;
 pub mod executor;
 pub mod graph;
+pub mod http_proxy;
 pub mod manifest;
 pub mod oci;
 pub mod parser;
-// vm_builder removed - will be reimplemented with proper VM isolation
+pub mod vm_builder;
 
 pub use cache::{CacheError, CacheLookupResult, CacheManager, LayerMetadata};
 pub use executor::{
@@ -17,5 +18,7 @@ pub use executor::{
     ImageManifest, create_builder,
 };
 pub use graph::{BuildGraph, BuildNode, GraphError};
+pub use http_proxy::BuilderHttpProxy;
 pub use manifest::{ManifestError, ManifestGenerator, ManifestResult};
 pub use parser::{Dockerfile, Instruction, ParseError};
+pub use vm_builder::{BuildLayerInfo, BuildStep, VmBuilder};
