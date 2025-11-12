@@ -50,6 +50,7 @@ pub async fn run(
         volumes: vec![],
         gpu: None,
         vsock_path: PathBuf::from(format!("/tmp/hypr-{}.vsock", vm_id)),
+        virtio_fs_mounts: vec![],
     };
 
     println!("Creating VM '{}'...", vm_name);
