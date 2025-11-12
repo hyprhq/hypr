@@ -6,6 +6,7 @@
 pub mod cache;
 pub mod executor;
 pub mod graph;
+pub mod manifest;
 pub mod parser;
 
 pub use cache::{CacheError, CacheLookupResult, CacheManager, LayerMetadata};
@@ -14,4 +15,5 @@ pub use executor::{
     ImageManifest, create_builder,
 };
 pub use graph::{BuildGraph, BuildNode, GraphError};
+pub use manifest::{ManifestError, ManifestGenerator, ManifestResult};
 pub use parser::{Dockerfile, Instruction, ParseError};
