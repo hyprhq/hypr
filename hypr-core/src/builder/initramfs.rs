@@ -81,163 +81,189 @@ fn create_directory_structure(root: &Path) -> BuildResult<()> {
 
 /// Copy kestrel binary from build output to initramfs /init.
 fn copy_kestrel_binary(root: &Path) -> BuildResult<()> {
-    // On Linux, build.rs compiles kestrel.c and sets KESTREL_BIN_PATH
-    // On macOS, we need a pre-built kestrel binary (or cross-compile)
+    let kestrel_dst = root.join("init");
+
+    // Determine architecture
+    let arch = std::env::consts::ARCH;
+    let kestrel_arch = match arch {
+        "x86_64" => "x86_64",
+        "aarch64" => "aarch64",
+        other => {
+            return Err(BuildError::ContextError(format!(
+                "Unsupported architecture: {}. Only x86_64 and aarch64 are supported.",
+                other
+            )));
+        }
+    };
 
     #[cfg(target_os = "linux")]
     {
-        // Get kestrel binary path from build.rs
-        let kestrel_src = env!("KESTREL_BIN_PATH");
-        let kestrel_dst = root.join("init");
-
-        debug!("Copying kestrel: {} → {}", kestrel_src, kestrel_dst.display());
-
-        fs::copy(kestrel_src, &kestrel_dst).map_err(|e| BuildError::IoError {
-            path: kestrel_dst.clone(),
-            source: e,
-        })?;
-
-        // Make executable
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&kestrel_dst)
-                .map_err(|e| BuildError::IoError {
-                    path: kestrel_dst.clone(),
-                    source: e,
-                })?
-                .permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&kestrel_dst, perms).map_err(|e| BuildError::IoError {
-                path: kestrel_dst.clone(),
-                source: e,
-            })?;
-        }
-
-        Ok(())
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        // On macOS, we need a pre-built Linux kestrel binary
-        // Check for bundled kestrel or fail gracefully
-        let bundled_kestrel = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../guest/kestrel-linux-x86_64");
-
-        if bundled_kestrel.exists() {
-            let kestrel_dst = root.join("init");
-            debug!(
-                "Copying bundled kestrel: {} → {}",
-                bundled_kestrel.display(),
-                kestrel_dst.display()
-            );
-            fs::copy(&bundled_kestrel, &kestrel_dst).map_err(|e| BuildError::IoError {
-                path: kestrel_dst.clone(),
-                source: e,
-            })?;
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = fs::metadata(&kestrel_dst)
-                    .map_err(|e| BuildError::IoError {
-                        path: kestrel_dst.clone(),
-                        source: e,
-                    })?
-                    .permissions();
-                perms.set_mode(0o755);
-                fs::set_permissions(&kestrel_dst, perms).map_err(|e| BuildError::IoError {
+        // On Linux, prefer build.rs compiled version, fall back to download
+        if let Ok(kestrel_src) = std::env::var("KESTREL_BIN_PATH") {
+            if PathBuf::from(&kestrel_src).exists() {
+                debug!("Copying kestrel from build.rs: {} → {}", kestrel_src, kestrel_dst.display());
+                fs::copy(&kestrel_src, &kestrel_dst).map_err(|e| BuildError::IoError {
                     path: kestrel_dst.clone(),
                     source: e,
                 })?;
-            }
 
-            Ok(())
-        } else {
-            Err(BuildError::ContextError(format!(
-                "Kestrel binary not found. On macOS, you need a pre-built Linux binary.\n\
-                 Expected at: {}\n\
-                 Please cross-compile kestrel.c for Linux or use a Linux build machine.",
-                bundled_kestrel.display()
-            )))
+                set_executable(&kestrel_dst)?;
+                return Ok(());
+            }
         }
     }
+
+    // Download from GitHub releases
+    download_kestrel(kestrel_arch, &kestrel_dst)?;
+    set_executable(&kestrel_dst)?;
+
+    Ok(())
 }
 
-/// Copy or download busybox binary to initramfs /bin/busybox.
+/// Download kestrel from GitHub releases.
+fn download_kestrel(arch: &str, dest: &Path) -> BuildResult<()> {
+    let url = format!("https://github.com/hyprhq/hypr/releases/download/latest/kestrel-linux-{}", arch);
+
+    debug!("Downloading kestrel from: {}", url);
+
+    // Use curl or wget (portable across Unix systems)
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("curl -fsSL {} -o {} || wget -q -O {} {}", url, dest.display(), dest.display(), url))
+        .status()
+        .map_err(|e| BuildError::ContextError(format!("Failed to download kestrel: {}", e)))?;
+
+    if !status.success() {
+        return Err(BuildError::ContextError(format!(
+            "Failed to download kestrel from {}.\n\
+             Please check internet connection or manually place kestrel binary at ~/.hypr/bin/kestrel-linux-{}",
+            url, arch
+        )));
+    }
+
+    // Verify downloaded
+    if !dest.exists() {
+        return Err(BuildError::ContextError(format!(
+            "Kestrel binary not found after download: {}",
+            dest.display()
+        )));
+    }
+
+    debug!("Kestrel downloaded successfully");
+    Ok(())
+}
+
+/// Set file as executable (Unix only).
+fn set_executable(path: &Path) -> BuildResult<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(path)
+            .map_err(|e| BuildError::IoError {
+                path: path.to_path_buf(),
+                source: e,
+            })?
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).map_err(|e| BuildError::IoError {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
+    }
+    Ok(())
+}
+
+/// Download and extract busybox from Debian packages.
 fn copy_busybox_binary(root: &Path) -> BuildResult<()> {
     let busybox_dst = root.join("bin/busybox");
 
-    // Check for bundled busybox
-    let bundled_busybox = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../guest/busybox-x86_64");
-
-    if bundled_busybox.exists() {
-        debug!(
-            "Copying bundled busybox: {} → {}",
-            bundled_busybox.display(),
-            busybox_dst.display()
-        );
-        fs::copy(&bundled_busybox, &busybox_dst).map_err(|e| BuildError::IoError {
-            path: busybox_dst.clone(),
-            source: e,
-        })?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&busybox_dst)
-                .map_err(|e| BuildError::IoError {
-                    path: busybox_dst.clone(),
-                    source: e,
-                })?
-                .permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&busybox_dst, perms).map_err(|e| BuildError::IoError {
-                path: busybox_dst.clone(),
-                source: e,
-            })?;
+    // Determine architecture
+    let arch = std::env::consts::ARCH;
+    let (deb_arch, deb_url) = match arch {
+        "x86_64" => (
+            "amd64",
+            "https://ftp.debian.org/debian/pool/main/b/busybox/busybox-static_1.37.0-7_amd64.deb"
+        ),
+        "aarch64" => (
+            "arm64",
+            "https://ftp.debian.org/debian/pool/main/b/busybox/busybox-static_1.37.0-7_arm64.deb"
+        ),
+        other => {
+            return Err(BuildError::ContextError(format!(
+                "Unsupported architecture for busybox: {}",
+                other
+            )));
         }
+    };
 
-        Ok(())
-    } else {
-        // TODO: Download busybox from canonical source
-        // For now, create a placeholder and warn
-        let mut file = File::create(&busybox_dst).map_err(|e| BuildError::IoError {
-            path: busybox_dst.clone(),
-            source: e,
-        })?;
-        file.write_all(b"#!/bin/sh\necho 'busybox placeholder'\n")
-            .map_err(|e| BuildError::IoError {
-                path: busybox_dst.clone(),
-                source: e,
-            })?;
+    // Create temp directory for extraction
+    let temp_dir = std::env::temp_dir().join(format!("hypr-busybox-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&temp_dir).map_err(|e| BuildError::IoError {
+        path: temp_dir.clone(),
+        source: e,
+    })?;
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&busybox_dst)
-                .map_err(|e| BuildError::IoError {
-                    path: busybox_dst.clone(),
-                    source: e,
-                })?
-                .permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&busybox_dst, perms).map_err(|e| BuildError::IoError {
-                path: busybox_dst.clone(),
-                source: e,
-            })?;
-        }
+    let deb_file = temp_dir.join(format!("busybox-static_{}.deb", deb_arch));
 
-        eprintln!(
-            "Warning: busybox not found, using placeholder. \
-             Download busybox from https://busybox.net/downloads/binaries/ \
-             and place at: {}",
-            bundled_busybox.display()
-        );
+    debug!("Downloading busybox-static from Debian: {}", deb_url);
 
-        Ok(())
+    // Download .deb file
+    let download_status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "curl -fsSL {} -o {} || wget -q -O {} {}",
+            deb_url, deb_file.display(), deb_file.display(), deb_url
+        ))
+        .status()
+        .map_err(|e| BuildError::ContextError(format!("Failed to download busybox: {}", e)))?;
+
+    if !download_status.success() {
+        let _ = fs::remove_dir_all(&temp_dir);
+        return Err(BuildError::ContextError(format!(
+            "Failed to download busybox from Debian: {}",
+            deb_url
+        )));
     }
+
+    debug!("Extracting busybox from .deb package");
+
+    // Extract .deb: ar x file.deb data.tar.xz, then tar -xf data.tar.xz ./bin/busybox
+    let extract_status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "cd {} && (ar x {} data.tar.xz 2>/dev/null || bsdtar -xf {} data.tar.xz) && \
+             tar -xf data.tar.xz ./bin/busybox && mv bin/busybox {}",
+            temp_dir.display(),
+            deb_file.display(),
+            deb_file.display(),
+            busybox_dst.display()
+        ))
+        .status()
+        .map_err(|e| BuildError::ContextError(format!("Failed to extract busybox: {}", e)))?;
+
+    // Cleanup temp directory
+    let _ = fs::remove_dir_all(&temp_dir);
+
+    if !extract_status.success() {
+        return Err(BuildError::ContextError(
+            "Failed to extract busybox from .deb package. \
+             Requires 'ar' (binutils) or 'bsdtar' (libarchive) and 'tar'."
+                .into(),
+        ));
+    }
+
+    // Verify extracted
+    if !busybox_dst.exists() {
+        return Err(BuildError::ContextError(format!(
+            "Busybox binary not found after extraction: {}",
+            busybox_dst.display()
+        )));
+    }
+
+    set_executable(&busybox_dst)?;
+
+    debug!("Busybox extracted successfully");
+    Ok(())
 }
 
 /// Create cpio archive from directory contents.
