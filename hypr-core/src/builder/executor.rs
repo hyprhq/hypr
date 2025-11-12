@@ -10,7 +10,7 @@ use crate::builder::graph::BuildGraph;
 use crate::builder::graph::BuildNode;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use tracing::{debug, info};
+use tracing::{debug, info, instrument};
 
 /// Result type for build operations.
 pub type BuildResult<T> = Result<T, BuildError>;
@@ -179,6 +179,7 @@ pub struct NativeBuilder {
 #[cfg(target_os = "linux")]
 impl NativeBuilder {
     /// Creates a new native builder.
+    #[instrument]
     pub fn new() -> BuildResult<Self> {
         let work_dir = Self::create_work_dir()?;
         let current_rootfs = work_dir.join("rootfs");
@@ -844,6 +845,7 @@ impl NativeBuilder {
 
 #[cfg(target_os = "linux")]
 impl BuildExecutor for NativeBuilder {
+    #[instrument(skip(self, graph, cache), fields(no_cache = context.no_cache))]
     fn execute(
         &mut self,
         graph: &BuildGraph,
@@ -865,7 +867,30 @@ impl BuildExecutor for NativeBuilder {
             let node = graph.get_node(node_id)
                 .ok_or_else(|| BuildError::ContextError(format!("Node {} not found", node_id)))?;
 
-            let (layer_path, was_cached) = self.execute_node(node, context, cache)?;
+            // Determine instruction type for metrics
+            let instruction_type = match &node.instruction {
+                crate::builder::parser::Instruction::From { .. } => "From",
+                crate::builder::parser::Instruction::Run { .. } => "Run",
+                crate::builder::parser::Instruction::Copy { .. } => "Copy",
+                crate::builder::parser::Instruction::Add { .. } => "Add",
+                crate::builder::parser::Instruction::Env { .. } => "Env",
+                crate::builder::parser::Instruction::Workdir { .. } => "Workdir",
+                crate::builder::parser::Instruction::User { .. } => "User",
+                crate::builder::parser::Instruction::Cmd { .. } => "Cmd",
+                crate::builder::parser::Instruction::Entrypoint { .. } => "Entrypoint",
+                crate::builder::parser::Instruction::Expose { .. } => "Expose",
+                _ => "Other",
+            };
+
+            let (layer_path, was_cached) = self.execute_node(node, context, cache)
+                .map_err(|e| {
+                    metrics::counter!("hypr_build_failures_total",
+                        "platform" => "linux",
+                        "step_type" => instruction_type,
+                        "reason" => "execution_failed"
+                    ).increment(1);
+                    e
+                })?;
 
             if layer_path.is_some() {
                 total_layers += 1;
@@ -878,7 +903,15 @@ impl BuildExecutor for NativeBuilder {
         let duration = start.elapsed();
 
         // Generate final SquashFS image
-        let squashfs_path = self.generate_squashfs()?;
+        let squashfs_path = self.generate_squashfs()
+            .map_err(|e| {
+                metrics::counter!("hypr_build_failures_total",
+                    "platform" => "linux",
+                    "step_type" => "squashfs_generation",
+                    "reason" => "compression_failed"
+                ).increment(1);
+                e
+            })?;
 
         // Calculate total size
         let total_size = std::fs::metadata(&squashfs_path)?.len();
@@ -910,6 +943,18 @@ impl BuildExecutor for NativeBuilder {
                 total_size,
             },
         };
+
+        // Record success metrics
+        metrics::histogram!("hypr_build_duration_seconds").record(duration.as_secs_f64());
+        metrics::counter!("hypr_build_complete_total", "platform" => "linux").increment(1);
+        metrics::counter!("hypr_cache_hits_total").increment(cached_layers as u64);
+        metrics::counter!("hypr_cache_misses_total").increment((total_layers - cached_layers) as u64);
+        info!(
+            duration_secs = duration.as_secs_f64(),
+            total_layers, cached_layers,
+            image_size_bytes = total_size,
+            "Build completed successfully"
+        );
 
         Ok(output)
     }
@@ -997,6 +1042,7 @@ pub struct MacOsBuilder {
 
 #[cfg(target_os = "macos")]
 impl MacOsBuilder {
+    #[instrument]
     pub fn new() -> BuildResult<Self> {
         let work_dir = Self::create_work_dir()?;
         let current_rootfs = work_dir.join("rootfs");
@@ -1445,6 +1491,7 @@ impl MacOsBuilder {
 
 #[cfg(target_os = "macos")]
 impl BuildExecutor for MacOsBuilder {
+    #[instrument(skip(self, graph, _cache), fields(no_cache = context.no_cache))]
     fn execute(
         &mut self,
         graph: &BuildGraph,
@@ -1467,27 +1514,77 @@ impl BuildExecutor for MacOsBuilder {
 
         for node_id in node_ids {
             let node = &graph.nodes[node_id];
+
             match &node.instruction {
                 crate::builder::parser::Instruction::From { .. } => {
-                    self.execute_from(node)?;
+                    self.execute_from(node).map_err(|e| {
+                        metrics::counter!("hypr_build_failures_total",
+                            "platform" => "macos",
+                            "step_type" => "From",
+                            "reason" => "execution_failed"
+                        ).increment(1);
+                        e
+                    })?;
                 }
                 crate::builder::parser::Instruction::Run { command } => {
-                    self.execute_run(command)?;
+                    self.execute_run(command).map_err(|e| {
+                        metrics::counter!("hypr_build_failures_total",
+                            "platform" => "macos",
+                            "step_type" => "Run",
+                            "reason" => "execution_failed"
+                        ).increment(1);
+                        e
+                    })?;
                 }
                 crate::builder::parser::Instruction::Copy { sources, destination, .. } => {
-                    self.execute_copy(sources, destination, context)?;
+                    self.execute_copy(sources, destination, context).map_err(|e| {
+                        metrics::counter!("hypr_build_failures_total",
+                            "platform" => "macos",
+                            "step_type" => "Copy",
+                            "reason" => "execution_failed"
+                        ).increment(1);
+                        e
+                    })?;
                 }
                 crate::builder::parser::Instruction::Add { sources, destination, .. } => {
-                    self.execute_copy(sources, destination, context)?; // ADD same as COPY for now
+                    self.execute_copy(sources, destination, context).map_err(|e| {
+                        metrics::counter!("hypr_build_failures_total",
+                            "platform" => "macos",
+                            "step_type" => "Add",
+                            "reason" => "execution_failed"
+                        ).increment(1);
+                        e
+                    })?; // ADD same as COPY for now
                 }
                 crate::builder::parser::Instruction::Env { vars } => {
-                    self.execute_env(vars)?;
+                    self.execute_env(vars).map_err(|e| {
+                        metrics::counter!("hypr_build_failures_total",
+                            "platform" => "macos",
+                            "step_type" => "Env",
+                            "reason" => "execution_failed"
+                        ).increment(1);
+                        e
+                    })?;
                 }
                 crate::builder::parser::Instruction::Workdir { path } => {
-                    self.execute_workdir(path)?;
+                    self.execute_workdir(path).map_err(|e| {
+                        metrics::counter!("hypr_build_failures_total",
+                            "platform" => "macos",
+                            "step_type" => "Workdir",
+                            "reason" => "execution_failed"
+                        ).increment(1);
+                        e
+                    })?;
                 }
                 crate::builder::parser::Instruction::User { user } => {
-                    self.execute_user(user)?;
+                    self.execute_user(user).map_err(|e| {
+                        metrics::counter!("hypr_build_failures_total",
+                            "platform" => "macos",
+                            "step_type" => "User",
+                            "reason" => "execution_failed"
+                        ).increment(1);
+                        e
+                    })?;
                 }
                 _ => {} // Skip other instructions for now
             }
@@ -1496,7 +1593,15 @@ impl BuildExecutor for MacOsBuilder {
         let duration = start.elapsed();
 
         // Generate SquashFS
-        let squashfs_path = self.generate_squashfs()?;
+        let squashfs_path = self.generate_squashfs()
+            .map_err(|e| {
+                metrics::counter!("hypr_build_failures_total",
+                    "platform" => "macos",
+                    "step_type" => "squashfs_generation",
+                    "reason" => "compression_failed"
+                ).increment(1);
+                e
+            })?;
         let total_size = std::fs::metadata(&squashfs_path)?.len();
 
         // Generate image ID (SHA256 of squashfs)
@@ -1510,7 +1615,7 @@ impl BuildExecutor for MacOsBuilder {
         let (name, tag) = ("myimage".to_string(), "latest".to_string());
         let manifest = manifest_gen.generate(graph, name, tag, None)?;
 
-        Ok(BuildOutput {
+        let output = BuildOutput {
             image_id: image_id[..12].to_string(), // Short ID like Docker
             rootfs_path: squashfs_path,
             manifest,
@@ -1520,19 +1625,34 @@ impl BuildExecutor for MacOsBuilder {
                 cached_layers: 0, // No caching on macOS builder yet
                 total_size,
             },
-        })
+        };
+
+        // Record success metrics
+        metrics::histogram!("hypr_build_duration_seconds").record(duration.as_secs_f64());
+        metrics::counter!("hypr_build_complete_total", "platform" => "macos").increment(1);
+        info!(
+            duration_secs = duration.as_secs_f64(),
+            layer_count = self.layers.len(),
+            image_size_bytes = total_size,
+            "Build completed successfully"
+        );
+
+        Ok(output)
     }
 }
 
 /// Creates the appropriate builder for the current platform.
+#[instrument]
 pub fn create_builder() -> BuildResult<Box<dyn BuildExecutor>> {
     #[cfg(target_os = "linux")]
     {
+        info!("Creating Linux native builder");
         Ok(Box::new(NativeBuilder::new()?))
     }
 
     #[cfg(target_os = "macos")]
     {
+        info!("Creating macOS builder");
         Ok(Box::new(MacOsBuilder::new()?))
     }
 

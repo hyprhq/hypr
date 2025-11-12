@@ -8,11 +8,13 @@ use hypr_core::builder::{
     create_builder, BuildContext, BuildGraph, CacheManager,
 };
 use hypr_core::builder::parser::parse_dockerfile;
+use hypr_core::state::StateManager;
+use hypr_core::types::Image;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 /// Builds an image from a Dockerfile.
 ///
@@ -170,6 +172,81 @@ pub async fn build(
             cache_pct
         );
     }
+
+    println!();
+    println!("{} Registering image", "»".bold().blue());
+
+    // Move rootfs to permanent location
+    let images_dir = PathBuf::from("/var/lib/hypr/images");
+    let image_dir = images_dir.join(&output.image_id);
+
+    // Create image directory
+    fs::create_dir_all(&image_dir)
+        .with_context(|| format!("Failed to create image directory: {}", image_dir.display()))?;
+
+    let permanent_rootfs = image_dir.join("rootfs.squashfs");
+
+    // Move rootfs from temp location to permanent location
+    fs::rename(&output.rootfs_path, &permanent_rootfs)
+        .with_context(|| format!(
+            "Failed to move rootfs from {} to {}",
+            output.rootfs_path.display(),
+            permanent_rootfs.display()
+        ))?;
+
+    println!("  Moved rootfs to {}", permanent_rootfs.display().to_string().yellow());
+
+    // Register image in database
+    let state_db_path = PathBuf::from("/var/lib/hypr/hypr.db");
+    let state = StateManager::new(state_db_path.to_str().unwrap())
+        .await
+        .with_context(|| "Failed to connect to state database")?;
+
+    // Convert builder manifest to types manifest
+    use hypr_core::types::ImageManifest;
+    use hypr_core::types::image::{RuntimeConfig, RestartPolicy};
+    let manifest = ImageManifest {
+        version: "1".to_string(),
+        name: output.manifest.name.clone(),
+        tag: output.manifest.tag.clone(),
+        architecture: output.manifest.architecture.clone(),
+        os: output.manifest.os.clone(),
+        entrypoint: output.manifest.config.entrypoint.unwrap_or_default(),
+        cmd: output.manifest.config.cmd.unwrap_or_default(),
+        env: output.manifest.config.env.clone(),
+        workdir: output.manifest.config.workdir.unwrap_or_else(|| "/".to_string()),
+        exposed_ports: output.manifest.config.exposed_ports
+            .iter()
+            .filter_map(|p| p.parse::<u16>().ok())
+            .collect(),
+        runtime: RuntimeConfig {
+            default_memory_mb: 512,
+            default_cpus: 2,
+            kernel_channel: "stable".to_string(),
+            rootfs_type: "squashfs".to_string(),
+            restart_policy: RestartPolicy::Always,
+        },
+        health: None, // TODO: Extract health check from Dockerfile
+    };
+
+    let image = Image {
+        id: output.image_id.clone(),
+        name: image_name.clone(),
+        tag: image_tag.clone(),
+        manifest,
+        rootfs_path: permanent_rootfs.clone(),
+        size_bytes: output.stats.total_size,
+        created_at: SystemTime::now(),
+    };
+
+    state.insert_image(&image)
+        .await
+        .with_context(|| "Failed to register image in database")?;
+
+    println!("  Registered image: {}:{}", image_name.green(), image_tag.cyan());
+    println!();
+    println!("{}", "✓ Image ready to use!".green().bold());
+    println!("  Run with: {}", format!("hypr run {}:{}", image_name, image_tag).cyan());
 
     Ok(())
 }
