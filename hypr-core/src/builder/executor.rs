@@ -1311,18 +1311,28 @@ impl BuildExecutor for LinuxVmBuilder {
         self.create_squashfs(&final_rootfs, &squashfs_path)?;
 
         // Generate manifest
-        let manifest = crate::builder::manifest::ImageManifest::from_config(&self.config);
+        let manifest = ImageManifest {
+            name: "built-image".to_string(),
+            tag: "latest".to_string(),
+            config: self.config.clone(),
+            created: chrono::Utc::now().to_rfc3339(),
+            architecture: "x86_64".to_string(),
+            os: "linux".to_string(),
+        };
 
         // Calculate total size
         let total_size = std::fs::metadata(&squashfs_path)
             .map(|m| m.len())
             .unwrap_or(0);
 
-        // Generate image ID from config hash
-        use sha2::{Sha256, Digest};
-        let mut hasher = Sha256::new();
-        hasher.update(format!("{:?}", self.config).as_bytes());
-        let image_id = format!("{:x}", hasher.finalize());
+        // Compute image ID (SHA256 of manifest)
+        let manifest_json = serde_json::to_string(&manifest).map_err(|e| {
+            BuildError::ContextError(format!("Failed to serialize manifest: {}", e))
+        })?;
+        use sha2::Digest;
+        let image_id = format!("{:x}", sha2::Sha256::digest(manifest_json.as_bytes()));
+
+        info!("Build complete: {}", image_id);
 
         Ok(BuildOutput {
             image_id,
