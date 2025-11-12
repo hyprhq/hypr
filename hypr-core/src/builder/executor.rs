@@ -1031,6 +1031,28 @@ impl NativeBuilder {
 /// and shared via virtio-fs. The build VM pivots root into the base image.
 /// All HTTP traffic is proxied via vsock to the host's BuilderHttpProxy.
 #[cfg(target_os = "macos")]
+/// Linux VM-based builder using cloud-hypervisor.
+///
+/// Executes build steps in isolated VMs with cloud-hypervisor,
+/// providing the same security guarantees as MacOsVmBuilder.
+#[cfg(target_os = "linux")]
+pub struct LinuxVmBuilder {
+    /// VM builder for executing build steps
+    vm_builder: crate::builder::VmBuilder,
+    /// Working directory for builds
+    work_dir: PathBuf,
+    /// Current environment variables (accumulated from ENV instructions)
+    env: HashMap<String, String>,
+    /// Current working directory (from WORKDIR instructions)
+    workdir: String,
+    /// Image configuration being built
+    config: ImageConfig,
+    /// OCI registry client for pulling base images
+    oci_client: crate::builder::oci::OciClient,
+    /// Path to current base image rootfs (shared via virtio-fs)
+    base_rootfs: Option<PathBuf>,
+}
+
 pub struct MacOsVmBuilder {
     /// VM builder for executing build steps
     vm_builder: crate::builder::VmBuilder,
@@ -1046,6 +1068,355 @@ pub struct MacOsVmBuilder {
     oci_client: crate::builder::oci::OciClient,
     /// Path to current base image rootfs (shared via virtio-fs)
     base_rootfs: Option<PathBuf>,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxVmBuilder {
+    /// Create a new Linux VM-based builder using cloud-hypervisor.
+    pub fn new() -> BuildResult<Self> {
+        use crate::adapters::CloudHypervisorAdapter;
+
+        let work_dir = std::env::temp_dir().join(format!("hypr-build-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&work_dir).map_err(|e| BuildError::IoError {
+            path: work_dir.clone(),
+            source: e,
+        })?;
+
+        // Locate kernel
+        let hypr_dir = PathBuf::from("/var/lib/hypr");
+        let kernel_path = hypr_dir.join("kernel").join("vmlinuz");
+
+        // Fallback to user directory if system path doesn't exist
+        let kernel_path = if !kernel_path.exists() {
+            let home = std::env::var("HOME")
+                .map_err(|_| BuildError::ContextError("HOME environment variable not set".into()))?;
+            let user_kernel = PathBuf::from(format!("{}/.hypr/kernel/vmlinuz", home));
+            if !user_kernel.exists() {
+                return Err(BuildError::ContextError(format!(
+                    "Kernel not found at: {} or {}\n\
+                     Please download a Linux kernel:\n\
+                     mkdir -p ~/.hypr/kernel\n\
+                     curl -L https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.6.tar.xz -o /tmp/linux.tar.xz\n\
+                     # Extract and build, or use pre-built kernel",
+                    kernel_path.display(),
+                    user_kernel.display()
+                )));
+            }
+            user_kernel
+        } else {
+            kernel_path
+        };
+
+        // Placeholder: builder_rootfs will be replaced by on-the-fly initramfs
+        let builder_rootfs = PathBuf::from("/tmp/dummy-will-be-initramfs");
+
+        // Create VMM adapter for Linux (cloud-hypervisor)
+        let adapter = CloudHypervisorAdapter::new().map_err(|e| BuildError::ContextError(format!(
+            "Failed to create cloud-hypervisor adapter: {}", e
+        )))?;
+
+        let vm_builder = crate::builder::VmBuilder::new(
+            Box::new(adapter),
+            builder_rootfs,
+            kernel_path,
+            work_dir.clone(),
+        );
+
+        let oci_client = crate::builder::oci::OciClient::new()?;
+
+        Ok(Self {
+            vm_builder,
+            work_dir,
+            env: HashMap::new(),
+            workdir: "/workspace".to_string(),
+            config: ImageConfig {
+                entrypoint: None,
+                cmd: None,
+                env: HashMap::new(),
+                workdir: None,
+                user: None,
+                exposed_ports: Vec::new(),
+                volumes: Vec::new(),
+                labels: HashMap::new(),
+            },
+            oci_client,
+            base_rootfs: None,
+        })
+    }
+
+    /// Execute a RUN instruction in a builder VM.
+    fn execute_run(&mut self, command: &str) -> BuildResult<PathBuf> {
+        use crate::builder::BuildStep;
+
+        let layer_id = format!("layer-{}", uuid::Uuid::new_v4());
+        let output_dir = self.work_dir.join("layers");
+        std::fs::create_dir_all(&output_dir).map_err(|e| BuildError::IoError {
+            path: output_dir.clone(),
+            source: e,
+        })?;
+
+        let output_layer = output_dir.join(format!("{}.tar", layer_id));
+        let context_dir = self.work_dir.join("context");
+
+        let step = BuildStep::Run {
+            command: command.to_string(),
+            workdir: self.workdir.clone(),
+        };
+
+        // Verify base rootfs exists before building
+        if self.base_rootfs.is_none() {
+            return Err(BuildError::InstructionFailed {
+                instruction: format!("RUN {}", command),
+                details: "No base image available. RUN instruction requires FROM first.".into(),
+            });
+        }
+
+        // Execute in VM with base rootfs
+        // Use block_in_place to avoid nested runtime issues when called from async context
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                self.vm_builder
+                    .execute_step(&step, &context_dir, &output_layer, self.base_rootfs.as_deref())
+                    .await
+            })
+        })
+        .map_err(|e| BuildError::InstructionFailed {
+            instruction: format!("RUN {}", command),
+            details: e.to_string(),
+        })?;
+
+        Ok(output_layer)
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[async_trait]
+impl BuildExecutor for LinuxVmBuilder {
+    async fn execute(
+        &mut self,
+        graph: &BuildGraph,
+        context: &BuildContext,
+        cache: &mut CacheManager,
+    ) -> BuildResult<BuildOutput> {
+        info!("Starting Linux VM-based build with cloud-hypervisor");
+
+        let mut final_layers: Vec<PathBuf> = Vec::new();
+
+        // Execute each node in topological order
+        for node in &graph.nodes {
+            debug!("Executing node: {:?}", node.instruction);
+
+            // Implementation identical to MacOsVmBuilder since the logic is the same
+            // Only the underlying VMM adapter differs (cloud-hypervisor vs vfkit)
+            match &node.instruction {
+                Instruction::From { image, platform: _, alias: _, stage: _ } => {
+                    // Pull base image via OCI client
+                    info!("Pulling base image: {}", image);
+
+                    let base_dir = self.work_dir.join("base");
+                    std::fs::create_dir_all(&base_dir).map_err(|e| BuildError::IoError {
+                        path: base_dir.clone(),
+                        source: e,
+                    })?;
+
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(async {
+                            self.oci_client
+                                .pull_image(image, &base_dir)
+                                .await
+                        })
+                    })?;
+
+                    self.base_rootfs = Some(base_dir);
+                    info!("Base image ready at: {:?}", self.base_rootfs);
+                }
+                Instruction::Run { command } => {
+                    let layer = self.execute_run(command)?;
+                    final_layers.push(layer);
+                }
+                Instruction::Copy { src, dst } => {
+                    // Handle COPY instruction
+                    let layer_id = format!("layer-{}", uuid::Uuid::new_v4());
+                    let output_layer = self.work_dir.join("layers").join(format!("{}.tar", layer_id));
+
+                    // Copy files from build context to layer
+                    let src_path = context.context_dir.join(src);
+                    if !src_path.exists() {
+                        return Err(BuildError::InstructionFailed {
+                            instruction: format!("COPY {} {}", src, dst),
+                            details: format!("Source path not found: {}", src_path.display()),
+                        });
+                    }
+
+                    // Create tar with the copied files
+                    let tar_file = std::fs::File::create(&output_layer).map_err(|e| BuildError::IoError {
+                        path: output_layer.clone(),
+                        source: e,
+                    })?;
+                    let mut tar = tar::Builder::new(tar_file);
+
+                    if src_path.is_dir() {
+                        tar.append_dir_all(dst, &src_path).map_err(|e| BuildError::InstructionFailed {
+                            instruction: format!("COPY {} {}", src, dst),
+                            details: format!("Failed to archive directory: {}", e),
+                        })?;
+                    } else {
+                        tar.append_path_with_name(&src_path, dst).map_err(|e| BuildError::InstructionFailed {
+                            instruction: format!("COPY {} {}", src, dst),
+                            details: format!("Failed to archive file: {}", e),
+                        })?;
+                    }
+
+                    tar.finish().map_err(|e| BuildError::InstructionFailed {
+                        instruction: format!("COPY {} {}", src, dst),
+                        details: format!("Failed to finalize tar: {}", e),
+                    })?;
+
+                    final_layers.push(output_layer);
+                }
+                Instruction::Workdir { path } => {
+                    self.workdir = path.clone();
+                    self.config.workdir = Some(path.clone());
+                }
+                Instruction::Env { key, value } => {
+                    self.env.insert(key.clone(), value.clone());
+                    self.config.env.insert(key.clone(), value.clone());
+                }
+                Instruction::Cmd { args } => {
+                    self.config.cmd = Some(args.clone());
+                }
+                Instruction::Entrypoint { args } => {
+                    self.config.entrypoint = Some(args.clone());
+                }
+                Instruction::Expose { port, protocol } => {
+                    let port_spec = if let Some(proto) = protocol {
+                        format!("{}/{}", port, proto)
+                    } else {
+                        port.to_string()
+                    };
+                    self.config.exposed_ports.push(port_spec);
+                }
+                _ => {
+                    warn!("Instruction not yet implemented: {:?}", node.instruction);
+                }
+            }
+        }
+
+        // Merge all layers into final rootfs
+        let final_rootfs = self.work_dir.join("final-rootfs");
+        self.merge_layers(&final_layers, &final_rootfs)?;
+
+        // Create SquashFS
+        let squashfs_path = self.work_dir.join("final.squashfs");
+        self.create_squashfs(&final_rootfs, &squashfs_path)?;
+
+        // Generate manifest
+        let manifest = crate::builder::manifest::ImageManifest::from_config(&self.config);
+
+        Ok(BuildOutput {
+            rootfs_path: squashfs_path,
+            manifest,
+            image_id: format!("{:x}", md5::compute(format!("{:?}", self.config))),
+            layers: final_layers.len(),
+            cached_layers: 0,
+            total_size_bytes: 0,
+        })
+    }
+
+    async fn cleanup(&mut self) -> BuildResult<()> {
+        info!("Cleaning up Linux VM builder work directory");
+        if self.work_dir.exists() {
+            std::fs::remove_dir_all(&self.work_dir).map_err(|e| BuildError::IoError {
+                path: self.work_dir.clone(),
+                source: e,
+            })?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxVmBuilder {
+    /// Merge layers into final rootfs directory.
+    fn merge_layers(&self, layers: &[PathBuf], output: &Path) -> BuildResult<()> {
+        std::fs::create_dir_all(output).map_err(|e| BuildError::IoError {
+            path: output.to_path_buf(),
+            source: e,
+        })?;
+
+        // Start with base rootfs if available
+        if let Some(base) = &self.base_rootfs {
+            self.copy_recursive(base, output)?;
+        }
+
+        // Apply each layer on top
+        for layer in layers {
+            let tar_file = std::fs::File::open(layer).map_err(|e| BuildError::IoError {
+                path: layer.clone(),
+                source: e,
+            })?;
+            let mut archive = tar::Archive::new(tar_file);
+            archive.unpack(output).map_err(|e| BuildError::InstructionFailed {
+                instruction: "merge_layers".to_string(),
+                details: format!("Failed to extract layer: {}", e),
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Recursively copy directory contents.
+    fn copy_recursive(&self, src: &Path, dst: &Path) -> BuildResult<()> {
+        for entry in walkdir::WalkDir::new(src) {
+            let entry = entry.map_err(|e| BuildError::IoError {
+                path: src.to_path_buf(),
+                source: std::io::Error::new(std::io::ErrorKind::Other, e),
+            })?;
+
+            let rel_path = entry.path().strip_prefix(src).unwrap();
+            let dst_path = dst.join(rel_path);
+
+            if entry.file_type().is_dir() {
+                std::fs::create_dir_all(&dst_path).map_err(|e| BuildError::IoError {
+                    path: dst_path.clone(),
+                    source: e,
+                })?;
+            } else {
+                if let Some(parent) = dst_path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| BuildError::IoError {
+                        path: parent.to_path_buf(),
+                        source: e,
+                    })?;
+                }
+                std::fs::copy(entry.path(), &dst_path).map_err(|e| BuildError::IoError {
+                    path: entry.path().to_path_buf(),
+                    source: e,
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Create SquashFS from directory.
+    fn create_squashfs(&self, input: &Path, output: &Path) -> BuildResult<()> {
+        use std::process::Command;
+
+        let status = Command::new("mksquashfs")
+            .arg(input)
+            .arg(output)
+            .arg("-comp")
+            .arg("zstd")
+            .arg("-Xcompression-level")
+            .arg("3")
+            .status()
+            .map_err(|e| BuildError::ContextError(format!("Failed to run mksquashfs: {}", e)))?;
+
+        if !status.success() {
+            return Err(BuildError::ContextError("mksquashfs failed".to_string()));
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1391,8 +1762,8 @@ impl BuildExecutor for MacOsVmBuilder {
 pub fn create_builder() -> BuildResult<Box<dyn BuildExecutor>> {
     #[cfg(target_os = "linux")]
     {
-        info!("Creating Linux native builder");
-        Ok(Box::new(NativeBuilder::new()?))
+        info!("Creating Linux VM-based builder (cloud-hypervisor + Alpine)");
+        Ok(Box::new(LinuxVmBuilder::new()?))
     }
 
     #[cfg(target_os = "macos")]
