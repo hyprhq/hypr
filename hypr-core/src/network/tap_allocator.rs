@@ -21,7 +21,9 @@ pub struct TapAllocator {
 
 impl TapAllocator {
     /// Create a new TAP allocator with the default prefix ("tap").
+    #[instrument]
     pub fn new() -> Self {
+        info!("Creating TAP allocator with default prefix: tap");
         Self {
             allocated: Mutex::new(HashSet::new()),
             prefix: "tap".to_string(),
@@ -32,10 +34,13 @@ impl TapAllocator {
     ///
     /// # Arguments
     /// * `prefix` - The prefix to use for TAP device names (e.g., "hypr-tap")
-    pub fn with_prefix(prefix: impl Into<String>) -> Self {
+    #[instrument(skip(prefix), fields(prefix = %prefix.as_ref()))]
+    pub fn with_prefix(prefix: impl Into<String> + AsRef<str>) -> Self {
+        let prefix_str = prefix.as_ref().to_string();
+        info!("Creating TAP allocator with custom prefix: {}", prefix_str);
         Self {
             allocated: Mutex::new(HashSet::new()),
-            prefix: prefix.into(),
+            prefix: prefix_str,
         }
     }
 

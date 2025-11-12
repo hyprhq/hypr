@@ -24,7 +24,9 @@ impl IpAllocator {
     /// # Arguments
     ///
     /// * `state` - State manager for persistent storage
+    #[instrument(skip(state))]
     pub fn new(state: Arc<StateManager>) -> Self {
+        info!("Creating IP allocator (pool: 100.64.0.2 - 103.255.255.254)");
         Self {
             state,
             pool_start: Ipv4Addr::new(100, 64, 0, 2), // Reserve .1 for gateway
@@ -99,6 +101,7 @@ impl IpAllocator {
     /// # Returns
     ///
     /// The allocated IP address, or None if not allocated
+    #[instrument(skip(self), fields(vm_id = %vm_id))]
     pub async fn get_allocation(&self, vm_id: &str) -> Result<Option<Ipv4Addr>> {
         self.state.get_ip_allocation(vm_id).await
     }

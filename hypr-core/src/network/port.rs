@@ -115,7 +115,9 @@ pub struct PortForwarder {
 
 impl PortForwarder {
     /// Create a new port forwarder.
+    #[instrument(skip(bpf_map))]
     pub fn new(bpf_map: Arc<dyn BpfPortMap>) -> Self {
+        info!("Creating port forwarder");
         Self { mappings: Arc::new(Mutex::new(HashMap::new())), bpf_map }
     }
 
@@ -285,12 +287,14 @@ impl PortForwarder {
     }
 
     /// List all port mappings.
+    #[instrument(skip(self))]
     pub fn list_mappings(&self) -> Vec<PortMapping> {
         let mappings = self.mappings.lock().unwrap();
         mappings.values().cloned().collect()
     }
 
     /// Get a specific port mapping.
+    #[instrument(skip(self))]
     pub fn get_mapping(&self, host_port: u16, protocol: Protocol) -> Option<PortMapping> {
         let key = Self::make_key(host_port, protocol);
         let mappings = self.mappings.lock().unwrap();

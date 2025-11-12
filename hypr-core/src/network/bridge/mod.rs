@@ -10,6 +10,7 @@ pub mod macos;
 use crate::error::{HyprError, Result};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use tracing::{info, instrument};
 
 #[cfg(target_os = "linux")]
 pub use linux::LinuxBridgeManager;
@@ -111,14 +112,17 @@ pub trait BridgeManager: Send + Sync {
 /// # Supported Platforms
 /// * Linux: Uses `ip` command and iptables
 /// * macOS: Uses vmnet framework via vfkit
+#[instrument]
 pub fn create_bridge_manager() -> Result<Arc<dyn BridgeManager>> {
     #[cfg(target_os = "linux")]
     {
+        info!("Creating Linux bridge manager");
         Ok(Arc::new(LinuxBridgeManager))
     }
 
     #[cfg(target_os = "macos")]
     {
+        info!("Creating macOS bridge manager");
         Ok(Arc::new(MacOSBridgeManager))
     }
 
