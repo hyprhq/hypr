@@ -1082,30 +1082,48 @@ impl LinuxVmBuilder {
             source: e,
         })?;
 
-        // Locate kernel
-        let hypr_dir = PathBuf::from("/var/lib/hypr");
-        let kernel_path = hypr_dir.join("kernel").join("vmlinuz");
+        // Locate or download kernel
+        let home = std::env::var("HOME")
+            .map_err(|_| BuildError::ContextError("HOME environment variable not set".into()))?;
+        let kernel_dir = PathBuf::from(format!("{}/.hypr/kernel", home));
+        let kernel_path = kernel_dir.join("vmlinux");
 
-        // Fallback to user directory if system path doesn't exist
-        let kernel_path = if !kernel_path.exists() {
-            let home = std::env::var("HOME")
-                .map_err(|_| BuildError::ContextError("HOME environment variable not set".into()))?;
-            let user_kernel = PathBuf::from(format!("{}/.hypr/kernel/vmlinuz", home));
-            if !user_kernel.exists() {
+        // Auto-download cloud-hypervisor kernel if not present
+        if !kernel_path.exists() {
+            info!("Cloud Hypervisor kernel not found, downloading...");
+            std::fs::create_dir_all(&kernel_dir).map_err(|e| BuildError::IoError {
+                path: kernel_dir.clone(),
+                source: e,
+            })?;
+
+            // Detect architecture
+            let arch = std::env::consts::ARCH;
+            let kernel_url = match arch {
+                "x86_64" => "https://github.com/cloud-hypervisor/linux/releases/latest/download/vmlinux-x86_64",
+                "aarch64" => "https://github.com/cloud-hypervisor/linux/releases/latest/download/Image-arm64",
+                _ => return Err(BuildError::ContextError(format!("Unsupported architecture: {}", arch)))
+            };
+
+            info!("Downloading kernel from: {}", kernel_url);
+            let response = reqwest::blocking::get(kernel_url)
+                .map_err(|e| BuildError::ContextError(format!("Failed to download kernel: {}", e)))?;
+
+            if !response.status().is_success() {
                 return Err(BuildError::ContextError(format!(
-                    "Kernel not found at: {} or {}\n\
-                     Please download a Linux kernel:\n\
-                     mkdir -p ~/.hypr/kernel\n\
-                     curl -L https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.6.tar.xz -o /tmp/linux.tar.xz\n\
-                     # Extract and build, or use pre-built kernel",
-                    kernel_path.display(),
-                    user_kernel.display()
+                    "Failed to download kernel: HTTP {}", response.status()
                 )));
             }
-            user_kernel
-        } else {
-            kernel_path
-        };
+
+            let kernel_bytes = response.bytes()
+                .map_err(|e| BuildError::ContextError(format!("Failed to read kernel: {}", e)))?;
+
+            std::fs::write(&kernel_path, kernel_bytes).map_err(|e| BuildError::IoError {
+                path: kernel_path.clone(),
+                source: e,
+            })?;
+
+            info!("Kernel downloaded to: {}", kernel_path.display());
+        }
 
         // Placeholder: builder_rootfs will be replaced by on-the-fly initramfs
         let builder_rootfs = PathBuf::from("/tmp/dummy-will-be-initramfs");
@@ -1757,8 +1775,8 @@ impl BuildExecutor for MacOsVmBuilder {
 pub fn create_builder() -> BuildResult<Box<dyn BuildExecutor>> {
     #[cfg(target_os = "linux")]
     {
-        info!("Creating Linux native builder");
-        Ok(Box::new(NativeBuilder::new()?))
+        info!("Creating Linux VM-based builder (cloud-hypervisor + Alpine)");
+        Ok(Box::new(LinuxVmBuilder::new()?))
     }
 
     #[cfg(target_os = "macos")]

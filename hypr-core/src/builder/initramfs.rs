@@ -105,12 +105,17 @@ fn copy_kestrel_binary(root: &Path) -> BuildResult<()> {
         linux_arch
     );
 
+    // Fallback chain:
+    // 1. Check KESTREL_BIN_PATH env var (build.rs compiled version, Linux only)
+    // 2. Check ~/.hypr/bin/kestrel-linux-{arch} (locally built/manually placed)
+    // 3. Download from GitHub releases (future CI/CD, proper distribution)
+
     #[cfg(target_os = "linux")]
     {
         // On Linux, prefer build.rs compiled version if architecture matches
         if let Ok(kestrel_src) = std::env::var("KESTREL_BIN_PATH") {
             if PathBuf::from(&kestrel_src).exists() {
-                debug!("Using locally compiled kestrel: {}", kestrel_src);
+                debug!("Using build.rs compiled kestrel: {}", kestrel_src);
                 fs::copy(&kestrel_src, &kestrel_dst).map_err(|e| BuildError::IoError {
                     path: kestrel_dst.clone(),
                     source: e,
@@ -122,8 +127,31 @@ fn copy_kestrel_binary(root: &Path) -> BuildResult<()> {
         }
     }
 
+    // Check for locally built binary in ~/.hypr/bin/
+    if let Ok(home) = std::env::var("HOME") {
+        let local_kestrel = PathBuf::from(home)
+            .join(".hypr")
+            .join("bin")
+            .join(format!("kestrel-linux-{}", linux_arch));
+
+        if local_kestrel.exists() {
+            debug!("Using locally built kestrel: {}", local_kestrel.display());
+            fs::copy(&local_kestrel, &kestrel_dst).map_err(|e| BuildError::IoError {
+                path: kestrel_dst.clone(),
+                source: e,
+            })?;
+
+            set_executable(&kestrel_dst)?;
+            return Ok(());
+        } else {
+            debug!("Local kestrel not found at: {}", local_kestrel.display());
+        }
+    }
+
     // Download Linux binary from GitHub releases
     // (works on both darwin and linux hosts)
+    // Note: Requires GitHub Actions CI/CD to build and release kestrel binaries
+    debug!("Attempting to download kestrel from GitHub releases");
     download_kestrel(linux_arch, &kestrel_dst)?;
     set_executable(&kestrel_dst)?;
 
