@@ -1130,12 +1130,20 @@ impl MacOsVmBuilder {
             workdir: self.workdir.clone(),
         };
 
-        // Execute in VM
+        // Verify base rootfs exists before building
+        if self.base_rootfs.is_none() {
+            return Err(BuildError::InstructionFailed {
+                instruction: format!("RUN {}", command),
+                details: "No base image available. RUN instruction requires FROM first.".into(),
+            });
+        }
+
+        // Execute in VM with base rootfs
         tokio::runtime::Runtime::new()
             .map_err(|e| BuildError::ContextError(format!("Failed to create runtime: {}", e)))?
             .block_on(async {
                 self.vm_builder
-                    .execute_step(&step, &context_dir, &output_layer)
+                    .execute_step(&step, &context_dir, &output_layer, self.base_rootfs.as_deref())
                     .await
             })
             .map_err(|e| BuildError::InstructionFailed {

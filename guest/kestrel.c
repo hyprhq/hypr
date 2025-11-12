@@ -114,6 +114,8 @@ static void mount_essentials_build(void) {
     mkdir("/tmp", 0777);
     mkdir("/workspace", 0755);
     mkdir("/shared", 0755);
+    mkdir("/base", 0755);
+    mkdir("/newroot", 0755);
 
     // Mount tmpfs for temporary files
     if (mount("tmpfs", "/tmp", "tmpfs", 0, NULL) && errno != EBUSY) {
@@ -127,10 +129,74 @@ static void mount_essentials_build(void) {
 
     // Mount virtio-fs (tag "shared" configured by host)
     if (mount("shared", "/shared", "virtiofs", 0, NULL)) {
-        FATAL("Failed to mount virtio-fs: %s", strerror(errno));
+        FATAL("Failed to mount virtio-fs shared: %s", strerror(errno));
     }
 
-    LOG("Build mode: Filesystems mounted successfully");
+    // Mount base image rootfs (tag "base" configured by host, optional)
+    // This is the user's FROM image (alpine, ubuntu, etc.)
+    if (mount("base", "/base", "virtiofs", 0, NULL)) {
+        // Base mount is optional (FROM scratch doesn't have one)
+        LOG("Warning: base rootfs not mounted (FROM scratch?): %s", strerror(errno));
+        LOG("Build mode: Filesystems mounted (no base image)");
+        return;
+    }
+
+    LOG("Base image mounted, creating overlayfs");
+
+    // Create overlayfs with base as lower (read-only) and workspace as upper (writable)
+    // This allows RUN commands to modify the filesystem while preserving base image
+    // overlayfs options: lowerdir=/base,upperdir=/workspace,workdir=/overlay-work
+
+    mkdir("/overlay-work", 0755);
+
+    // Mount overlayfs
+    char overlay_opts[512];
+    snprintf(overlay_opts, sizeof(overlay_opts),
+        "lowerdir=/base,upperdir=/workspace,workdir=/overlay-work");
+
+    if (mount("overlay", "/newroot", "overlay", 0, overlay_opts)) {
+        FATAL("Failed to mount overlayfs: %s\nOptions: %s", strerror(errno), overlay_opts);
+    }
+
+    LOG("Overlayfs mounted, preparing new root");
+
+    // Mount essential filesystems in new root
+    mkdir("/newroot/proc", 0755);
+    mkdir("/newroot/sys", 0755);
+    mkdir("/newroot/dev", 0755);
+    mkdir("/newroot/tmp", 0777);
+    mkdir("/newroot/shared", 0755);
+
+    if (mount("proc", "/newroot/proc", "proc", 0, NULL)) {
+        FATAL("Failed to mount /newroot/proc: %s", strerror(errno));
+    }
+    if (mount("sysfs", "/newroot/sys", "sysfs", 0, NULL)) {
+        FATAL("Failed to mount /newroot/sys: %s", strerror(errno));
+    }
+    if (mount("devtmpfs", "/newroot/dev", "devtmpfs", 0, NULL)) {
+        FATAL("Failed to mount /newroot/dev: %s", strerror(errno));
+    }
+    if (mount("/tmp", "/newroot/tmp", NULL, MS_BIND, NULL)) {
+        FATAL("Failed to mount /newroot/tmp: %s", strerror(errno));
+    }
+    if (mount("/shared", "/newroot/shared", NULL, MS_BIND, NULL)) {
+        FATAL("Failed to mount /newroot/shared: %s", strerror(errno));
+    }
+
+    // Change root via chroot (pivot_root requires more setup with old_root handling)
+    if (chdir("/newroot")) {
+        FATAL("chdir(/newroot) failed: %s", strerror(errno));
+    }
+
+    if (chroot("/newroot")) {
+        FATAL("chroot(/newroot) failed: %s", strerror(errno));
+    }
+
+    if (chdir("/")) {
+        FATAL("chdir(/) after chroot failed: %s", strerror(errno));
+    }
+
+    LOG("Chrooted into overlayfs (base + workspace)");
 }
 
 // ============================================================================

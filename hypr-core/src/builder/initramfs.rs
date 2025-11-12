@@ -8,8 +8,7 @@
 // Format: uncompressed cpio archive (newc format)
 
 use crate::builder::executor::{BuildError, BuildResult};
-use std::fs::{self, File};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::{debug, info, instrument};

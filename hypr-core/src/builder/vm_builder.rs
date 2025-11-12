@@ -104,6 +104,7 @@ impl VmBuilder {
     /// * `step` - Build step to execute
     /// * `context_dir` - Build context directory (mounted via virtio-fs)
     /// * `output_layer` - Path where layer tarball will be written
+    /// * `base_rootfs` - Optional base image rootfs (from FROM instruction, mounted via virtio-fs)
     ///
     /// # Returns
     /// Build layer info (size, hash)
@@ -113,6 +114,7 @@ impl VmBuilder {
         step: &BuildStep,
         context_dir: &Path,
         output_layer: &Path,
+        base_rootfs: Option<&Path>,
     ) -> Result<BuildLayerInfo> {
         info!("Executing build step: {}", step.step_type());
         let start = Instant::now();
@@ -125,7 +127,7 @@ impl VmBuilder {
         }
 
         // Spawn builder VM
-        let vm = self.spawn_builder_vm(context_dir, output_layer.parent().unwrap()).await?;
+        let vm = self.spawn_builder_vm(context_dir, output_layer.parent().unwrap(), base_rootfs).await?;
 
         // Send build command via vsock
         let result = self.send_build_command(&vm, step).await;
@@ -150,7 +152,7 @@ impl VmBuilder {
 
     /// Spawn an ephemeral builder VM with minimal initramfs.
     #[instrument(skip(self))]
-    async fn spawn_builder_vm(&mut self, context_dir: &Path, output_dir: &Path) -> Result<VmHandle> {
+    async fn spawn_builder_vm(&mut self, context_dir: &Path, output_dir: &Path, base_rootfs: Option<&Path>) -> Result<VmHandle> {
         debug!("Spawning builder VM");
 
         let vm_id = format!("builder-{}", uuid::Uuid::new_v4());
@@ -161,7 +163,8 @@ impl VmBuilder {
         // Configure virtio-fs mounts:
         // 1. Build context (read-only)
         // 2. Output directory for layers (read-write)
-        let virtio_fs_mounts = vec![
+        // 3. Base image rootfs (optional, read-only)
+        let mut virtio_fs_mounts = vec![
             VirtioFsMount {
                 host_path: context_dir.to_path_buf(),
                 tag: "context".to_string(),
@@ -171,6 +174,15 @@ impl VmBuilder {
                 tag: "shared".to_string(),
             },
         ];
+
+        // Add base rootfs mount if provided
+        if let Some(base) = base_rootfs {
+            debug!("Adding base rootfs mount: {}", base.display());
+            virtio_fs_mounts.push(VirtioFsMount {
+                host_path: base.to_path_buf(),
+                tag: "base".to_string(),
+            });
+        }
 
         use crate::types::vm::VmResources;
 
