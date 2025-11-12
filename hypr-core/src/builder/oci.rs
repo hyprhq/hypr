@@ -9,11 +9,38 @@
 
 use crate::builder::executor::{BuildError, BuildResult};
 use oci_distribution::client::{Client, ClientConfig, ClientProtocol};
+use oci_distribution::manifest::ImageIndexEntry;
 use oci_distribution::secrets::RegistryAuth;
 use oci_distribution::Reference;
 use std::path::{Path, PathBuf};
 use tar::Archive;
 use tracing::{debug, info, instrument};
+
+/// Platform resolver that always selects Linux images with the current architecture.
+///
+/// This is needed because we're building Linux container images (for microVMs)
+/// even when running on macOS or other platforms. The default resolver would
+/// try to pull darwin/arm64 on macOS, but we need linux/arm64.
+fn linux_platform_resolver(manifests: &[ImageIndexEntry]) -> Option<String> {
+    // Detect current architecture
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => other,
+    };
+
+    debug!("Looking for linux/{} image variant", arch);
+
+    // Find first linux image matching current architecture
+    manifests
+        .iter()
+        .find(|entry| {
+            entry.platform.as_ref().map_or(false, |platform| {
+                platform.os == "linux" && platform.architecture == arch
+            })
+        })
+        .map(|entry| entry.digest.clone())
+}
 
 /// OCI registry client for pulling images.
 pub struct OciClient {
@@ -25,6 +52,7 @@ impl OciClient {
     pub fn new() -> BuildResult<Self> {
         let config = ClientConfig {
             protocol: ClientProtocol::HttpsExcept(vec!["localhost".to_string()]),
+            platform_resolver: Some(Box::new(linux_platform_resolver)),
             ..Default::default()
         };
 
