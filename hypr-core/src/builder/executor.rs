@@ -465,9 +465,15 @@ impl NativeBuilder {
     fn copy_dir_all(src: &PathBuf, dst: &PathBuf) -> BuildResult<()> {
         use std::os::unix::fs::PermissionsExt;
 
-        std::fs::create_dir_all(dst)?;
+        std::fs::create_dir_all(dst).map_err(|e| BuildError::IoError {
+            path: dst.clone(),
+            source: e,
+        })?;
 
-        for entry in std::fs::read_dir(src)? {
+        for entry in std::fs::read_dir(src).map_err(|e| BuildError::IoError {
+            path: src.clone(),
+            source: e,
+        })? {
             let entry = entry?;
             let ty = entry.file_type()?;
             let src_path = entry.path();
@@ -476,8 +482,20 @@ impl NativeBuilder {
             if ty.is_symlink() {
                 // Preserve symlinks
                 let link_target = std::fs::read_link(&src_path)?;
-                let _ = std::fs::remove_file(&dst_path); // Remove if exists
-                std::os::unix::fs::symlink(&link_target, &dst_path)?;
+                // Remove destination if it exists (file or directory)
+                if dst_path.exists() {
+                    if dst_path.is_dir() {
+                        let _ = std::fs::remove_dir_all(&dst_path);
+                    } else {
+                        let _ = std::fs::remove_file(&dst_path);
+                    }
+                }
+                std::os::unix::fs::symlink(&link_target, &dst_path).map_err(|e| {
+                    BuildError::IoError {
+                        path: dst_path.clone(),
+                        source: e,
+                    }
+                })?;
             } else if ty.is_dir() {
                 Self::copy_dir_all(&src_path, &dst_path)?;
             } else {
@@ -658,20 +676,36 @@ impl NativeBuilder {
 
         let step_id = self.layers.len();
 
-        // COPY doesn't need overlayfs mount - just create a layer directory
-        let layer_dir = self.work_dir.join(format!("layer-{}", step_id));
+        // CRITICAL: Must copy current_rootfs first (contains base image files from FROM)
+        // COPY doesn't need overlayfs but MUST preserve existing files
+        let layer_dir = self.work_dir.join(format!("copy-layer-{}", step_id));
         std::fs::create_dir_all(&layer_dir)?;
 
+        // Copy current rootfs to layer directory
+        if std::fs::read_dir(&self.current_rootfs)?.next().is_some() {
+            Self::copy_dir_all(&self.current_rootfs, &layer_dir)?;
+        }
+
         // Resolve destination path
+        // Docker semantics: if destination doesn't end with '/' and there's 1 source, it's a file rename
+        let is_dest_dir = destination.ends_with('/') || sources.len() > 1;
+
         let dest_path = if destination.starts_with('/') {
             layer_dir.join(destination.trim_start_matches('/'))
         } else {
             layer_dir.join(self.current_workdir.trim_start_matches('/')).join(destination)
         };
 
-        std::fs::create_dir_all(&dest_path)?;
+        // If dest is a directory, create it. If it's a file path, create only the parent
+        if is_dest_dir {
+            std::fs::create_dir_all(&dest_path)?;
+            info!("Created dest directory: {}", dest_path.display());
+        } else if let Some(parent) = dest_path.parent() {
+            std::fs::create_dir_all(parent)?;
+            info!("Created parent directory: {} for dest: {}", parent.display(), dest_path.display());
+        }
 
-        info!(sources = ?sources, destination = %destination, "Copying files");
+        info!(sources = ?sources, destination = %destination, is_dest_dir = is_dest_dir, "Copying files");
 
         // Copy files from build context
         for source in sources {
@@ -683,11 +717,17 @@ impl NativeBuilder {
                 )));
             }
 
-            let file_name = src_path.file_name().ok_or_else(|| {
-                BuildError::ContextError(format!("Invalid source path: {}", source))
-            })?;
-
-            let target_path = dest_path.join(file_name);
+            // Determine target path based on whether dest is a directory or file
+            let target_path = if is_dest_dir {
+                // Dest is directory - copy into it with original filename
+                let file_name = src_path.file_name().ok_or_else(|| {
+                    BuildError::ContextError(format!("Invalid source path: {}", source))
+                })?;
+                dest_path.join(file_name)
+            } else {
+                // Dest is file path - copy directly to it (rename)
+                dest_path.clone()
+            };
 
             if src_path.is_dir() {
                 Self::copy_dir_all(&src_path, &target_path)?;
@@ -954,7 +994,14 @@ impl MacOsBuilder {
 
             if ty.is_symlink() {
                 let link_target = std::fs::read_link(&src_path)?;
-                let _ = std::fs::remove_file(&dst_path);
+                // Remove destination if it exists (file or directory)
+                if dst_path.exists() {
+                    if dst_path.is_dir() {
+                        let _ = std::fs::remove_dir_all(&dst_path);
+                    } else {
+                        let _ = std::fs::remove_file(&dst_path);
+                    }
+                }
                 std::os::unix::fs::symlink(&link_target, &dst_path)?;
             } else if ty.is_dir() {
                 Self::copy_dir_all(&src_path, &dst_path)?;
@@ -1159,8 +1206,11 @@ impl MacOsBuilder {
 
     fn execute_copy(&mut self, sources: &[String], destination: &str, context: &BuildContext) -> BuildResult<Option<PathBuf>> {
         let step_id = self.layers.len();
-        let layer_dir = self.work_dir.join(format!("layer-{}", step_id));
-        std::fs::create_dir_all(&layer_dir)?;
+        // CRITICAL: Must copy current_rootfs first (contains base image files from FROM)
+        let layer_dir = self.create_layer_dir(step_id)?;
+
+        // Docker semantics: if destination doesn't end with '/' and there's 1 source, it's a file rename
+        let is_dest_dir = destination.ends_with('/') || sources.len() > 1;
 
         let dest_path = if destination.starts_with('/') {
             layer_dir.join(destination.trim_start_matches('/'))
@@ -1168,7 +1218,12 @@ impl MacOsBuilder {
             layer_dir.join(self.current_workdir.trim_start_matches('/')).join(destination)
         };
 
-        std::fs::create_dir_all(&dest_path)?;
+        // If dest is a directory, create it. If it's a file path, create only the parent
+        if is_dest_dir {
+            std::fs::create_dir_all(&dest_path)?;
+        } else if let Some(parent) = dest_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
 
         for source in sources {
             let src_path = context.context_path.join(source);
@@ -1176,8 +1231,15 @@ impl MacOsBuilder {
                 return Err(BuildError::ContextError(format!("Source not found: {}", source)));
             }
 
-            let file_name = src_path.file_name().ok_or_else(|| BuildError::ContextError("Invalid path".into()))?;
-            let target_path = dest_path.join(file_name);
+            // Determine target path based on whether dest is a directory or file
+            let target_path = if is_dest_dir {
+                // Dest is directory - copy into it with original filename
+                let file_name = src_path.file_name().ok_or_else(|| BuildError::ContextError("Invalid path".into()))?;
+                dest_path.join(file_name)
+            } else {
+                // Dest is file path - copy directly to it (rename)
+                dest_path.clone()
+            };
 
             if src_path.is_dir() {
                 Self::copy_dir_all(&src_path, &target_path)?;
