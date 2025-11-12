@@ -14,42 +14,59 @@ use crate::types::network::NetworkConfig;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::fs;
-use tokio::process::Command;
-use tracing::{debug, error, info, instrument, span, Level};
+use tokio::process::{Child, Command};
+use tracing::{debug, error, info, instrument, span, warn, Level};
 
 /// cloud-hypervisor adapter.
+#[derive(Clone)]
 pub struct CloudHypervisorAdapter {
     /// Path to cloud-hypervisor binary
     binary_path: PathBuf,
+    /// Path to virtiofsd binary
+    virtiofsd_binary: PathBuf,
     /// Runtime directory for API sockets
     runtime_dir: PathBuf,
     /// Default kernel path
     kernel_path: PathBuf,
+    /// Track virtiofsd daemons by VM ID (for cleanup)
+    virtiofsd_daemons: Arc<Mutex<HashMap<String, Vec<VirtiofsdDaemon>>>>,
+}
+
+/// Handle to a running virtiofsd daemon.
+#[derive(Clone)]
+struct VirtiofsdDaemon {
+    tag: String,
+    socket_path: PathBuf,
+    pid: u32,
 }
 
 impl CloudHypervisorAdapter {
     /// Create a new CloudHypervisor adapter.
     pub fn new() -> Result<Self> {
-        let binary_path = Self::find_binary()?;
+        let binary_path = Self::find_binary("cloud-hypervisor")?;
+        let virtiofsd_binary = Self::find_binary("virtiofsd")?;
         let runtime_dir = PathBuf::from("/run/hypr/ch");
         let kernel_path = PathBuf::from("/usr/lib/hypr/vmlinux");
 
         Ok(Self {
             binary_path,
+            virtiofsd_binary,
             runtime_dir,
             kernel_path,
+            virtiofsd_daemons: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
-    /// Find cloud-hypervisor binary in PATH.
-    fn find_binary() -> Result<PathBuf> {
+    /// Find binary in PATH or common locations.
+    fn find_binary(name: &str) -> Result<PathBuf> {
         // Check common locations
         let candidates = vec![
-            PathBuf::from("/usr/local/bin/cloud-hypervisor"),
-            PathBuf::from("/usr/bin/cloud-hypervisor"),
-            PathBuf::from("./cloud-hypervisor"),
+            PathBuf::from(format!("/usr/local/bin/{}", name)),
+            PathBuf::from(format!("/usr/bin/{}", name)),
+            PathBuf::from(format!("./{}", name)),
         ];
 
         for path in candidates {
@@ -59,13 +76,115 @@ impl CloudHypervisorAdapter {
         }
 
         Err(HyprError::HypervisorNotFound {
-            hypervisor: "cloud-hypervisor".to_string(),
+            hypervisor: name.to_string(),
         })
+    }
+
+    /// Start virtiofsd daemons for virtio-fs mounts.
+    ///
+    /// Each mount gets its own virtiofsd daemon listening on a Unix socket.
+    #[instrument(skip(self))]
+    async fn start_virtiofsd_daemons(&self, vm_id: &str, mounts: &[crate::types::vm::VirtioFsMount]) -> Result<Vec<VirtiofsdDaemon>> {
+        let mut daemons = Vec::new();
+
+        for mount in mounts {
+            let socket_path = self.runtime_dir.join(format!("{}-{}.sock", vm_id, mount.tag));
+
+            // Remove stale socket if it exists
+            if socket_path.exists() {
+                tokio::fs::remove_file(&socket_path).await.map_err(|e| {
+                    HyprError::Internal(format!("Failed to remove stale virtiofsd socket: {}", e))
+                })?;
+            }
+
+            info!(
+                "Starting virtiofsd: tag={}, shared_dir={}, socket={}",
+                mount.tag,
+                mount.host_path.display(),
+                socket_path.display()
+            );
+
+            // Spawn virtiofsd daemon
+            // virtiofsd --socket-path=/path/to/socket --shared-dir=/path/to/share --cache=never
+            let mut child = Command::new(&self.virtiofsd_binary)
+                .arg("--socket-path")
+                .arg(&socket_path)
+                .arg("--shared-dir")
+                .arg(&mount.host_path)
+                .arg("--cache")
+                .arg("never")
+                .spawn()
+                .map_err(|e| HyprError::Internal(format!("Failed to spawn virtiofsd: {}", e)))?;
+
+            let pid = child.id().ok_or_else(|| {
+                HyprError::Internal(format!("Failed to get virtiofsd PID for tag={}", mount.tag))
+            })?;
+
+            // Wait for socket to be created (virtiofsd creates it on startup)
+            let start = Instant::now();
+            while !socket_path.exists() {
+                if start.elapsed() > Duration::from_secs(5) {
+                    // Kill the daemon
+                    let _ = child.kill().await;
+                    return Err(HyprError::Internal(format!(
+                        "virtiofsd socket did not appear within timeout: {}",
+                        socket_path.display()
+                    )));
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+
+            debug!("virtiofsd daemon started: tag={}, pid={}", mount.tag, pid);
+
+            // Detach child process (it will continue running)
+            std::mem::forget(child);
+
+            daemons.push(VirtiofsdDaemon {
+                tag: mount.tag.clone(),
+                socket_path,
+                pid,
+            });
+        }
+
+        Ok(daemons)
+    }
+
+    /// Stop virtiofsd daemons for a VM.
+    #[instrument(skip(self))]
+    async fn stop_virtiofsd_daemons(&self, vm_id: &str) -> Result<()> {
+        let daemons = {
+            let mut map = self.virtiofsd_daemons.lock().unwrap();
+            map.remove(vm_id)
+        };
+
+        if let Some(daemons) = daemons {
+            for daemon in daemons {
+                debug!("Stopping virtiofsd: tag={}, pid={}", daemon.tag, daemon.pid);
+
+                // Send SIGTERM to virtiofsd process
+                let kill_result = Command::new("kill")
+                    .arg("-TERM")
+                    .arg(daemon.pid.to_string())
+                    .status()
+                    .await;
+
+                if let Err(e) = kill_result {
+                    warn!("Failed to kill virtiofsd daemon (pid={}): {}", daemon.pid, e);
+                }
+
+                // Remove socket file
+                if daemon.socket_path.exists() {
+                    let _ = tokio::fs::remove_file(&daemon.socket_path).await;
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Build cloud-hypervisor command-line arguments.
     #[instrument(skip(self))]
-    fn build_args(&self, config: &VmConfig) -> Result<Vec<String>> {
+    fn build_args(&self, config: &VmConfig, virtiofsd_daemons: &[VirtiofsdDaemon]) -> Result<Vec<String>> {
         let mut args = Vec::new();
 
         // API socket
@@ -109,25 +228,15 @@ impl CloudHypervisorAdapter {
             args.push(disk_arg);
         }
 
-        // virtio-fs mounts
-        // TODO(Phase 3): Implement virtiofsd daemon management
-        // Cloud-hypervisor's --fs requires external virtiofsd daemons to be running
-        // For MVP, we disable virtio-fs and will use vsock for file transfer instead
-        if !config.virtio_fs_mounts.is_empty() {
-            warn!(
-                "virtio-fs mounts requested but not yet implemented (need virtiofsd daemons). \
-                 Mounts will be ignored: {:?}",
-                config.virtio_fs_mounts.iter().map(|m| &m.tag).collect::<Vec<_>>()
-            );
+        // virtio-fs mounts (using pre-started virtiofsd daemons)
+        for daemon in virtiofsd_daemons {
+            args.push("--fs".to_string());
+            args.push(format!(
+                "tag={},socket={},num_queues=1",
+                daemon.tag,
+                daemon.socket_path.display()
+            ));
         }
-        // for mount in &config.virtio_fs_mounts {
-        //     args.push("--fs".to_string());
-        //     args.push(format!(
-        //         "tag={},socket={},num_queues=1",
-        //         mount.tag,
-        //         mount.host_path.join(format!("{}-virtiofs.sock", mount.tag)).display()
-        //     ));
-        // }
 
         // Network (simplified - will be enhanced in Phase 2)
         args.push("--net".to_string());
@@ -190,10 +299,26 @@ impl VmmAdapter for CloudHypervisorAdapter {
             .await
             .map_err(|e| HyprError::Internal(format!("Failed to create runtime dir: {}", e)))?;
 
-        // Build arguments
+        // Start virtiofsd daemons BEFORE spawning cloud-hypervisor
+        let virtiofsd_daemons = if !config.virtio_fs_mounts.is_empty() {
+            info!("Starting {} virtiofsd daemons", config.virtio_fs_mounts.len());
+            let daemons = self.start_virtiofsd_daemons(&config.id, &config.virtio_fs_mounts).await?;
+
+            // Store daemons for cleanup
+            {
+                let mut map = self.virtiofsd_daemons.lock().unwrap();
+                map.insert(config.id.clone(), daemons.clone());
+            }
+
+            daemons
+        } else {
+            Vec::new()
+        };
+
+        // Build arguments (using virtiofsd daemon socket paths)
         let args = {
             let _span = span!(Level::DEBUG, "build_ch_args").entered();
-            self.build_args(config)?
+            self.build_args(config, &virtiofsd_daemons)?
         };
 
         // Spawn cloud-hypervisor process
@@ -202,6 +327,16 @@ impl VmmAdapter for CloudHypervisorAdapter {
             .args(&args)
             .spawn()
             .map_err(|e| {
+                // Clean up virtiofsd daemons on failure
+                let rt = tokio::runtime::Handle::current();
+                let adapter = self.clone();
+                let vm_id = config.id.clone();
+                std::thread::spawn(move || {
+                    rt.block_on(async {
+                        let _ = adapter.stop_virtiofsd_daemons(&vm_id).await;
+                    });
+                });
+
                 metrics::counter!("hypr_vm_start_failures_total", "adapter" => "cloudhypervisor", "reason" => "spawn_failed").increment(1);
                 HyprError::VmStartFailed {
                     vm_id: config.id.clone(),
@@ -302,6 +437,9 @@ impl VmmAdapter for CloudHypervisorAdapter {
     #[instrument(skip(self), fields(vm_id = %handle.id))]
     async fn delete(&self, handle: &VmHandle) -> Result<()> {
         info!("Deleting VM resources");
+
+        // Stop virtiofsd daemons
+        self.stop_virtiofsd_daemons(&handle.id).await?;
 
         // Clean up API socket
         if let Some(socket_path) = &handle.socket_path {
