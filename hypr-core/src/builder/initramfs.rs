@@ -82,25 +82,35 @@ fn create_directory_structure(root: &Path) -> BuildResult<()> {
 fn copy_kestrel_binary(root: &Path) -> BuildResult<()> {
     let kestrel_dst = root.join("init");
 
-    // Determine architecture
-    let arch = std::env::consts::ARCH;
-    let kestrel_arch = match arch {
+    // Determine architecture of the HOST (where hypr is running)
+    // We need to download a LINUX binary for this architecture because
+    // kestrel runs inside Linux VMs regardless of host OS
+    let host_arch = std::env::consts::ARCH;
+    let linux_arch = match host_arch {
         "x86_64" => "x86_64",
         "aarch64" => "aarch64",
+        "arm64" => "aarch64", // macOS reports arm64 instead of aarch64
         other => {
             return Err(BuildError::ContextError(format!(
-                "Unsupported architecture: {}. Only x86_64 and aarch64 are supported.",
+                "Unsupported host architecture: {}. Only x86_64 and aarch64/arm64 are supported.",
                 other
             )));
         }
     };
 
+    debug!(
+        "Host: {} {} → downloading kestrel-linux-{}",
+        std::env::consts::OS,
+        host_arch,
+        linux_arch
+    );
+
     #[cfg(target_os = "linux")]
     {
-        // On Linux, prefer build.rs compiled version, fall back to download
+        // On Linux, prefer build.rs compiled version if architecture matches
         if let Ok(kestrel_src) = std::env::var("KESTREL_BIN_PATH") {
             if PathBuf::from(&kestrel_src).exists() {
-                debug!("Copying kestrel from build.rs: {} → {}", kestrel_src, kestrel_dst.display());
+                debug!("Using locally compiled kestrel: {}", kestrel_src);
                 fs::copy(&kestrel_src, &kestrel_dst).map_err(|e| BuildError::IoError {
                     path: kestrel_dst.clone(),
                     source: e,
@@ -112,8 +122,9 @@ fn copy_kestrel_binary(root: &Path) -> BuildResult<()> {
         }
     }
 
-    // Download from GitHub releases
-    download_kestrel(kestrel_arch, &kestrel_dst)?;
+    // Download Linux binary from GitHub releases
+    // (works on both darwin and linux hosts)
+    download_kestrel(linux_arch, &kestrel_dst)?;
     set_executable(&kestrel_dst)?;
 
     Ok(())
@@ -176,24 +187,33 @@ fn set_executable(path: &Path) -> BuildResult<()> {
 fn copy_busybox_binary(root: &Path) -> BuildResult<()> {
     let busybox_dst = root.join("bin/busybox");
 
-    // Determine architecture
-    let arch = std::env::consts::ARCH;
-    let (deb_arch, deb_url) = match arch {
+    // Determine architecture of the HOST (where hypr is running)
+    // We need to download a LINUX binary for this architecture because
+    // busybox runs inside Linux VMs regardless of host OS
+    let host_arch = std::env::consts::ARCH;
+    let (deb_arch, deb_url) = match host_arch {
         "x86_64" => (
             "amd64",
             "https://ftp.debian.org/debian/pool/main/b/busybox/busybox-static_1.37.0-7_amd64.deb"
         ),
-        "aarch64" => (
+        "aarch64" | "arm64" => (
             "arm64",
             "https://ftp.debian.org/debian/pool/main/b/busybox/busybox-static_1.37.0-7_arm64.deb"
         ),
         other => {
             return Err(BuildError::ContextError(format!(
-                "Unsupported architecture for busybox: {}",
+                "Unsupported host architecture: {}. Only x86_64 and aarch64/arm64 are supported.",
                 other
             )));
         }
     };
+
+    debug!(
+        "Host: {} {} → downloading busybox-static ({})",
+        std::env::consts::OS,
+        host_arch,
+        deb_arch
+    );
 
     // Create temp directory for extraction
     let temp_dir = std::env::temp_dir().join(format!("hypr-busybox-{}", uuid::Uuid::new_v4()));
