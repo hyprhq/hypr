@@ -274,12 +274,12 @@ fn copy_busybox_binary(root: &Path) -> BuildResult<()> {
 
     debug!("Extracting busybox from .deb package");
 
-    // Extract .deb: ar x file.deb data.tar.xz, then tar -xf data.tar.xz ./bin/busybox
+    // Extract .deb: ar x file.deb data.tar.xz, then tar -xf data.tar.xz ./usr/bin/busybox
     let extract_status = std::process::Command::new("sh")
         .arg("-c")
         .arg(format!(
             "cd {} && (ar x {} data.tar.xz 2>/dev/null || bsdtar -xf {} data.tar.xz) && \
-             tar -xf data.tar.xz ./bin/busybox && mv bin/busybox {}",
+             tar -xf data.tar.xz ./usr/bin/busybox && mv usr/bin/busybox {}",
             temp_dir.display(),
             deb_file.display(),
             deb_file.display(),
