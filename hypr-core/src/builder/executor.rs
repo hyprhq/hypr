@@ -9,10 +9,16 @@ use crate::builder::cache::CacheManager;
 use crate::builder::graph::BuildGraph;
 use crate::builder::parser::Instruction;
 use async_trait::async_trait;
-use sha2::Digest;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{debug, info, instrument, warn};
+
+#[cfg(target_os = "linux")]
+use crate::builder::graph::BuildNode;
+#[cfg(target_os = "linux")]
+use crate::builder::parser::RunCommand;
+#[cfg(target_os = "linux")]
+use std::path::Path;
 
 /// Result type for build operations.
 pub type BuildResult<T> = Result<T, BuildError>;
@@ -280,7 +286,7 @@ impl NativeBuilder {
 
     /// Unmounts an overlayfs mount point.
     fn unmount_overlay(&self, merged_dir: &Path) -> BuildResult<()> {
-        use nix::mount::{umount, MntFlags};
+        use nix::mount::umount;
         use tracing::debug;
 
         debug!(path = %merged_dir.display(), "Unmounting overlayfs");
@@ -468,8 +474,6 @@ impl NativeBuilder {
 
     /// Recursively copies a directory tree, preserving structure and permissions.
     fn copy_dir_all(src: &PathBuf, dst: &PathBuf) -> BuildResult<()> {
-        use std::os::unix::fs::PermissionsExt;
-
         debug!("copy_dir_all: Creating dest directory: {}", dst.display());
         std::fs::create_dir_all(dst).map_err(|e| BuildError::IoError {
             path: dst.clone(),
@@ -585,19 +589,19 @@ impl NativeBuilder {
                 self.execute_run(command)?
             }
             Instruction::Copy { sources, destination, .. } => {
-                self.execute_copy(sources, destination, context)?
+                self.execute_copy(sources, destination.as_str(), context)?
             }
             Instruction::Add { sources, destination, .. } => {
-                self.execute_add(sources, destination, context)?
+                self.execute_add(sources, destination.as_str(), context)?
             }
             Instruction::Env { vars } => {
                 self.execute_env(vars)?
             }
             Instruction::Workdir { path } => {
-                self.execute_workdir(path)?
+                self.execute_workdir(path.as_str())?
             }
             Instruction::User { user } => {
-                self.execute_user(user)?
+                self.execute_user(user.as_str())?
             }
             // Other instructions don't create layers, just update metadata
             _ => return Ok((None, false)),
@@ -615,7 +619,7 @@ impl NativeBuilder {
 
     fn execute_from(&mut self, node: &BuildNode) -> BuildResult<Option<PathBuf>> {
         use crate::builder::parser::{ImageRef, Instruction};
-        use tracing::{info, instrument};
+        use tracing::info;
 
         // Extract image reference from instruction
         let image_ref = match &node.instruction {
@@ -968,7 +972,7 @@ impl BuildExecutor for NativeBuilder {
 impl NativeBuilder {
     /// Generates a SquashFS image from the current rootfs.
     fn generate_squashfs(&self) -> BuildResult<PathBuf> {
-        use tracing::{info, instrument};
+        use tracing::info;
 
         let squashfs_path = self.work_dir.join("rootfs.squashfs");
 
@@ -1363,6 +1367,7 @@ impl BuildExecutor for MacOsVmBuilder {
         let manifest_json = serde_json::to_string(&manifest).map_err(|e| {
             BuildError::ContextError(format!("Failed to serialize manifest: {}", e))
         })?;
+        use sha2::Digest;
         let image_id = format!("{:x}", sha2::Sha256::digest(manifest_json.as_bytes()));
 
         info!("Build complete: {}", image_id);

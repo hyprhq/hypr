@@ -175,8 +175,10 @@ impl VmmAdapter for CloudHypervisorAdapter {
             .map_err(|e| HyprError::Internal(format!("Failed to create runtime dir: {}", e)))?;
 
         // Build arguments
-        let _span = span!(Level::DEBUG, "build_ch_args").entered();
-        let args = self.build_args(config)?;
+        let args = {
+            let _span = span!(Level::DEBUG, "build_ch_args").entered();
+            self.build_args(config)?
+        };
 
         // Spawn cloud-hypervisor process
         let start = Instant::now();

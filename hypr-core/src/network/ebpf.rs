@@ -56,9 +56,7 @@ use metrics::{counter, gauge};
 use tracing::{debug, error, info, instrument, warn};
 
 #[cfg(target_os = "linux")]
-use libbpf_rs::{
-    Link, MapCore, Object, ObjectBuilder, TcHook, TcHookBuilder, TC_EGRESS, TC_INGRESS,
-};
+use libbpf_rs::{Link, MapCore, Object, ObjectBuilder, TcHookBuilder};
 
 /// Network protocol for port forwarding rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
