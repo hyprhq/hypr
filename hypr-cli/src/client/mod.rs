@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use hypr_api::hypr::v1::hypr_service_client::HyprServiceClient;
 use hypr_api::hypr::v1::*;
-use hypr_core::{Image, Stack, Vm, VmConfig};
+use hypr_core::{Stack, Vm, VmConfig};
 use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
@@ -96,20 +96,6 @@ impl HyprClient {
         Ok(vm.try_into()?)
     }
 
-    /// List all images
-    pub async fn list_images(&mut self) -> Result<Vec<Image>> {
-        let request = tonic::Request::new(ListImagesRequest { filter: None });
-
-        let response = self.client.list_images(request).await?;
-        let images = response
-            .into_inner()
-            .images
-            .into_iter()
-            .map(|img| img.try_into())
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(images)
-    }
 
     /// Delete an image
     #[allow(dead_code)]

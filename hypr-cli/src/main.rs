@@ -43,9 +43,6 @@ enum Commands {
     /// List all VMs
     Ps,
 
-    /// List all images
-    Images,
-
     /// Start a VM
     Start {
         /// VM ID or name
@@ -204,10 +201,6 @@ async fn main() -> Result<()> {
             commands::ps().await?;
         }
 
-        Commands::Images => {
-            commands::images().await?;
-        }
-
         Commands::Start { vm } => {
             let mut client = client::HyprClient::connect().await?;
             let vm = client.start_vm(&vm).await?;
@@ -245,17 +238,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Images => {
-            let mut client = client::HyprClient::connect().await?;
-            let images = client.list_images().await?;
-
-            if images.is_empty() {
-                println!("No images available");
-            } else {
-                for image in images {
-                    let size_mb = image.size_bytes as f64 / 1024.0 / 1024.0;
-                    println!("{:<20} {:<10} {:.1} MB", image.name, image.tag, size_mb);
-                }
-            }
+            commands::images().await?;
         }
 
         Commands::Health => {
