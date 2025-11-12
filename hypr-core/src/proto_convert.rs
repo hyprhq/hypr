@@ -138,6 +138,7 @@ impl TryFrom<ProtoVmConfig> for VmConfig {
             resources,
             kernel_path: proto.kernel_path.map(PathBuf::from),
             kernel_args: proto.kernel_args,
+            initramfs_path: None, // Proto support for initramfs not yet added to hypr.proto
             disks: proto.disks.into_iter().map(|d| d.try_into()).collect::<Result<Vec<_>>>()?,
             network,
             ports: proto.ports.into_iter().map(|p| p.try_into()).collect::<Result<Vec<_>>>()?,

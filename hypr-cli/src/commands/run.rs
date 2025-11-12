@@ -29,6 +29,7 @@ pub async fn run(
         resources: VmResources { cpus: cpus.unwrap_or(2), memory_mb: memory_mb.unwrap_or(512) },
         kernel_path: None, // Use default
         kernel_args: vec![],
+        initramfs_path: None, // Only used for build VMs
         disks: vec![
             // Root disk (image rootfs)
             DiskConfig {

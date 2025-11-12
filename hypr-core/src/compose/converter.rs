@@ -104,6 +104,7 @@ impl ComposeConverter {
             resources: VmResources { cpus, memory_mb },
             kernel_path: None, // Use default kernel
             kernel_args: vec![],
+            initramfs_path: None, // Only used for build VMs
             disks,
             network: NetworkConfig::default(),
             ports,

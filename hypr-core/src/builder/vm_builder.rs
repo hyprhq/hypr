@@ -16,9 +16,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tracing::{debug, error, info, instrument, warn};
 
-/// VM-based builder that executes builds in isolated Alpine Linux VMs.
+/// VM-based builder that executes builds in isolated Linux VMs with minimal initramfs.
 ///
-/// Each build spawns a fresh VM (100ms cold start), executes build steps,
+/// Each build spawns a fresh VM (<100ms cold start), executes build steps,
 /// extracts the resulting layer, and terminates the VM.
 ///
 /// # Architecture
@@ -26,20 +26,18 @@ use tracing::{debug, error, info, instrument, warn};
 /// ```text
 /// Host:
 ///   - BuilderHttpProxy on localhost:41010 (proxies to internet)
-///   - VmBuilder spawns Alpine VM with virtio-fs mounts
+///   - VmBuilder spawns minimal Linux VM with initramfs + virtio-fs mounts
+///   - OCI base images pulled and shared via virtio-fs
 ///
-/// Guest (Alpine VM):
-///   - builder-agent.c listens on vsock port 41011
-///   - socat bridges TCP localhost:41010 → vsock host:41010
-///   - Build commands execute via builder-agent
+/// Guest (minimal initramfs):
+///   - kestrel.c (PID 1, mode=build) listens on vsock port 41011
+///   - Mounts base image rootfs from virtio-fs, pivots root
+///   - Build commands execute in base image context (chroot)
 ///   - Layers written to /shared (virtio-fs) → host extracts
 /// ```
 pub struct VmBuilder {
     /// VMM adapter for spawning VMs
     adapter: Box<dyn VmmAdapter>,
-
-    /// Path to Alpine builder rootfs (squashfs)
-    builder_rootfs: PathBuf,
 
     /// Path to Linux kernel
     kernel_path: PathBuf,
@@ -49,6 +47,9 @@ pub struct VmBuilder {
 
     /// Whether HTTP proxy is running
     proxy_running: bool,
+
+    /// Cached initramfs path (generated once, reused across builds)
+    initramfs_cache: Option<PathBuf>,
 }
 
 impl VmBuilder {
@@ -56,22 +57,45 @@ impl VmBuilder {
     ///
     /// # Arguments
     /// * `adapter` - VMM adapter for spawning VMs
-    /// * `builder_rootfs` - Path to Alpine builder rootfs image
     /// * `kernel_path` - Path to Linux kernel
     /// * `work_dir` - Working directory for builds
+    ///
+    /// Note: builder_rootfs parameter removed (now uses on-the-fly initramfs)
     pub fn new(
         adapter: Box<dyn VmmAdapter>,
-        builder_rootfs: PathBuf,
+        _builder_rootfs: PathBuf,  // Kept for compatibility, will be removed
         kernel_path: PathBuf,
         work_dir: PathBuf,
     ) -> Self {
         Self {
             adapter,
-            builder_rootfs,
             kernel_path,
             _work_dir: work_dir,
             proxy_running: false,
+            initramfs_cache: None,
         }
+    }
+
+    /// Get or create the initramfs for builder VMs.
+    ///
+    /// Generates initramfs once and caches it for reuse across builds.
+    fn get_or_create_initramfs(&mut self) -> Result<PathBuf> {
+        if let Some(cached) = &self.initramfs_cache {
+            if cached.exists() {
+                debug!("Using cached initramfs: {}", cached.display());
+                return Ok(cached.clone());
+            }
+        }
+
+        // Generate new initramfs
+        info!("Generating builder initramfs");
+        let initramfs = crate::builder::initramfs::create_builder_initramfs()
+            .map_err(|e| HyprError::BuildFailed {
+                reason: format!("Failed to create initramfs: {}", e),
+            })?;
+
+        self.initramfs_cache = Some(initramfs.clone());
+        Ok(initramfs)
     }
 
     /// Execute a build step in an ephemeral builder VM.
@@ -124,12 +148,15 @@ impl VmBuilder {
         Ok(metadata)
     }
 
-    /// Spawn an ephemeral Alpine builder VM.
+    /// Spawn an ephemeral builder VM with minimal initramfs.
     #[instrument(skip(self))]
-    async fn spawn_builder_vm(&self, context_dir: &Path, output_dir: &Path) -> Result<VmHandle> {
+    async fn spawn_builder_vm(&mut self, context_dir: &Path, output_dir: &Path) -> Result<VmHandle> {
         debug!("Spawning builder VM");
 
         let vm_id = format!("builder-{}", uuid::Uuid::new_v4());
+
+        // Get or create initramfs
+        let initramfs = self.get_or_create_initramfs()?;
 
         // Configure virtio-fs mounts:
         // 1. Build context (read-only)
@@ -145,7 +172,7 @@ impl VmBuilder {
             },
         ];
 
-        use crate::types::vm::{VmResources, DiskConfig, DiskFormat};
+        use crate::types::vm::VmResources;
 
         let config = VmConfig {
             id: vm_id.clone(),
@@ -156,14 +183,12 @@ impl VmBuilder {
             },
             kernel_path: Some(self.kernel_path.clone()),
             kernel_args: vec![
-                format!("init=/builder-agent"),
-                format!("console=ttyS0"),
+                "init=/init".to_string(),
+                "mode=build".to_string(),
+                "console=ttyS0".to_string(),
             ],
-            disks: vec![DiskConfig {
-                path: self.builder_rootfs.clone(),
-                readonly: true,
-                format: DiskFormat::Squashfs,
-            }],
+            initramfs_path: Some(initramfs),
+            disks: vec![],  // No disks, using initramfs only
             network: Default::default(),
             ports: vec![],
             env: Default::default(),

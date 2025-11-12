@@ -7,6 +7,7 @@ pub mod cache;
 pub mod executor;
 pub mod graph;
 pub mod http_proxy;
+pub mod initramfs;
 pub mod manifest;
 pub mod oci;
 pub mod parser;

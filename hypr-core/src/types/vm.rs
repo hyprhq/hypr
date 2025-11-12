@@ -92,6 +92,9 @@ pub struct VmConfig {
     /// Kernel command-line arguments
     pub kernel_args: Vec<String>,
 
+    /// Initramfs path (optional, for minimal boot environments)
+    pub initramfs_path: Option<PathBuf>,
+
     /// Disk configurations
     pub disks: Vec<DiskConfig>,
 
