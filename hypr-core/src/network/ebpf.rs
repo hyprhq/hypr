@@ -56,7 +56,7 @@ use metrics::{counter, gauge};
 use tracing::{debug, error, info, instrument, warn};
 
 #[cfg(target_os = "linux")]
-use libbpf_rs::{Link, MapCore, Object, ObjectBuilder, TcHook, TcHookBuilder, TC_INGRESS};
+use libbpf_rs::{MapCore, Object, ObjectBuilder, TcHook, TcHookBuilder, TC_INGRESS};
 #[cfg(target_os = "linux")]
 use std::os::fd::AsFd;
 
@@ -129,9 +129,9 @@ pub struct DriftManager {
     /// Loaded eBPF object
     obj: Object,
     /// TC ingress hook
-    ingress_link: Option<Link>,
+    ingress_link: Option<TcHook>,
     /// TC egress hook
-    egress_link: Option<Link>,
+    egress_link: Option<TcHook>,
     /// Whether programs are attached
     attached: bool,
 }
@@ -376,9 +376,21 @@ impl DriftManager {
 
         info!("Detaching eBPF programs from interface {}", self.interface);
 
-        // Links are automatically detached when dropped
-        self.ingress_link = None;
-        self.egress_link = None;
+        // Explicitly detach hooks
+        if let Some(mut hook) = self.ingress_link.take() {
+            hook.detach().map_err(|e| {
+                error!("Failed to detach ingress hook: {}", e);
+                HyprError::EbpfAttachError(format!("Failed to detach ingress: {}", e))
+            })?;
+        }
+
+        if let Some(mut hook) = self.egress_link.take() {
+            hook.detach().map_err(|e| {
+                error!("Failed to detach egress hook: {}", e);
+                HyprError::EbpfAttachError(format!("Failed to detach egress: {}", e))
+            })?;
+        }
+
         self.attached = false;
 
         info!("Successfully detached eBPF programs");
