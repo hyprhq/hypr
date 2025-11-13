@@ -133,6 +133,7 @@ impl TryFrom<ProtoVmConfig> for VmConfig {
             .try_into()?;
 
         Ok(Self {
+            network_enabled: true, // gRPC VMs are runtime VMs
             id: proto.id,
             name: proto.name,
             resources,

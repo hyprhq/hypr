@@ -25,6 +25,7 @@ mod state_tests {
             image_id: "image-123".to_string(),
             status: VmStatus::Creating,
             config: VmConfig {
+                network_enabled: true,
                 id: "vm-test-123".to_string(),
                 name: "test-vm".to_string(),
                 resources: VmResources::default(),
@@ -74,6 +75,7 @@ mod state_tests {
                 image_id: "image-123".to_string(),
                 status: VmStatus::Running,
                 config: VmConfig {
+                    network_enabled: true,
                     id: format!("vm-{}", i),
                     name: format!("test-vm-{}", i),
                     resources: VmResources::default(),
@@ -114,6 +116,7 @@ mod state_tests {
             image_id: "image-123".to_string(),
             status: VmStatus::Creating,
             config: VmConfig {
+                network_enabled: true,
                 id: "vm-test-456".to_string(),
                 name: "test-vm".to_string(),
                 resources: VmResources::default(),
@@ -157,6 +160,7 @@ mod state_tests {
             image_id: "image-123".to_string(),
             status: VmStatus::Stopped,
             config: VmConfig {
+                network_enabled: true,
                 id: "vm-test-789".to_string(),
                 name: "test-vm".to_string(),
                 resources: VmResources::default(),

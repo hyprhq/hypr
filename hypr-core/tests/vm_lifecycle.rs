@@ -118,6 +118,7 @@ async fn test_vm_lifecycle_create_start_stop_delete() {
 
     // Create VM configuration
     let config = VmConfig {
+        network_enabled: true,
         id: "test-vm-1".to_string(),
         name: "test-vm".to_string(),
         resources: VmResources { cpus: 2, memory_mb: 512 },
@@ -210,6 +211,7 @@ async fn test_state_persistence_across_sessions() {
         let state = StateManager::new(db_path).await.expect("Failed to create state manager");
 
         let config = VmConfig {
+            network_enabled: true,
             id: "persistent-vm".to_string(),
             name: "test-persistent".to_string(),
             resources: VmResources { cpus: 1, memory_mb: 256 },
@@ -290,6 +292,7 @@ async fn test_multiple_vms_concurrent_operations() {
 
     for vm_id in &vm_ids {
         let config = VmConfig {
+            network_enabled: true,
             id: vm_id.to_string(),
             name: format!("test-{}", vm_id),
             resources: VmResources { cpus: 1, memory_mb: 128 },

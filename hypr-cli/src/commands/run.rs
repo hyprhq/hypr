@@ -24,6 +24,7 @@ pub async fn run(
 
     // Build VM config
     let config = VmConfig {
+        network_enabled: true,
         id: vm_id.clone(),
         name: vm_name.clone(),
         resources: VmResources { cpus: cpus.unwrap_or(2), memory_mb: memory_mb.unwrap_or(512) },

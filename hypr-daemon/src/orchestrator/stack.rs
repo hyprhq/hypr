@@ -520,6 +520,7 @@ mod tests {
         ServiceConfig {
             name: name.to_string(),
             vm_config: VmConfig {
+                network_enabled: true,
                 id: format!("{}_vm", name),
                 name: name.to_string(),
                 resources: VmResources { cpus: 1, memory_mb: 512 },

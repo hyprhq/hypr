@@ -99,6 +99,7 @@ impl ComposeConverter {
         let vm_id = format!("{}_{}", name, uuid::Uuid::new_v4().as_simple());
 
         Ok(VmConfig {
+            network_enabled: true, // Runtime VMs need network
             id: vm_id.clone(),
             name: name.to_string(),
             resources: VmResources { cpus, memory_mb },
@@ -465,6 +466,7 @@ mod tests {
             ServiceConfig {
                 name: "web".to_string(),
                 vm_config: VmConfig {
+                    network_enabled: true,
                     id: "web".to_string(),
                     name: "web".to_string(),
                     resources: VmResources::default(),
@@ -486,6 +488,7 @@ mod tests {
             ServiceConfig {
                 name: "db".to_string(),
                 vm_config: VmConfig {
+                    network_enabled: true,
                     id: "db".to_string(),
                     name: "db".to_string(),
                     resources: VmResources::default(),
@@ -518,6 +521,7 @@ mod tests {
             ServiceConfig {
                 name: "a".to_string(),
                 vm_config: VmConfig {
+                    network_enabled: true,
                     id: "a".to_string(),
                     name: "a".to_string(),
                     resources: VmResources::default(),
@@ -539,6 +543,7 @@ mod tests {
             ServiceConfig {
                 name: "b".to_string(),
                 vm_config: VmConfig {
+                    network_enabled: true,
                     id: "b".to_string(),
                     name: "b".to_string(),
                     resources: VmResources::default(),
@@ -569,6 +574,7 @@ mod tests {
         let services = vec![ServiceConfig {
             name: "web".to_string(),
             vm_config: VmConfig {
+                network_enabled: true,
                 id: "web".to_string(),
                 name: "web".to_string(),
                 resources: VmResources::default(),
