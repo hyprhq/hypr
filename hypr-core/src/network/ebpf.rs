@@ -28,7 +28,7 @@
 //!
 //! # #[cfg(target_os = "linux")]
 //! # async fn example() -> anyhow::Result<()> {
-//! let manager = DriftManager::new(
+//! let mut manager = DriftManager::new(
 //!     "drift_l4_ingress.o",
 //!     "drift_l4_egress.o",
 //!     "eth0",
