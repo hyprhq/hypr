@@ -284,14 +284,14 @@ jobs:
           VERSION="${{ inputs.version }}"
 
           # Download and verify a few key binaries
-          curl -fsSL "https://github.com/hyprhq/hypr/releases/download/${VERSION}/hypr-linux-amd64" -o hypr
-          curl -fsSL "https://github.com/hyprhq/hypr/releases/download/${VERSION}/hypr-linux-amd64.sha256" -o hypr.sha256
+          curl -fsSL "https://github.com/hyprhq/hypr/releases/download/${VERSION}/hypr-linux-amd64" -o hypr-linux-amd64
+          curl -fsSL "https://github.com/hyprhq/hypr/releases/download/${VERSION}/hypr-linux-amd64.sha256" -o hypr-linux-amd64.sha256
 
           # Verify checksum
-          shasum -a 256 -c hypr.sha256
+          shasum -a 256 -c hypr-linux-amd64.sha256
 
           # Verify it's executable
-          chmod +x hypr
-          file hypr
+          chmod +x hypr-linux-amd64
+          file hypr-linux-amd64
 
           echo "✅ Release verification passed"
