@@ -123,6 +123,7 @@ async fn test_vm_lifecycle_create_start_stop_delete() {
         resources: VmResources { cpus: 2, memory_mb: 512 },
         kernel_path: Some(PathBuf::from("/tmp/vmlinux")),
         kernel_args: vec!["console=ttyS0".to_string()],
+        initramfs_path: None,
         disks: vec![],
         network: NetworkConfig {
             network: "default".to_string(),
@@ -134,6 +135,7 @@ async fn test_vm_lifecycle_create_start_stop_delete() {
         env: HashMap::new(),
         volumes: vec![],
         vsock_path: PathBuf::from("/tmp/test.vsock"),
+        virtio_fs_mounts: vec![],
         gpu: None,
     };
 
@@ -213,6 +215,7 @@ async fn test_state_persistence_across_sessions() {
             resources: VmResources { cpus: 1, memory_mb: 256 },
             kernel_path: Some(PathBuf::from("/tmp/vmlinux")),
             kernel_args: vec![],
+            initramfs_path: None,
             disks: vec![],
             network: NetworkConfig {
                 network: "default".to_string(),
@@ -224,6 +227,7 @@ async fn test_state_persistence_across_sessions() {
             env: HashMap::new(),
             volumes: vec![],
             vsock_path: PathBuf::from("/tmp/persistent.vsock"),
+            virtio_fs_mounts: vec![],
             gpu: None,
         };
 
@@ -291,6 +295,7 @@ async fn test_multiple_vms_concurrent_operations() {
             resources: VmResources { cpus: 1, memory_mb: 128 },
             kernel_path: Some(PathBuf::from("/tmp/vmlinux")),
             kernel_args: vec![],
+            initramfs_path: None,
             disks: vec![],
             network: NetworkConfig {
                 network: "default".to_string(),
@@ -302,6 +307,7 @@ async fn test_multiple_vms_concurrent_operations() {
             env: HashMap::new(),
             volumes: vec![],
             vsock_path: PathBuf::from(format!("/tmp/{}.vsock", vm_id)),
+            virtio_fs_mounts: vec![],
             gpu: None,
         };
 

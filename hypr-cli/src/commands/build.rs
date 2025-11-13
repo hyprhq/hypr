@@ -278,28 +278,28 @@ mod tests {
 
     #[test]
     fn test_parse_tag_none() {
-        let (name, tag) = parse_tag(None).unwrap();
+        let (name, tag) = parse_tag(None, "myimage").unwrap();
         assert_eq!(name, "myimage");
         assert_eq!(tag, "latest");
     }
 
     #[test]
     fn test_parse_tag_name_only() {
-        let (name, tag) = parse_tag(Some("myapp")).unwrap();
+        let (name, tag) = parse_tag(Some("myapp"), "default").unwrap();
         assert_eq!(name, "myapp");
         assert_eq!(tag, "latest");
     }
 
     #[test]
     fn test_parse_tag_with_version() {
-        let (name, tag) = parse_tag(Some("myapp:v1.0")).unwrap();
+        let (name, tag) = parse_tag(Some("myapp:v1.0"), "default").unwrap();
         assert_eq!(name, "myapp");
         assert_eq!(tag, "v1.0");
     }
 
     #[test]
     fn test_parse_tag_with_registry() {
-        let (name, tag) = parse_tag(Some("registry.io/myapp:latest")).unwrap();
+        let (name, tag) = parse_tag(Some("registry.io/myapp:latest"), "default").unwrap();
         assert_eq!(name, "registry.io/myapp");
         assert_eq!(tag, "latest");
     }

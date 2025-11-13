@@ -525,6 +525,7 @@ mod tests {
                 resources: VmResources { cpus: 1, memory_mb: 512 },
                 kernel_path: Some("/tmp/kernel".into()),
                 kernel_args: vec![],
+                initramfs_path: None,
                 disks: vec![],
                 network: NetworkConfig {
                     network: "default".to_string(),
@@ -537,6 +538,7 @@ mod tests {
                 volumes: vec![],
                 gpu: None,
                 vsock_path: "/tmp/vsock".into(),
+                virtio_fs_mounts: vec![],
             },
             depends_on,
             healthcheck: None,
