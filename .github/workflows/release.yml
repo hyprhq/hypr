@@ -1,0 +1,302 @@
+name: Build and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v0.1.0)'
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Build Rust binaries for all platforms
+  build-rust:
+    name: Build Rust (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          # Linux x86_64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            arch: amd64
+            platform: linux
+
+          # Linux aarch64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            arch: arm64
+            platform: linux
+
+          # macOS x86_64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            arch: amd64
+            platform: darwin
+
+          # macOS aarch64 (Apple Silicon)
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            arch: arm64
+            platform: darwin
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          target: ${{ matrix.target }}
+          override: true
+
+      - name: Install cross-compilation tools (Linux aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v3
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build Rust workspace
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      - name: Prepare binaries
+        run: |
+          mkdir -p dist
+
+          # hypr-cli binary (named 'hypr' in Cargo.toml) → hypr-{platform}-{arch}
+          cp target/${{ matrix.target }}/release/hypr dist/hypr-${{ matrix.platform }}-${{ matrix.arch }}
+
+          # hypr-daemon binary (named 'hyprd' in Cargo.toml) → hyprd-{platform}-{arch}
+          cp target/${{ matrix.target }}/release/hyprd dist/hyprd-${{ matrix.platform }}-${{ matrix.arch }}
+
+          # Make executable
+          chmod +x dist/hypr-${{ matrix.platform }}-${{ matrix.arch }}
+          chmod +x dist/hyprd-${{ matrix.platform }}-${{ matrix.arch }}
+
+          # Generate checksums
+          cd dist
+          shasum -a 256 hypr-${{ matrix.platform }}-${{ matrix.arch }} > hypr-${{ matrix.platform }}-${{ matrix.arch }}.sha256
+          shasum -a 256 hyprd-${{ matrix.platform }}-${{ matrix.arch }} > hyprd-${{ matrix.platform }}-${{ matrix.arch }}.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: rust-binaries-${{ matrix.platform }}-${{ matrix.arch }}
+          path: dist/*
+
+  # Build kestrel (C) for Linux only
+  build-kestrel:
+    name: Build kestrel (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          # Linux x86_64
+          - arch: amd64
+            cc: gcc
+            target_arch: x86_64
+
+          # Linux aarch64
+          - arch: arm64
+            cc: aarch64-linux-gnu-gcc
+            target_arch: aarch64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install cross-compilation tools (aarch64)
+        if: matrix.arch == 'arm64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build kestrel
+        run: |
+          cd guest
+
+          # Compile kestrel.c statically
+          ${{ matrix.cc }} -static -O2 -Wall -Wextra \
+            -o kestrel-linux-${{ matrix.arch }} \
+            kestrel.c
+
+          # Strip debug symbols
+          strip kestrel-linux-${{ matrix.arch }}
+
+          # Verify it's a static binary
+          file kestrel-linux-${{ matrix.arch }}
+          ldd kestrel-linux-${{ matrix.arch }} || echo "Static binary (no dynamic deps)"
+
+      - name: Prepare kestrel binary
+        run: |
+          mkdir -p dist
+          cp guest/kestrel-linux-${{ matrix.arch }} dist/
+          chmod +x dist/kestrel-linux-${{ matrix.arch }}
+
+          # Generate checksum
+          cd dist
+          shasum -a 256 kestrel-linux-${{ matrix.arch }} > kestrel-linux-${{ matrix.arch }}.sha256
+
+          # Show binary info
+          ls -lh kestrel-linux-${{ matrix.arch }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: kestrel-linux-${{ matrix.arch }}
+          path: dist/*
+
+  # Create GitHub Release
+  create-release:
+    name: Create GitHub Release
+    needs: [build-rust, build-kestrel]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+
+          # Copy all binaries to release directory
+          find artifacts -type f -exec cp {} release/ \;
+
+          # List what we're releasing
+          echo "Release contents:"
+          ls -lh release/
+
+          # Verify we have all 10 binaries + checksums
+          echo ""
+          echo "Binary count:"
+          ls -1 release/ | grep -v ".sha256" | wc -l
+          echo "Expected: 10 binaries (2 Rust × 4 platforms + 2 kestrel × 1 platform × 2 arches)"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ inputs.version }}
+          name: Release ${{ inputs.version }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## HYPR Release ${{ inputs.version }}
+
+            ### Binaries Included
+
+            **Rust Binaries (hypr CLI + hyprd daemon):**
+            - Linux: `hypr-linux-amd64`, `hypr-linux-arm64`, `hyprd-linux-amd64`, `hyprd-linux-arm64`
+            - macOS: `hypr-darwin-amd64`, `hypr-darwin-arm64`, `hyprd-darwin-amd64`, `hyprd-darwin-arm64`
+
+            **Kestrel (Guest Agent):**
+            - Linux: `kestrel-linux-amd64`, `kestrel-linux-arm64`
+
+            ### Installation
+
+            **Linux (x86_64):**
+            ```bash
+            curl -fsSL https://github.com/hyprhq/hypr/releases/download/${{ inputs.version }}/hypr-linux-amd64 -o hypr
+            chmod +x hypr
+            sudo mv hypr /usr/local/bin/
+            ```
+
+            **macOS (Apple Silicon):**
+            ```bash
+            curl -fsSL https://github.com/hyprhq/hypr/releases/download/${{ inputs.version }}/hypr-darwin-arm64 -o hypr
+            chmod +x hypr
+            sudo mv hypr /usr/local/bin/
+            ```
+
+            ### Verification
+
+            All binaries include SHA256 checksums for verification:
+            ```bash
+            curl -fsSL https://github.com/hyprhq/hypr/releases/download/${{ inputs.version }}/hypr-linux-amd64.sha256 -o hypr.sha256
+            shasum -a 256 -c hypr.sha256
+            ```
+
+            ### What's Changed
+
+            See commit history for detailed changes.
+          files: |
+            release/hypr-linux-amd64
+            release/hypr-linux-amd64.sha256
+            release/hypr-linux-arm64
+            release/hypr-linux-arm64.sha256
+            release/hypr-darwin-amd64
+            release/hypr-darwin-amd64.sha256
+            release/hypr-darwin-arm64
+            release/hypr-darwin-arm64.sha256
+            release/hyprd-linux-amd64
+            release/hyprd-linux-amd64.sha256
+            release/hyprd-linux-arm64
+            release/hyprd-linux-arm64.sha256
+            release/hyprd-darwin-amd64
+            release/hyprd-darwin-amd64.sha256
+            release/hyprd-darwin-arm64
+            release/hyprd-darwin-arm64.sha256
+            release/kestrel-linux-amd64
+            release/kestrel-linux-amd64.sha256
+            release/kestrel-linux-arm64
+            release/kestrel-linux-arm64.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Verify release integrity
+  verify-release:
+    name: Verify Release
+    needs: create-release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download release assets
+        run: |
+          VERSION="${{ inputs.version }}"
+
+          # Download and verify a few key binaries
+          curl -fsSL "https://github.com/hyprhq/hypr/releases/download/${VERSION}/hypr-linux-amd64" -o hypr
+          curl -fsSL "https://github.com/hyprhq/hypr/releases/download/${VERSION}/hypr-linux-amd64.sha256" -o hypr.sha256
+
+          # Verify checksum
+          shasum -a 256 -c hypr.sha256
+
+          # Verify it's executable
+          chmod +x hypr
+          file hypr
+
+          echo "✅ Release verification passed"
