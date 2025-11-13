@@ -39,7 +39,9 @@
 #include <sys/mount.h>
 #include <sys/socket.h>
 #include <sys/select.h>
+#include <sys/ioctl.h>
 #include <linux/vm_sockets.h>  // AF_VSOCK
+#include <linux/if.h>          // struct ifreq
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
@@ -107,15 +109,41 @@ static kestrel_mode_t detect_mode(void) {
 // BUILD MODE - EARLY BOOT
 // ============================================================================
 
+static void bring_up_loopback(void) {
+    // Bring up loopback interface using ioctl (no external dependencies)
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        FATAL("socket(AF_INET) failed: %s", strerror(errno));
+    }
+
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, "lo", IFNAMSIZ);
+
+    // Get current flags
+    if (ioctl(sock, SIOCGIFFLAGS, &ifr) < 0) {
+        close(sock);
+        FATAL("ioctl(SIOCGIFFLAGS) failed: %s", strerror(errno));
+    }
+
+    // Set IFF_UP flag
+    ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
+
+    if (ioctl(sock, SIOCSIFFLAGS, &ifr) < 0) {
+        close(sock);
+        FATAL("ioctl(SIOCSIFFLAGS) failed: %s", strerror(errno));
+    }
+
+    close(sock);
+    LOG("Loopback interface configured");
+}
+
 static void mount_essentials_build(void) {
     // Build mode: Mount build-specific filesystems
     // Essential filesystems (/proc, /sys, /dev, /run) already mounted in main()
 
     // Bring up loopback interface FIRST (needed for HTTP proxy)
-    if (system("ip link set lo up") != 0) {
-        FATAL("Failed to bring up loopback interface");
-    }
-    LOG("Loopback interface configured");
+    bring_up_loopback();
 
     // Create directories
     mkdir("/tmp", 0777);
@@ -136,22 +164,34 @@ static void mount_essentials_build(void) {
     }
 
     // Wait for virtio-fs devices to be ready (kernel driver may still be initializing)
+    // Retry mount operations with exponential backoff
     LOG("Waiting for virtio-fs devices...");
-    for (int i = 0; i < 30; i++) {
-        if (access("/sys/fs/virtiofs/context", F_OK) == 0 ||
-            access("/sys/fs/virtiofs/shared", F_OK) == 0) {
-            LOG("virtio-fs devices detected");
+
+    int context_mounted = 0;
+    int shared_mounted = 0;
+
+    for (int retry = 0; retry < 10; retry++) {
+        if (!context_mounted && mount("context", "/context", "virtiofs", 0, NULL) == 0) {
+            LOG("context virtio-fs mounted");
+            context_mounted = 1;
+        }
+        if (!shared_mounted && mount("shared", "/shared", "virtiofs", 0, NULL) == 0) {
+            LOG("shared virtio-fs mounted");
+            shared_mounted = 1;
+        }
+
+        if (context_mounted && shared_mounted) {
             break;
         }
-        usleep(100000); // 100ms
+
+        usleep(100000 * (retry + 1)); // Exponential backoff: 100ms, 200ms, 300ms...
     }
 
-    // Mount virtio-fs mounts (tags configured by host)
-    if (mount("context", "/context", "virtiofs", 0, NULL)) {
-        LOG("Warning: context virtio-fs not mounted: %s", strerror(errno));
+    if (!context_mounted) {
+        LOG("Warning: context virtio-fs not mounted after retries");
     }
-    if (mount("shared", "/shared", "virtiofs", 0, NULL)) {
-        LOG("Warning: shared virtio-fs not mounted: %s", strerror(errno));
+    if (!shared_mounted) {
+        LOG("Warning: shared virtio-fs not mounted after retries");
     }
 
     // Mount base image rootfs (tag "base" configured by host, optional)
