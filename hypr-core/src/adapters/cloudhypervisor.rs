@@ -251,7 +251,7 @@ impl CloudHypervisorAdapter {
             args.push(format!(
                 "tap=tap{},mac={}",
                 config.id,
-                config.network.mac_address.as_ref().map(|m| m.as_str()).unwrap_or("auto")
+                config.network.mac_address.as_deref().unwrap_or("auto")
             ));
         }
 
