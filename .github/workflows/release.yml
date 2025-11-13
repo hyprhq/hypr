@@ -25,8 +25,8 @@ jobs:
             arch: amd64
             platform: linux
 
-          # Linux aarch64
-          - os: ubuntu-latest
+          # Linux aarch64 (native arm64 runner!)
+          - os: ubuntu-24.04-arm64
             target: aarch64-unknown-linux-gnu
             arch: arm64
             platform: linux
@@ -59,7 +59,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config protobuf-compiler libelf-dev zlib1g-dev gcc-aarch64-linux-gnu
+          sudo apt-get install -y pkg-config protobuf-compiler libelf-dev zlib1g-dev
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -82,8 +82,6 @@ jobs:
       - name: Build Rust workspace
         run: |
           cargo build --release --target ${{ matrix.target }}
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
       - name: Prepare binaries
         run: |
@@ -113,43 +111,33 @@ jobs:
   # Build kestrel (C) for Linux only
   build-kestrel:
     name: Build kestrel (${{ matrix.arch }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
           # Linux x86_64
-          - arch: amd64
-            cc: gcc
-            strip: strip
-            target_arch: x86_64
+          - os: ubuntu-latest
+            arch: amd64
 
-          # Linux aarch64
-          - arch: arm64
-            cc: aarch64-linux-gnu-gcc
-            strip: aarch64-linux-gnu-strip
-            target_arch: aarch64
+          # Linux aarch64 (native arm64 runner!)
+          - os: ubuntu-24.04-arm64
+            arch: arm64
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install cross-compilation tools (aarch64)
-        if: matrix.arch == 'arm64'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
-
       - name: Build kestrel
         run: |
           cd guest
 
-          # Compile kestrel.c statically
-          ${{ matrix.cc }} -static -O2 -Wall -Wextra \
+          # Compile kestrel.c statically (native compilation)
+          gcc -static -O2 -Wall -Wextra \
             -o kestrel-linux-${{ matrix.arch }} \
             kestrel.c
 
-          # Strip debug symbols (use architecture-specific strip)
-          ${{ matrix.strip }} kestrel-linux-${{ matrix.arch }}
+          # Strip debug symbols
+          strip kestrel-linux-${{ matrix.arch }}
 
           # Verify it's a static binary
           file kestrel-linux-${{ matrix.arch }}
