@@ -1143,6 +1143,10 @@ impl LinuxVmBuilder {
         let output_layer = output_dir.join(format!("{}.tar", layer_id));
         let context_dir = self.work_dir.join("context");
 
+        // Create context directory for virtio-fs mount
+        std::fs::create_dir_all(&context_dir)
+            .map_err(|e| BuildError::IoError { path: context_dir.clone(), source: e })?;
+
         let step = BuildStep::Run { command: command.to_string(), workdir: self.workdir.clone() };
 
         // Verify base rootfs exists before building
@@ -1495,6 +1499,10 @@ impl MacOsVmBuilder {
 
         let output_layer = output_dir.join(format!("{}.tar", layer_id));
         let context_dir = self.work_dir.join("context");
+
+        // Create context directory for virtio-fs mount
+        std::fs::create_dir_all(&context_dir)
+            .map_err(|e| BuildError::IoError { path: context_dir.clone(), source: e })?;
 
         let step = BuildStep::Run { command: command.to_string(), workdir: self.workdir.clone() };
 
