@@ -66,6 +66,7 @@ impl CloudHypervisorAdapter {
         let candidates = vec![
             PathBuf::from(format!("/usr/local/bin/{}", name)),
             PathBuf::from(format!("/usr/bin/{}", name)),
+            PathBuf::from(format!("/usr/libexec/{}", name)),
             PathBuf::from(format!("./{}", name)),
         ];
 
