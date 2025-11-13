@@ -28,7 +28,7 @@ jobs:
             brew install protobuf
           elif [ "$RUNNER_OS" == "Linux" ]; then
             sudo apt-get update
-            sudo apt-get install -y protobuf-compiler
+            sudo apt-get install -y protobuf-compiler libelf-dev zlib1g-dev
           fi
 
       - name: Install Rust
