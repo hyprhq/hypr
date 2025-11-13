@@ -59,7 +59,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config protobuf-compiler libelf-dev zlib1g-dev
+          sudo apt-get install -y pkg-config protobuf-compiler libelf-dev zlib1g-dev clang libbpf-dev
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
