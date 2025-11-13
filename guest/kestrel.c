@@ -108,14 +108,15 @@ static kestrel_mode_t detect_mode(void) {
 // ============================================================================
 
 static void mount_essentials_build(void) {
-    // Minimal mounts for build mode
-    // (proc, sys, dev usually already mounted by kernel/initramfs)
+    // Build mode: Mount build-specific filesystems
+    // Essential filesystems (/proc, /sys, /dev, /run) already mounted in main()
 
     // Create directories
     mkdir("/tmp", 0777);
     mkdir("/workspace", 0755);
     mkdir("/shared", 0755);
     mkdir("/base", 0755);
+    mkdir("/context", 0755);
     mkdir("/newroot", 0755);
 
     // Mount tmpfs for temporary files
@@ -128,9 +129,12 @@ static void mount_essentials_build(void) {
         LOG("Warning: mount /workspace failed: %s", strerror(errno));
     }
 
-    // Mount virtio-fs (tag "shared" configured by host)
+    // Mount virtio-fs mounts (tags configured by host)
+    if (mount("context", "/context", "virtiofs", 0, NULL)) {
+        LOG("Warning: context virtio-fs not mounted: %s", strerror(errno));
+    }
     if (mount("shared", "/shared", "virtiofs", 0, NULL)) {
-        FATAL("Failed to mount virtio-fs shared: %s", strerror(errno));
+        LOG("Warning: shared virtio-fs not mounted: %s", strerror(errno));
     }
 
     // Mount base image rootfs (tag "base" configured by host, optional)
@@ -601,9 +605,30 @@ static void run_runtime_mode(void) {
 // ============================================================================
 
 int main(int argc, char *argv[]) {
-    LOG("Starting kestrel v2.0");
+    LOG("Starting kestrel v2.0 (PID %d)", getpid());
 
-    // Detect mode from kernel cmdline
+    // PID1 tasks mount essential filesystems
+    mkdir("/proc", 0755);
+    mkdir("/sys", 0755);
+    mkdir("/dev", 0755);
+    mkdir("/run", 0755);
+
+    if (mount("proc", "/proc", "proc", 0, NULL) && errno != EBUSY) {
+        FATAL("Failed to mount /proc: %s", strerror(errno));
+    }
+    if (mount("sysfs", "/sys", "sysfs", 0, NULL) && errno != EBUSY) {
+        FATAL("Failed to mount /sys: %s", strerror(errno));
+    }
+    if (mount("devtmpfs", "/dev", "devtmpfs", 0, NULL) && errno != EBUSY) {
+        FATAL("Failed to mount /dev: %s", strerror(errno));
+    }
+    if (mount("tmpfs", "/run", "tmpfs", 0, NULL) && errno != EBUSY) {
+        LOG("Warning: mount /run failed: %s", strerror(errno));
+    }
+
+    LOG("Essential filesystems mounted");
+
+    // Now detect mode from kernel cmdline (requires /proc)
     kestrel_mode_t mode = detect_mode();
 
     switch (mode) {

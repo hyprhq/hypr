@@ -221,27 +221,37 @@ impl VmBuilder {
     /// Wait for builder-agent to become ready.
     #[instrument(skip(self, handle))]
     async fn wait_for_builder_ready(&self, handle: &VmHandle) -> Result<()> {
-        debug!("Waiting for builder-agent to be ready");
+        info!("Waiting for builder-agent to be ready");
 
-        let timeout = Duration::from_secs(10);
+        let timeout = Duration::from_secs(30);
         let start = Instant::now();
+        let mut last_error: Option<String> = None;
 
         loop {
             if start.elapsed() > timeout {
-                return Err(HyprError::BuildFailed {
-                    reason: "Builder agent did not become ready in time".into(),
-                });
+                let err_msg = if let Some(last_err) = last_error {
+                    format!("Builder agent did not become ready in time. Last error: {}", last_err)
+                } else {
+                    "Builder agent did not become ready in time (no connection attempts succeeded)".to_string()
+                };
+                error!("{}", err_msg);
+                return Err(HyprError::BuildFailed { reason: err_msg });
             }
 
             // Try to connect to vsock
             match self.ping_builder_agent(handle).await {
                 Ok(()) => {
-                    info!("Builder agent ready");
+                    info!("Builder agent ready after {:.1}s", start.elapsed().as_secs_f64());
                     return Ok(());
                 }
-                Err(_) => {
-                    // Not ready yet, wait and retry
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                Err(e) => {
+                    // Not ready yet, log and retry
+                    last_error = Some(e.to_string());
+                    if start.elapsed().as_secs() % 5 == 0 {
+                        debug!("Still waiting for agent... ({:.0}s elapsed, last error: {})",
+                               start.elapsed().as_secs_f64(), e);
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
                 }
             }
         }

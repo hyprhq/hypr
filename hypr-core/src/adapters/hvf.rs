@@ -126,6 +126,10 @@ impl HvfAdapter {
         args.push("--device".to_string());
         args.push(format!("virtio-vsock,port=41011,socketURL=unix://{}", config.vsock_path.display()));
 
+        // Serial console for debugging (logs to stdout)
+        args.push("--device".to_string());
+        args.push("virtio-serial,logFilePath=stdio".to_string());
+
         debug!("Built vfkit args: {:?}", args);
         Ok(args)
     }
@@ -166,10 +170,12 @@ impl VmmAdapter for HvfAdapter {
         // Build arguments
         let args = self.build_args(config)?;
 
-        // Spawn vfkit process
+        // Spawn vfkit process (inherit stdout/stderr to see VM console output)
         let start = Instant::now();
         let child = Command::new(&self.binary_path)
             .args(&args)
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
             .spawn()
             .map_err(|e| {
                 metrics::counter!("hypr_vm_start_failures_total", "adapter" => "hvf", "reason" => "spawn_failed").increment(1);
