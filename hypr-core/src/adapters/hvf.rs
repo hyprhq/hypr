@@ -89,9 +89,10 @@ impl HvfAdapter {
         args.push("--kernel".to_string());
         args.push(kernel.to_string_lossy().to_string());
 
-        // Initrd (required by vfkit, even if empty)
+        // Initrd (use config if provided, otherwise use empty placeholder)
         args.push("--initrd".to_string());
-        args.push(self.initrd_path.to_string_lossy().to_string());
+        let initrd = config.initramfs_path.as_ref().unwrap_or(&self.initrd_path);
+        args.push(initrd.to_string_lossy().to_string());
 
         // Kernel command line
         if !config.kernel_args.is_empty() {
