@@ -30,7 +30,7 @@ impl BridgeManager for LinuxBridgeManager {
 
         // Create bridge using ip command
         let output = Command::new("ip")
-            .args(&["link", "add", "name", &config.name, "type", "bridge"])
+            .args(["link", "add", "name", &config.name, "type", "bridge"])
             .output()
             .await
             .map_err(|e| HyprError::NetworkSetupFailed {
@@ -46,7 +46,7 @@ impl BridgeManager for LinuxBridgeManager {
         // Set bridge IP
         let ip_with_prefix = format!("{}/10", config.ip);
         let output = Command::new("ip")
-            .args(&["addr", "add", &ip_with_prefix, "dev", &config.name])
+            .args(["addr", "add", &ip_with_prefix, "dev", &config.name])
             .output()
             .await
             .map_err(|e| HyprError::NetworkSetupFailed {
@@ -61,7 +61,7 @@ impl BridgeManager for LinuxBridgeManager {
 
         // Set MTU
         let output = Command::new("ip")
-            .args(&["link", "set", "dev", &config.name, "mtu", &config.mtu.to_string()])
+            .args(["link", "set", "dev", &config.name, "mtu", &config.mtu.to_string()])
             .output()
             .await
             .map_err(|e| HyprError::NetworkSetupFailed {
@@ -76,7 +76,7 @@ impl BridgeManager for LinuxBridgeManager {
 
         // Bring bridge up
         let output =
-            Command::new("ip").args(&["link", "set", &config.name, "up"]).output().await.map_err(
+            Command::new("ip").args(["link", "set", &config.name, "up"]).output().await.map_err(
                 |e| HyprError::NetworkSetupFailed {
                     reason: format!("Failed to bring bridge up: {}", e),
                 },
@@ -105,7 +105,7 @@ impl BridgeManager for LinuxBridgeManager {
         }
 
         let output =
-            Command::new("ip").args(&["link", "delete", name]).output().await.map_err(|e| {
+            Command::new("ip").args(["link", "delete", name]).output().await.map_err(|e| {
                 HyprError::NetworkSetupFailed { reason: format!("Failed to delete bridge: {}", e) }
             })?;
 
@@ -124,7 +124,7 @@ impl BridgeManager for LinuxBridgeManager {
     #[instrument(skip(self), fields(bridge = %name))]
     async fn bridge_exists(&self, name: &str) -> Result<bool> {
         let output =
-            Command::new("ip").args(&["link", "show", name]).output().await.map_err(|e| {
+            Command::new("ip").args(["link", "show", name]).output().await.map_err(|e| {
                 HyprError::NetworkSetupFailed {
                     reason: format!("Failed to check bridge existence: {}", e),
                 }
@@ -139,7 +139,7 @@ impl BridgeManager for LinuxBridgeManager {
 
         // Check current setting
         let output =
-            Command::new("sysctl").args(&["net.ipv4.ip_forward"]).output().await.map_err(|e| {
+            Command::new("sysctl").args(["net.ipv4.ip_forward"]).output().await.map_err(|e| {
                 HyprError::NetworkSetupFailed {
                     reason: format!("Failed to check IP forwarding: {}", e),
                 }
@@ -153,7 +153,7 @@ impl BridgeManager for LinuxBridgeManager {
 
         // Enable IP forwarding
         let output =
-            Command::new("sysctl").args(&["-w", "net.ipv4.ip_forward=1"]).output().await.map_err(
+            Command::new("sysctl").args(["-w", "net.ipv4.ip_forward=1"]).output().await.map_err(
                 |e| HyprError::NetworkSetupFailed {
                     reason: format!("Failed to enable IP forwarding: {}", e),
                 },
@@ -181,7 +181,7 @@ impl BridgeManager for LinuxBridgeManager {
 
         // Check if MASQUERADE rule exists
         let output = Command::new("iptables")
-            .args(&[
+            .args([
                 "-t",
                 "nat",
                 "-C",
@@ -203,7 +203,7 @@ impl BridgeManager for LinuxBridgeManager {
         if !output.status.success() {
             // Add the MASQUERADE rule
             let output = Command::new("iptables")
-                .args(&[
+                .args([
                     "-t",
                     "nat",
                     "-A",
@@ -234,7 +234,7 @@ impl BridgeManager for LinuxBridgeManager {
 
         // Allow forwarding from bridge
         let output = Command::new("iptables")
-            .args(&["-C", "FORWARD", "-i", bridge_name, "-j", "ACCEPT"])
+            .args(["-C", "FORWARD", "-i", bridge_name, "-j", "ACCEPT"])
             .output()
             .await
             .map_err(|e| HyprError::NetworkSetupFailed {
@@ -243,7 +243,7 @@ impl BridgeManager for LinuxBridgeManager {
 
         if !output.status.success() {
             Command::new("iptables")
-                .args(&["-A", "FORWARD", "-i", bridge_name, "-j", "ACCEPT"])
+                .args(["-A", "FORWARD", "-i", bridge_name, "-j", "ACCEPT"])
                 .output()
                 .await
                 .map_err(|e| HyprError::NetworkSetupFailed {
@@ -255,7 +255,7 @@ impl BridgeManager for LinuxBridgeManager {
 
         // Allow forwarding to bridge
         let output = Command::new("iptables")
-            .args(&["-C", "FORWARD", "-o", bridge_name, "-j", "ACCEPT"])
+            .args(["-C", "FORWARD", "-o", bridge_name, "-j", "ACCEPT"])
             .output()
             .await
             .map_err(|e| HyprError::NetworkSetupFailed {
@@ -264,7 +264,7 @@ impl BridgeManager for LinuxBridgeManager {
 
         if !output.status.success() {
             Command::new("iptables")
-                .args(&["-A", "FORWARD", "-o", bridge_name, "-j", "ACCEPT"])
+                .args(["-A", "FORWARD", "-o", bridge_name, "-j", "ACCEPT"])
                 .output()
                 .await
                 .map_err(|e| HyprError::NetworkSetupFailed {
@@ -289,7 +289,7 @@ impl LinuxBridgeManager {
     #[instrument(skip(self))]
     async fn detect_default_interface(&self) -> Result<String> {
         let output =
-            Command::new("ip").args(&["route", "show", "default"]).output().await.map_err(|e| {
+            Command::new("ip").args(["route", "show", "default"]).output().await.map_err(|e| {
                 HyprError::NetworkSetupFailed {
                     reason: format!("Failed to detect default interface: {}", e),
                 }
