@@ -275,11 +275,14 @@ impl VmBuilder {
             });
         }
 
-        let mut stream = UnixStream::connect(&vsock_path).await.map_err(|e| {
-            HyprError::BuildFailed {
-                reason: format!("Failed to connect to builder agent at {}: {}", vsock_path.display(), e),
-            }
-        })?;
+        let mut stream =
+            UnixStream::connect(&vsock_path).await.map_err(|e| HyprError::BuildFailed {
+                reason: format!(
+                    "Failed to connect to builder agent at {}: {}",
+                    vsock_path.display(),
+                    e
+                ),
+            })?;
 
         // Send Ping command
         let ping_cmd = r#"{"Ping":{}}"#;

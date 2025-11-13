@@ -211,7 +211,7 @@ impl VmmAdapter for HvfAdapter {
         Ok(VmHandle {
             id: config.id.clone(),
             pid: Some(pid),
-            socket_path: None, // vfkit doesn't use control socket
+            socket_path: Some(config.vsock_path.clone()),
         })
     }
 
@@ -302,7 +302,12 @@ impl VmmAdapter for HvfAdapter {
     }
 
     fn vsock_path(&self, handle: &VmHandle) -> PathBuf {
-        PathBuf::from(format!("/tmp/hypr-vm-{}.vsock", handle.id))
+        // Vsock path is stored in the VmHandle during creation from the config
+        // For vfkit, this is the socket path we passed via virtio-vsock,socketURL
+        handle.socket_path.clone().unwrap_or_else(|| {
+            // Fallback if not set (shouldn't happen)
+            PathBuf::from(format!("/tmp/hypr-{}.sock", handle.id))
+        })
     }
 
     fn capabilities(&self) -> AdapterCapabilities {
