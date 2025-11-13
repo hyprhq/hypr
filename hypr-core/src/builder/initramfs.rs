@@ -74,9 +74,9 @@ fn copy_kestrel_binary(root: &Path) -> BuildResult<()> {
     // kestrel runs inside Linux VMs regardless of host OS
     let host_arch = std::env::consts::ARCH;
     let linux_arch = match host_arch {
-        "x86_64" => "x86_64",
-        "aarch64" => "aarch64",
-        "arm64" => "aarch64", // macOS reports arm64 instead of aarch64
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        "arm64" => "arm64", // macOS reports arm64 instead of aarch64
         other => {
             return Err(BuildError::ContextError(format!(
                 "Unsupported host architecture: {}. Only x86_64 and aarch64/arm64 are supported.",
