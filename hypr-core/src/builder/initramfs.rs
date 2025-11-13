@@ -160,21 +160,36 @@ fn copy_kestrel_binary(root: &Path) -> BuildResult<()> {
 
 /// Download kestrel from GitHub releases.
 fn download_kestrel(arch: &str, dest: &Path) -> BuildResult<()> {
-    let url = format!("https://github.com/hyprhq/hypr/releases/download/latest/kestrel-linux-{}", arch);
+    // GitHub's "latest" redirect automatically points to the most recent release
+    let url = format!(
+        "https://github.com/hyprhq/hypr/releases/latest/download/kestrel-linux-{}",
+        arch
+    );
 
     debug!("Downloading kestrel from: {}", url);
 
-    // Use curl or wget (portable across Unix systems)
+    // Use curl with -L to follow redirects (GitHub uses 302 redirect for "latest")
     let status = std::process::Command::new("sh")
         .arg("-c")
-        .arg(format!("curl -fsSL {} -o {} || wget -q -O {} {}", url, dest.display(), dest.display(), url))
+        .arg(format!(
+            "curl -fsSL {} -o {} || wget -q -O {} {}",
+            url,
+            dest.display(),
+            dest.display(),
+            url
+        ))
         .status()
         .map_err(|e| BuildError::ContextError(format!("Failed to download kestrel: {}", e)))?;
 
     if !status.success() {
         return Err(BuildError::ContextError(format!(
             "Failed to download kestrel from {}.\n\
-             Please check internet connection or manually place kestrel binary at ~/.hypr/bin/kestrel-linux-{}",
+             \n\
+             This requires a HYPR release to exist. If you're developing locally:\n\
+             1. Build kestrel manually: cd guest && gcc -static -o kestrel kestrel.c\n\
+             2. Place at: ~/.hypr/bin/kestrel-linux-{}\n\
+             \n\
+             Or trigger a release via GitHub Actions to publish binaries.",
             url, arch
         )));
     }
