@@ -55,11 +55,26 @@ jobs:
           target: ${{ matrix.target }}
           override: true
 
+      - name: Install system dependencies (Linux x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+
       - name: Install cross-compilation tools (Linux aarch64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+          # Enable cross-architecture packages
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev:arm64
+
+          # Configure pkg-config for cross-compilation
+          echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> $GITHUB_ENV
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -120,11 +135,13 @@ jobs:
           # Linux x86_64
           - arch: amd64
             cc: gcc
+            strip: strip
             target_arch: x86_64
 
           # Linux aarch64
           - arch: arm64
             cc: aarch64-linux-gnu-gcc
+            strip: aarch64-linux-gnu-strip
             target_arch: aarch64
 
     steps:
@@ -135,7 +152,7 @@ jobs:
         if: matrix.arch == 'arm64'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
 
       - name: Build kestrel
         run: |
@@ -146,8 +163,8 @@ jobs:
             -o kestrel-linux-${{ matrix.arch }} \
             kestrel.c
 
-          # Strip debug symbols
-          strip kestrel-linux-${{ matrix.arch }}
+          # Strip debug symbols (use architecture-specific strip)
+          ${{ matrix.strip }} kestrel-linux-${{ matrix.arch }}
 
           # Verify it's a static binary
           file kestrel-linux-${{ matrix.arch }}
