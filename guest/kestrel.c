@@ -40,10 +40,58 @@
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <sys/ioctl.h>
-#include <linux/vm_sockets.h>  // AF_VSOCK
-#include <linux/if.h>          // struct ifreq
 #include <netinet/in.h>
 #include <arpa/inet.h>
+
+// ===== MAKEDEV (self-contained) =====
+#ifndef makedev
+#define makedev(major, minor) ((dev_t)(((major) << 8) | (minor)))
+#endif
+
+// ===== TAP + IF flags (self-contained) =====
+#ifndef IFF_UP
+#define IFF_UP 0x1
+#endif
+
+#ifndef IFF_RUNNING
+#define IFF_RUNNING 0x40
+#endif
+
+
+// ====== SELF-CONTAINED VSOCK DEFINITIONS (portable) ======
+#ifndef AF_VSOCK
+#define AF_VSOCK 40
+#endif
+
+#ifndef VMADDR_CID_ANY
+#define VMADDR_CID_ANY (~0U)
+#endif
+
+struct sockaddr_vm {
+    sa_family_t svm_family;   // AF_VSOCK
+    unsigned short svm_reserved1;
+    unsigned int svm_port;    // Guest/host port
+    unsigned int svm_cid;     // Context ID
+};
+
+// ====== SELF-CONTAINED IFF/TAP DEFINITIONS ======
+#ifndef IFNAMSIZ
+#define IFNAMSIZ 16
+#endif
+
+struct ifreq {
+    char ifr_name[IFNAMSIZ];
+    union {
+        struct sockaddr ifr_addr;
+        int ifr_ifindex;
+        int ifr_mtu;
+        unsigned short ifr_flags;
+        char ifr_slave[IFNAMSIZ];
+        char ifr_newname[IFNAMSIZ];
+        void *ifr_data;
+    };
+};
+
 
 // Port definitions (aligned with hypr-core/src/ports.rs)
 #define VSOCK_PORT_BUILD_AGENT 41011  // Build commands
@@ -662,6 +710,22 @@ static void run_runtime_mode(void) {
 // ============================================================================
 
 int main(int argc, char *argv[]) {
+    // CRITICAL: Redirect stdout/stderr to console FIRST (before any LOG())
+    // In initramfs, default stdout/stderr go nowhere
+    int console_fd = open("/dev/console", O_WRONLY);
+    if (console_fd < 0) {
+        // /dev/console might not exist yet, try creating /dev manually
+        mkdir("/dev", 0755);
+        mknod("/dev/console", S_IFCHR | 0600, makedev(5, 1));
+        console_fd = open("/dev/console", O_WRONLY);
+    }
+
+    if (console_fd >= 0) {
+        dup2(console_fd, STDOUT_FILENO);
+        dup2(console_fd, STDERR_FILENO);
+        if (console_fd > 2) close(console_fd);
+    }
+
     LOG("Starting kestrel v2.0 (PID %d)", getpid());
 
     // PID1 tasks mount essential filesystems
