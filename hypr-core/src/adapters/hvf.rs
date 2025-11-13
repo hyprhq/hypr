@@ -5,8 +5,8 @@
 
 use crate::adapters::{AdapterCapabilities, VmmAdapter};
 use crate::error::{HyprError, Result};
-use crate::types::vm::{DiskConfig, GpuConfig, VmConfig, VmHandle};
 use crate::types::network::NetworkConfig;
+use crate::types::vm::{DiskConfig, GpuConfig, VmConfig, VmHandle};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -34,11 +34,7 @@ impl HvfAdapter {
         // Create empty initrd if it doesn't exist
         Self::ensure_empty_initrd(&initrd_path)?;
 
-        Ok(Self {
-            binary_path,
-            kernel_path,
-            initrd_path,
-        })
+        Ok(Self { binary_path, kernel_path, initrd_path })
     }
 
     /// Find vfkit binary in PATH.
@@ -55,27 +51,21 @@ impl HvfAdapter {
             }
         }
 
-        Err(HyprError::HypervisorNotFound {
-            hypervisor: "vfkit".to_string(),
-        })
+        Err(HyprError::HypervisorNotFound { hypervisor: "vfkit".to_string() })
     }
 
     /// Ensure empty initrd file exists. vfkit requires an initrd even if empty.
     fn ensure_empty_initrd(path: &PathBuf) -> Result<()> {
         // Create parent directory if it doesn't exist
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| HyprError::IoError {
-                path: parent.to_path_buf(),
-                source: e,
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| HyprError::IoError { path: parent.to_path_buf(), source: e })?;
         }
 
         // Create empty file if it doesn't exist
         if !path.exists() {
-            std::fs::write(path, []).map_err(|e| HyprError::IoError {
-                path: path.clone(),
-                source: e,
-            })?;
+            std::fs::write(path, [])
+                .map_err(|e| HyprError::IoError { path: path.clone(), source: e })?;
         }
 
         Ok(())
@@ -127,20 +117,13 @@ impl HvfAdapter {
 
         // Network (NAT mode)
         args.push("--device".to_string());
-        let mac = config
-            .network
-            .mac_address
-            .as_ref()
-            .map(|m| format!(",mac={}", m))
-            .unwrap_or_default();
+        let mac =
+            config.network.mac_address.as_ref().map(|m| format!(",mac={}", m)).unwrap_or_default();
         args.push(format!("virtio-net,nat{}", mac));
 
         // Vsock
         args.push("--device".to_string());
-        args.push(format!(
-            "virtio-vsock,socketURL=unix://{}",
-            config.vsock_path.display()
-        ));
+        args.push(format!("virtio-vsock,socketURL=unix://{}", config.vsock_path.display()));
 
         debug!("Built vfkit args: {:?}", args);
         Ok(args)
@@ -207,11 +190,7 @@ impl VmmAdapter for HvfAdapter {
         let counter = metrics::counter!("hypr_vm_created_total", "adapter" => "hvf");
         counter.increment(1);
 
-        info!(
-            pid = pid,
-            duration_ms = start.elapsed().as_millis(),
-            "VM created successfully"
-        );
+        info!(pid = pid, duration_ms = start.elapsed().as_millis(), "VM created successfully");
 
         Ok(VmHandle {
             id: config.id.clone(),
@@ -248,11 +227,7 @@ impl VmmAdapter for HvfAdapter {
 
         if let Some(pid) = handle.pid {
             // Send SIGKILL
-            let result = Command::new("kill")
-                .arg("-9")
-                .arg(pid.to_string())
-                .output()
-                .await;
+            let result = Command::new("kill").arg("-9").arg(pid.to_string()).output().await;
 
             match result {
                 Ok(output) if output.status.success() => {

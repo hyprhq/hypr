@@ -41,7 +41,7 @@ fn main() {
     //   -s: Strip symbols (reduce binary size)
     //   -o: Output file
     let status = Command::new("cc")
-        .args(&[
+        .args([
             "-static",
             "-Os",
             "-s",
@@ -57,10 +57,7 @@ fn main() {
 
             // Check binary size
             if let Ok(metadata) = std::fs::metadata(&kestrel_bin) {
-                println!(
-                    "cargo:warning=kestrel binary size: {} KB",
-                    metadata.len() / 1024
-                );
+                println!("cargo:warning=kestrel binary size: {} KB", metadata.len() / 1024);
             }
 
             // Make executable

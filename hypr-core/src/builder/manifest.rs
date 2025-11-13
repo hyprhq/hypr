@@ -75,9 +75,7 @@ impl ManifestGenerator {
         target_stage: Option<usize>,
     ) -> ManifestResult<ImageManifest> {
         // Get execution order
-        let order = graph
-            .topological_sort()
-            .map_err(|e| ManifestError::Graph(e.to_string()))?;
+        let order = graph.topological_sort().map_err(|e| ManifestError::Graph(e.to_string()))?;
 
         // Process nodes in order, filtering by target stage if specified
         for node_id in order {
@@ -124,11 +122,7 @@ impl ManifestGenerator {
     fn run_command_to_vec(command: &crate::builder::parser::RunCommand) -> Vec<String> {
         use crate::builder::parser::RunCommand;
         match command {
-            RunCommand::Shell(cmd) => vec![
-                "/bin/sh".to_string(),
-                "-c".to_string(),
-                cmd.clone(),
-            ],
+            RunCommand::Shell(cmd) => vec!["/bin/sh".to_string(), "-c".to_string(), cmd.clone()],
             RunCommand::Exec(args) => args.clone(),
         }
     }
@@ -240,9 +234,8 @@ CMD ["nginx"]
         let graph = BuildGraph::from_dockerfile(&parsed).unwrap();
 
         let mut generator = ManifestGenerator::new();
-        let manifest = generator
-            .generate(&graph, "myapp".to_string(), "latest".to_string(), None)
-            .unwrap();
+        let manifest =
+            generator.generate(&graph, "myapp".to_string(), "latest".to_string(), None).unwrap();
 
         assert_eq!(manifest.name, "myapp");
         assert_eq!(manifest.tag, "latest");
@@ -275,9 +268,8 @@ CMD ["server.js"]
         let graph = BuildGraph::from_dockerfile(&parsed).unwrap();
 
         let mut generator = ManifestGenerator::new();
-        let manifest = generator
-            .generate(&graph, "nodeapp".to_string(), "v1".to_string(), None)
-            .unwrap();
+        let manifest =
+            generator.generate(&graph, "nodeapp".to_string(), "v1".to_string(), None).unwrap();
 
         // Check environment
         assert_eq!(manifest.config.env.len(), 2);
@@ -300,14 +292,8 @@ CMD ["server.js"]
 
         // Check labels
         assert_eq!(manifest.config.labels.len(), 2);
-        assert_eq!(
-            manifest.config.labels.get("version"),
-            Some(&"1.0".to_string())
-        );
-        assert_eq!(
-            manifest.config.labels.get("maintainer"),
-            Some(&"test@example.com".to_string())
-        );
+        assert_eq!(manifest.config.labels.get("version"), Some(&"1.0".to_string()));
+        assert_eq!(manifest.config.labels.get("maintainer"), Some(&"test@example.com".to_string()));
 
         // Check entrypoint and cmd
         assert_eq!(manifest.config.entrypoint, Some(vec!["node".to_string()]));
@@ -333,18 +319,14 @@ ENTRYPOINT ["new-entry"]
         let graph = BuildGraph::from_dockerfile(&parsed).unwrap();
 
         let mut generator = ManifestGenerator::new();
-        let manifest = generator
-            .generate(&graph, "test".to_string(), "latest".to_string(), None)
-            .unwrap();
+        let manifest =
+            generator.generate(&graph, "test".to_string(), "latest".to_string(), None).unwrap();
 
         // Last instruction should win
         assert_eq!(manifest.config.workdir, Some("/final".to_string()));
         assert_eq!(manifest.config.user, Some("nobody".to_string()));
         assert_eq!(manifest.config.cmd, Some(vec!["new".to_string()]));
-        assert_eq!(
-            manifest.config.entrypoint,
-            Some(vec!["new-entry".to_string()])
-        );
+        assert_eq!(manifest.config.entrypoint, Some(vec!["new-entry".to_string()]));
     }
 
     #[test]
@@ -366,9 +348,8 @@ LABEL key2=val2
         let graph = BuildGraph::from_dockerfile(&parsed).unwrap();
 
         let mut generator = ManifestGenerator::new();
-        let manifest = generator
-            .generate(&graph, "test".to_string(), "latest".to_string(), None)
-            .unwrap();
+        let manifest =
+            generator.generate(&graph, "test".to_string(), "latest".to_string(), None).unwrap();
 
         // ENV, EXPOSE, VOLUME, LABEL should accumulate
         assert_eq!(manifest.config.env.len(), 3);
@@ -389,15 +370,11 @@ ENV FOO=overridden
         let graph = BuildGraph::from_dockerfile(&parsed).unwrap();
 
         let mut generator = ManifestGenerator::new();
-        let manifest = generator
-            .generate(&graph, "test".to_string(), "latest".to_string(), None)
-            .unwrap();
+        let manifest =
+            generator.generate(&graph, "test".to_string(), "latest".to_string(), None).unwrap();
 
         // Later ENV should override earlier one
-        assert_eq!(
-            manifest.config.env.get("FOO"),
-            Some(&"overridden".to_string())
-        );
+        assert_eq!(manifest.config.env.get("FOO"), Some(&"overridden".to_string()));
     }
 
     #[test]
@@ -421,24 +398,17 @@ CMD ["./myapp"]
         let mut generator = ManifestGenerator::new();
 
         // Generate manifest for final stage only (stage 1)
-        let manifest = generator
-            .generate(&graph, "myapp".to_string(), "latest".to_string(), Some(1))
-            .unwrap();
+        let manifest =
+            generator.generate(&graph, "myapp".to_string(), "latest".to_string(), Some(1)).unwrap();
 
         // Should only have metadata from stage 1 (alpine)
         assert_eq!(manifest.config.env.len(), 1);
-        assert_eq!(
-            manifest.config.env.get("APP_ENV"),
-            Some(&"production".to_string())
-        );
+        assert_eq!(manifest.config.env.get("APP_ENV"), Some(&"production".to_string()));
         assert!(!manifest.config.env.contains_key("GOOS")); // From builder stage
 
         assert_eq!(manifest.config.workdir, Some("/app".to_string()));
         assert_eq!(manifest.config.exposed_ports.len(), 1);
-        assert_eq!(
-            manifest.config.cmd,
-            Some(vec!["./myapp".to_string()])
-        );
+        assert_eq!(manifest.config.cmd, Some(vec!["./myapp".to_string()]));
     }
 
     #[test]
@@ -456,9 +426,8 @@ VOLUME /data
         let graph = BuildGraph::from_dockerfile(&parsed).unwrap();
 
         let mut generator = ManifestGenerator::new();
-        let manifest = generator
-            .generate(&graph, "test".to_string(), "latest".to_string(), None)
-            .unwrap();
+        let manifest =
+            generator.generate(&graph, "test".to_string(), "latest".to_string(), None).unwrap();
 
         // Should deduplicate
         assert_eq!(manifest.config.exposed_ports.len(), 1);
@@ -479,17 +448,15 @@ EXPOSE 80/tcp
         let mut generator = ManifestGenerator::new();
 
         // Generate first manifest
-        let _manifest1 = generator
-            .generate(&graph, "app1".to_string(), "v1".to_string(), None)
-            .unwrap();
+        let _manifest1 =
+            generator.generate(&graph, "app1".to_string(), "v1".to_string(), None).unwrap();
 
         // Reset
         generator.reset();
 
         // Generate second manifest
-        let manifest2 = generator
-            .generate(&graph, "app2".to_string(), "v2".to_string(), None)
-            .unwrap();
+        let manifest2 =
+            generator.generate(&graph, "app2".to_string(), "v2".to_string(), None).unwrap();
 
         // Should have fresh metadata
         assert_eq!(manifest2.name, "app2");
@@ -507,9 +474,8 @@ FROM scratch
         let graph = BuildGraph::from_dockerfile(&parsed).unwrap();
 
         let mut generator = ManifestGenerator::new();
-        let manifest = generator
-            .generate(&graph, "empty".to_string(), "latest".to_string(), None)
-            .unwrap();
+        let manifest =
+            generator.generate(&graph, "empty".to_string(), "latest".to_string(), None).unwrap();
 
         // Should have empty config
         assert_eq!(manifest.config.env.len(), 0);
@@ -532,9 +498,8 @@ FROM alpine:3.19
         let graph = BuildGraph::from_dockerfile(&parsed).unwrap();
 
         let mut generator = ManifestGenerator::new();
-        let manifest = generator
-            .generate(&graph, "test".to_string(), "latest".to_string(), None)
-            .unwrap();
+        let manifest =
+            generator.generate(&graph, "test".to_string(), "latest".to_string(), None).unwrap();
 
         // Should match current platform
         assert!(!manifest.architecture.is_empty());

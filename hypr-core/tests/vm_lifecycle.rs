@@ -112,9 +112,7 @@ impl VmmAdapter for MockAdapter {
 #[tokio::test]
 async fn test_vm_lifecycle_create_start_stop_delete() {
     // Initialize state manager with in-memory database
-    let state = StateManager::new_in_memory()
-        .await
-        .expect("Failed to create state manager");
+    let state = StateManager::new_in_memory().await.expect("Failed to create state manager");
 
     let adapter = Arc::new(MockAdapter::new());
 
@@ -122,10 +120,7 @@ async fn test_vm_lifecycle_create_start_stop_delete() {
     let config = VmConfig {
         id: "test-vm-1".to_string(),
         name: "test-vm".to_string(),
-        resources: VmResources {
-            cpus: 2,
-            memory_mb: 512,
-        },
+        resources: VmResources { cpus: 2, memory_mb: 512 },
         kernel_path: Some(PathBuf::from("/tmp/vmlinux")),
         kernel_args: vec!["console=ttyS0".to_string()],
         disks: vec![],
@@ -175,25 +170,16 @@ async fn test_vm_lifecycle_create_start_stop_delete() {
     adapter.start(&handle).await.expect("Failed to start VM");
 
     // Update status to Running
-    state
-        .update_vm_status("test-vm-1", VmStatus::Running)
-        .await
-        .expect("Failed to update status");
+    state.update_vm_status("test-vm-1", VmStatus::Running).await.expect("Failed to update status");
 
     let running_vm = state.get_vm("test-vm-1").await.expect("Failed to get VM");
     assert_eq!(running_vm.status, VmStatus::Running);
 
     // Step 3: Stop VM
-    adapter
-        .stop(&handle, Duration::from_secs(5))
-        .await
-        .expect("Failed to stop VM");
+    adapter.stop(&handle, Duration::from_secs(5)).await.expect("Failed to stop VM");
 
     // Update status to Stopped
-    state
-        .update_vm_status("test-vm-1", VmStatus::Stopped)
-        .await
-        .expect("Failed to update status");
+    state.update_vm_status("test-vm-1", VmStatus::Stopped).await.expect("Failed to update status");
 
     let stopped_vm = state.get_vm("test-vm-1").await.expect("Failed to get VM");
     assert_eq!(stopped_vm.status, VmStatus::Stopped);
@@ -219,17 +205,12 @@ async fn test_state_persistence_across_sessions() {
 
     // Session 1: Create VM and persist
     {
-        let state = StateManager::new(db_path)
-            .await
-            .expect("Failed to create state manager");
+        let state = StateManager::new(db_path).await.expect("Failed to create state manager");
 
         let config = VmConfig {
             id: "persistent-vm".to_string(),
             name: "test-persistent".to_string(),
-            resources: VmResources {
-                cpus: 1,
-                memory_mb: 256,
-            },
+            resources: VmResources { cpus: 1, memory_mb: 256 },
             kernel_path: Some(PathBuf::from("/tmp/vmlinux")),
             kernel_args: vec![],
             disks: vec![],
@@ -270,15 +251,10 @@ async fn test_state_persistence_across_sessions() {
 
     // Session 2: Reopen database and verify VM still exists
     {
-        let state = StateManager::new(db_path)
-            .await
-            .expect("Failed to reopen state manager");
+        let state = StateManager::new(db_path).await.expect("Failed to reopen state manager");
 
         // VM should still exist
-        let vm = state
-            .get_vm("persistent-vm")
-            .await
-            .expect("VM should persist across sessions");
+        let vm = state.get_vm("persistent-vm").await.expect("VM should persist across sessions");
 
         assert_eq!(vm.id, "persistent-vm");
         assert_eq!(vm.name, "test-persistent");
@@ -301,9 +277,7 @@ async fn test_state_persistence_across_sessions() {
 
 #[tokio::test]
 async fn test_multiple_vms_concurrent_operations() {
-    let state = StateManager::new_in_memory()
-        .await
-        .expect("Failed to create state manager");
+    let state = StateManager::new_in_memory().await.expect("Failed to create state manager");
 
     let adapter = Arc::new(MockAdapter::new());
 
@@ -314,10 +288,7 @@ async fn test_multiple_vms_concurrent_operations() {
         let config = VmConfig {
             id: vm_id.to_string(),
             name: format!("test-{}", vm_id),
-            resources: VmResources {
-                cpus: 1,
-                memory_mb: 128,
-            },
+            resources: VmResources { cpus: 1, memory_mb: 128 },
             kernel_path: Some(PathBuf::from("/tmp/vmlinux")),
             kernel_args: vec![],
             disks: vec![],

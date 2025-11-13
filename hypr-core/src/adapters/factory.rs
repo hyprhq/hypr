@@ -208,37 +208,25 @@ impl AdapterFactory {
 
     /// Validate that an adapter meets required capabilities.
     #[instrument(skip(adapter, config))]
-    fn validate_capabilities(
-        adapter: &impl VmmAdapter,
-        config: &AdapterConfig,
-    ) -> Result<()> {
+    fn validate_capabilities(adapter: &impl VmmAdapter, config: &AdapterConfig) -> Result<()> {
         if let Some(ref required) = config.required_capabilities {
             let actual = adapter.capabilities();
 
             if required.gpu_passthrough && !actual.gpu_passthrough {
                 return Err(HyprError::InsufficientResources {
-                    reason: format!(
-                        "Adapter {} does not support GPU passthrough",
-                        adapter.name()
-                    ),
+                    reason: format!("Adapter {} does not support GPU passthrough", adapter.name()),
                 });
             }
 
             if required.virtio_fs && !actual.virtio_fs {
                 return Err(HyprError::InsufficientResources {
-                    reason: format!(
-                        "Adapter {} does not support virtio-fs",
-                        adapter.name()
-                    ),
+                    reason: format!("Adapter {} does not support virtio-fs", adapter.name()),
                 });
             }
 
             if required.hotplug_devices && !actual.hotplug_devices {
                 return Err(HyprError::InsufficientResources {
-                    reason: format!(
-                        "Adapter {} does not support device hotplug",
-                        adapter.name()
-                    ),
+                    reason: format!("Adapter {} does not support device hotplug", adapter.name()),
                 });
             }
 
@@ -270,11 +258,7 @@ mod tests {
                 {
                     // Could be HVF or Krun depending on features
                     let name = adapter.name();
-                    assert!(
-                        name == "hvf" || name == "krun",
-                        "Expected hvf or krun, got {}",
-                        name
-                    );
+                    assert!(name == "hvf" || name == "krun", "Expected hvf or krun, got {}", name);
                 }
             }
             Err(HyprError::HypervisorNotFound { .. }) => {
@@ -376,15 +360,10 @@ mod tests {
     #[test]
     fn test_capability_validation() {
         // Create a config that requires GPU passthrough
-        let required_caps = AdapterCapabilities {
-            gpu_passthrough: true,
-            ..Default::default()
-        };
+        let required_caps = AdapterCapabilities { gpu_passthrough: true, ..Default::default() };
 
-        let config = AdapterConfig {
-            adapter_override: None,
-            required_capabilities: Some(required_caps),
-        };
+        let config =
+            AdapterConfig { adapter_override: None, required_capabilities: Some(required_caps) };
 
         let result = AdapterFactory::create(Some(config));
 

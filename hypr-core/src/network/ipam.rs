@@ -65,7 +65,8 @@ impl IpAllocator {
 
                 info!("Allocated IP {} to VM {}", current, vm_id);
                 metrics::counter!("hypr_ip_allocated_total", "status" => "success").increment(1);
-                metrics::gauge!("hypr_ip_pool_available").set((self.pool_size() - allocated.len() - 1) as f64);
+                metrics::gauge!("hypr_ip_pool_available")
+                    .set((self.pool_size() - allocated.len() - 1) as f64);
 
                 return Ok(current);
             }

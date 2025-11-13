@@ -30,10 +30,7 @@ pub enum BuildError {
     Io(#[from] std::io::Error),
 
     #[error("Build instruction failed: {instruction}\n{details}")]
-    InstructionFailed {
-        instruction: String,
-        details: String,
-    },
+    InstructionFailed { instruction: String, details: String },
 
     #[error("Base image not found: {0}")]
     BaseImageNotFound(String),
@@ -60,20 +57,13 @@ pub enum BuildError {
     LayerExtractionFailed { path: PathBuf, reason: String },
 
     #[error("I/O error at {path}: {source}")]
-    IoError {
-        path: PathBuf,
-        source: std::io::Error,
-    },
+    IoError { path: PathBuf, source: std::io::Error },
 
     #[error("Mount failed: {target}\n{reason}")]
     MountFailed { target: PathBuf, reason: String },
 
     #[error("Command execution failed: {command}\nExit code: {exit_code}\n{stderr}")]
-    CommandFailed {
-        command: String,
-        exit_code: i32,
-        stderr: String,
-    },
+    CommandFailed { command: String, exit_code: i32, stderr: String },
 }
 
 /// Build context containing source files and configuration.
@@ -235,18 +225,12 @@ impl NativeBuilder {
         let merged_dir = overlay_dir.join("merged");
 
         // Create overlay directories
-        std::fs::create_dir_all(&upper_dir).map_err(|e| BuildError::IoError {
-            path: upper_dir.clone(),
-            source: e,
-        })?;
-        std::fs::create_dir_all(&work_dir).map_err(|e| BuildError::IoError {
-            path: work_dir.clone(),
-            source: e,
-        })?;
-        std::fs::create_dir_all(&merged_dir).map_err(|e| BuildError::IoError {
-            path: merged_dir.clone(),
-            source: e,
-        })?;
+        std::fs::create_dir_all(&upper_dir)
+            .map_err(|e| BuildError::IoError { path: upper_dir.clone(), source: e })?;
+        std::fs::create_dir_all(&work_dir)
+            .map_err(|e| BuildError::IoError { path: work_dir.clone(), source: e })?;
+        std::fs::create_dir_all(&merged_dir)
+            .map_err(|e| BuildError::IoError { path: merged_dir.clone(), source: e })?;
 
         // Mount overlayfs using Linux kernel mount() syscall
         let options = format!(
@@ -322,18 +306,12 @@ impl NativeBuilder {
         let sys_dir = rootfs.join("sys");
         let dev_dir = rootfs.join("dev");
 
-        std::fs::create_dir_all(&proc_dir).map_err(|e| BuildError::IoError {
-            path: proc_dir.clone(),
-            source: e,
-        })?;
-        std::fs::create_dir_all(&sys_dir).map_err(|e| BuildError::IoError {
-            path: sys_dir.clone(),
-            source: e,
-        })?;
-        std::fs::create_dir_all(&dev_dir).map_err(|e| BuildError::IoError {
-            path: dev_dir.clone(),
-            source: e,
-        })?;
+        std::fs::create_dir_all(&proc_dir)
+            .map_err(|e| BuildError::IoError { path: proc_dir.clone(), source: e })?;
+        std::fs::create_dir_all(&sys_dir)
+            .map_err(|e| BuildError::IoError { path: sys_dir.clone(), source: e })?;
+        std::fs::create_dir_all(&dev_dir)
+            .map_err(|e| BuildError::IoError { path: dev_dir.clone(), source: e })?;
 
         debug!("Bind mounting /proc /sys /dev into chroot");
 
@@ -385,10 +363,8 @@ impl NativeBuilder {
 
         // Create working directory if needed
         let workdir_in_rootfs = rootfs.join(workdir.trim_start_matches('/'));
-        std::fs::create_dir_all(&workdir_in_rootfs).map_err(|e| BuildError::IoError {
-            path: workdir_in_rootfs.clone(),
-            source: e,
-        })?;
+        std::fs::create_dir_all(&workdir_in_rootfs)
+            .map_err(|e| BuildError::IoError { path: workdir_in_rootfs.clone(), source: e })?;
 
         // Build chroot command
         let mut cmd = Command::new("chroot");
@@ -475,28 +451,21 @@ impl NativeBuilder {
     /// Recursively copies a directory tree, preserving structure and permissions.
     fn copy_dir_all(src: &PathBuf, dst: &PathBuf) -> BuildResult<()> {
         debug!("copy_dir_all: Creating dest directory: {}", dst.display());
-        std::fs::create_dir_all(dst).map_err(|e| BuildError::IoError {
-            path: dst.clone(),
-            source: e,
-        })?;
+        std::fs::create_dir_all(dst)
+            .map_err(|e| BuildError::IoError { path: dst.clone(), source: e })?;
 
         debug!("copy_dir_all: Reading source directory: {}", src.display());
-        for entry in std::fs::read_dir(src).map_err(|e| BuildError::IoError {
-            path: src.clone(),
-            source: e,
-        })? {
-            let entry = entry.map_err(|e| BuildError::IoError {
-                path: src.clone(),
-                source: e,
-            })?;
+        for entry in std::fs::read_dir(src)
+            .map_err(|e| BuildError::IoError { path: src.clone(), source: e })?
+        {
+            let entry = entry.map_err(|e| BuildError::IoError { path: src.clone(), source: e })?;
 
             let src_path = entry.path();
             debug!("copy_dir_all: Processing entry: {}", src_path.display());
 
-            let ty = entry.file_type().map_err(|e| BuildError::IoError {
-                path: src_path.clone(),
-                source: e,
-            })?;
+            let ty = entry
+                .file_type()
+                .map_err(|e| BuildError::IoError { path: src_path.clone(), source: e })?;
 
             let dst_path = dst.join(entry.file_name());
 
@@ -506,20 +475,20 @@ impl NativeBuilder {
             if file_name_str == "proc" || file_name_str == "sys" || file_name_str == "dev" {
                 // Create empty directory instead of copying
                 debug!("copy_dir_all: Skipping pseudo-filesystem: {}", file_name_str);
-                std::fs::create_dir_all(&dst_path).map_err(|e| BuildError::IoError {
-                    path: dst_path.clone(),
-                    source: e,
-                })?;
+                std::fs::create_dir_all(&dst_path)
+                    .map_err(|e| BuildError::IoError { path: dst_path.clone(), source: e })?;
                 continue;
             }
 
             if ty.is_symlink() {
                 // Preserve symlinks
-                debug!("copy_dir_all: Copying symlink: {} -> {}", src_path.display(), dst_path.display());
-                let link_target = std::fs::read_link(&src_path).map_err(|e| BuildError::IoError {
-                    path: src_path.clone(),
-                    source: e,
-                })?;
+                debug!(
+                    "copy_dir_all: Copying symlink: {} -> {}",
+                    src_path.display(),
+                    dst_path.display()
+                );
+                let link_target = std::fs::read_link(&src_path)
+                    .map_err(|e| BuildError::IoError { path: src_path.clone(), source: e })?;
                 // Remove destination if it exists (file or directory)
                 if dst_path.exists() {
                     if dst_path.is_dir() {
@@ -528,32 +497,26 @@ impl NativeBuilder {
                         let _ = std::fs::remove_file(&dst_path);
                     }
                 }
-                std::os::unix::fs::symlink(&link_target, &dst_path).map_err(|e| {
-                    BuildError::IoError {
-                        path: dst_path.clone(),
-                        source: e,
-                    }
-                })?;
+                std::os::unix::fs::symlink(&link_target, &dst_path)
+                    .map_err(|e| BuildError::IoError { path: dst_path.clone(), source: e })?;
             } else if ty.is_dir() {
                 debug!("copy_dir_all: Recursing into directory: {}", src_path.display());
                 Self::copy_dir_all(&src_path, &dst_path)?;
             } else {
                 // Copy file
-                debug!("copy_dir_all: Copying file: {} -> {}", src_path.display(), dst_path.display());
-                std::fs::copy(&src_path, &dst_path).map_err(|e| BuildError::IoError {
-                    path: src_path.clone(),
-                    source: e,
-                })?;
+                debug!(
+                    "copy_dir_all: Copying file: {} -> {}",
+                    src_path.display(),
+                    dst_path.display()
+                );
+                std::fs::copy(&src_path, &dst_path)
+                    .map_err(|e| BuildError::IoError { path: src_path.clone(), source: e })?;
                 // Preserve permissions
-                let metadata = std::fs::metadata(&src_path).map_err(|e| BuildError::IoError {
-                    path: src_path.clone(),
-                    source: e,
-                })?;
+                let metadata = std::fs::metadata(&src_path)
+                    .map_err(|e| BuildError::IoError { path: src_path.clone(), source: e })?;
                 let permissions = metadata.permissions();
-                std::fs::set_permissions(&dst_path, permissions).map_err(|e| BuildError::IoError {
-                    path: dst_path.clone(),
-                    source: e,
-                })?;
+                std::fs::set_permissions(&dst_path, permissions)
+                    .map_err(|e| BuildError::IoError { path: dst_path.clone(), source: e })?;
             }
         }
 
@@ -585,24 +548,16 @@ impl NativeBuilder {
                 // FROM is handled specially (pulls base image)
                 self.execute_from(node)?
             }
-            Instruction::Run { command } => {
-                self.execute_run(command)?
-            }
+            Instruction::Run { command } => self.execute_run(command)?,
             Instruction::Copy { sources, destination, .. } => {
                 self.execute_copy(sources, destination.as_str(), context)?
             }
             Instruction::Add { sources, destination, .. } => {
                 self.execute_add(sources, destination.as_str(), context)?
             }
-            Instruction::Env { vars } => {
-                self.execute_env(vars)?
-            }
-            Instruction::Workdir { path } => {
-                self.execute_workdir(path.as_str())?
-            }
-            Instruction::User { user } => {
-                self.execute_user(user.as_str())?
-            }
+            Instruction::Env { vars } => self.execute_env(vars)?,
+            Instruction::Workdir { path } => self.execute_workdir(path.as_str())?,
+            Instruction::User { user } => self.execute_user(user.as_str())?,
             // Other instructions don't create layers, just update metadata
             _ => return Ok((None, false)),
         };
@@ -665,9 +620,7 @@ impl NativeBuilder {
                 // Use block_in_place to avoid nested runtime issues when called from async context
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
-                        self.oci_client
-                            .pull_image(&image_str, &self.current_rootfs)
-                            .await
+                        self.oci_client.pull_image(&image_str, &self.current_rootfs).await
                     })
                 })?;
 
@@ -695,7 +648,8 @@ impl NativeBuilder {
         let (merged_dir, upper_dir, _work_dir) = self.create_overlay(step_id)?;
 
         // Execute command in chroot (cleanup overlayfs on error or success)
-        let exec_result = self.execute_in_chroot(&merged_dir, &cmd_args, &self.env, &self.current_workdir);
+        let exec_result =
+            self.execute_in_chroot(&merged_dir, &cmd_args, &self.env, &self.current_workdir);
 
         // CRITICAL: Unmount overlayfs regardless of success/failure
         self.unmount_overlay(&merged_dir)?;
@@ -732,14 +686,15 @@ impl NativeBuilder {
 
         // Copy current rootfs to layer directory
         if std::fs::read_dir(&self.current_rootfs)
-            .map_err(|e| BuildError::IoError {
-                path: self.current_rootfs.clone(),
-                source: e,
-            })?
+            .map_err(|e| BuildError::IoError { path: self.current_rootfs.clone(), source: e })?
             .next()
             .is_some()
         {
-            info!("Copying current rootfs {} to layer {}", self.current_rootfs.display(), layer_dir.display());
+            info!(
+                "Copying current rootfs {} to layer {}",
+                self.current_rootfs.display(),
+                layer_dir.display()
+            );
             Self::copy_dir_all(&self.current_rootfs, &layer_dir)?;
         }
 
@@ -759,7 +714,11 @@ impl NativeBuilder {
             info!("Created dest directory: {}", dest_path.display());
         } else if let Some(parent) = dest_path.parent() {
             std::fs::create_dir_all(parent)?;
-            info!("Created parent directory: {} for dest: {}", parent.display(), dest_path.display());
+            info!(
+                "Created parent directory: {} for dest: {}",
+                parent.display(),
+                dest_path.display()
+            );
         }
 
         info!(sources = ?sources, destination = %destination, is_dest_dir = is_dest_dir, "Copying files");
@@ -767,7 +726,12 @@ impl NativeBuilder {
         // Copy files from build context
         for source in sources {
             let src_path = context.context_path.join(source);
-            info!("COPY: source={} -> src_path={} (exists={})", source, src_path.display(), src_path.exists());
+            info!(
+                "COPY: source={} -> src_path={} (exists={})",
+                source,
+                src_path.display(),
+                src_path.exists()
+            );
 
             if !src_path.exists() {
                 return Err(BuildError::ContextError(format!(
@@ -789,15 +753,18 @@ impl NativeBuilder {
                 dest_path.clone()
             };
 
-            info!("COPY: {} -> {} (is_dir={})", src_path.display(), target_path.display(), src_path.is_dir());
+            info!(
+                "COPY: {} -> {} (is_dir={})",
+                src_path.display(),
+                target_path.display(),
+                src_path.is_dir()
+            );
 
             if src_path.is_dir() {
                 Self::copy_dir_all(&src_path, &target_path)?;
             } else {
-                std::fs::copy(&src_path, &target_path).map_err(|e| BuildError::IoError {
-                    path: src_path.clone(),
-                    source: e,
-                })?;
+                std::fs::copy(&src_path, &target_path)
+                    .map_err(|e| BuildError::IoError { path: src_path.clone(), source: e })?;
             }
         }
 
@@ -867,12 +834,14 @@ impl BuildExecutor for NativeBuilder {
         let mut total_layers = 0;
 
         // Get topological order
-        let order = graph.topological_sort()
+        let order = graph
+            .topological_sort()
             .map_err(|e| BuildError::ContextError(format!("Graph error: {}", e)))?;
 
         // Execute each node in order
         for node_id in order {
-            let node = graph.get_node(node_id)
+            let node = graph
+                .get_node(node_id)
                 .ok_or_else(|| BuildError::ContextError(format!("Node {} not found", node_id)))?;
 
             // Determine instruction type for metrics
@@ -890,13 +859,14 @@ impl BuildExecutor for NativeBuilder {
                 _ => "Other",
             };
 
-            let (layer_path, was_cached) = self.execute_node(node, context, cache)
-                .map_err(|e| {
+            let (layer_path, was_cached) =
+                self.execute_node(node, context, cache).map_err(|e| {
                     metrics::counter!("hypr_build_failures_total",
                         "platform" => "linux",
                         "step_type" => instruction_type,
                         "reason" => "execution_failed"
-                    ).increment(1);
+                    )
+                    .increment(1);
                     e
                 })?;
 
@@ -911,15 +881,15 @@ impl BuildExecutor for NativeBuilder {
         let duration = start.elapsed();
 
         // Generate final SquashFS image
-        let squashfs_path = self.generate_squashfs()
-            .map_err(|e| {
-                metrics::counter!("hypr_build_failures_total",
-                    "platform" => "linux",
-                    "step_type" => "squashfs_generation",
-                    "reason" => "compression_failed"
-                ).increment(1);
-                e
-            })?;
+        let squashfs_path = self.generate_squashfs().map_err(|e| {
+            metrics::counter!("hypr_build_failures_total",
+                "platform" => "linux",
+                "step_type" => "squashfs_generation",
+                "reason" => "compression_failed"
+            )
+            .increment(1);
+            e
+        })?;
 
         // Calculate total size
         let total_size = std::fs::metadata(&squashfs_path)?.len();
@@ -956,10 +926,12 @@ impl BuildExecutor for NativeBuilder {
         metrics::histogram!("hypr_build_duration_seconds").record(duration.as_secs_f64());
         metrics::counter!("hypr_build_complete_total", "platform" => "linux").increment(1);
         metrics::counter!("hypr_cache_hits_total").increment(cached_layers as u64);
-        metrics::counter!("hypr_cache_misses_total").increment((total_layers - cached_layers) as u64);
+        metrics::counter!("hypr_cache_misses_total")
+            .increment((total_layers - cached_layers) as u64);
         info!(
             duration_secs = duration.as_secs_f64(),
-            total_layers, cached_layers,
+            total_layers,
+            cached_layers,
             image_size_bytes = total_size,
             "Build completed successfully"
         );
@@ -990,7 +962,7 @@ impl NativeBuilder {
             .arg(&self.current_rootfs)
             .arg(&squashfs_path)
             .arg("-comp")
-            .arg("zstd")      // zstd is faster than xz with similar compression
+            .arg("zstd") // zstd is faster than xz with similar compression
             .arg("-noappend")
             .arg("-no-progress")
             .output()
@@ -1077,10 +1049,8 @@ impl LinuxVmBuilder {
         use crate::adapters::CloudHypervisorAdapter;
 
         let work_dir = std::env::temp_dir().join(format!("hypr-build-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&work_dir).map_err(|e| BuildError::IoError {
-            path: work_dir.clone(),
-            source: e,
-        })?;
+        std::fs::create_dir_all(&work_dir)
+            .map_err(|e| BuildError::IoError { path: work_dir.clone(), source: e })?;
 
         // Locate or download kernel
         let home = std::env::var("HOME")
@@ -1091,10 +1061,8 @@ impl LinuxVmBuilder {
         // Auto-download cloud-hypervisor kernel if not present
         if !kernel_path.exists() {
             info!("Cloud Hypervisor kernel not found, downloading...");
-            std::fs::create_dir_all(&kernel_dir).map_err(|e| BuildError::IoError {
-                path: kernel_dir.clone(),
-                source: e,
-            })?;
+            std::fs::create_dir_all(&kernel_dir)
+                .map_err(|e| BuildError::IoError { path: kernel_dir.clone(), source: e })?;
 
             // Detect architecture
             let arch = std::env::consts::ARCH;
@@ -1105,22 +1073,23 @@ impl LinuxVmBuilder {
             };
 
             info!("Downloading kernel from: {}", kernel_url);
-            let response = reqwest::blocking::get(kernel_url)
-                .map_err(|e| BuildError::ContextError(format!("Failed to download kernel: {}", e)))?;
+            let response = reqwest::blocking::get(kernel_url).map_err(|e| {
+                BuildError::ContextError(format!("Failed to download kernel: {}", e))
+            })?;
 
             if !response.status().is_success() {
                 return Err(BuildError::ContextError(format!(
-                    "Failed to download kernel: HTTP {}", response.status()
+                    "Failed to download kernel: HTTP {}",
+                    response.status()
                 )));
             }
 
-            let kernel_bytes = response.bytes()
+            let kernel_bytes = response
+                .bytes()
                 .map_err(|e| BuildError::ContextError(format!("Failed to read kernel: {}", e)))?;
 
-            std::fs::write(&kernel_path, kernel_bytes).map_err(|e| BuildError::IoError {
-                path: kernel_path.clone(),
-                source: e,
-            })?;
+            std::fs::write(&kernel_path, kernel_bytes)
+                .map_err(|e| BuildError::IoError { path: kernel_path.clone(), source: e })?;
 
             info!("Kernel downloaded to: {}", kernel_path.display());
         }
@@ -1129,9 +1098,9 @@ impl LinuxVmBuilder {
         let builder_rootfs = PathBuf::from("/tmp/dummy-will-be-initramfs");
 
         // Create VMM adapter for Linux (cloud-hypervisor)
-        let adapter = CloudHypervisorAdapter::new().map_err(|e| BuildError::ContextError(format!(
-            "Failed to create cloud-hypervisor adapter: {}", e
-        )))?;
+        let adapter = CloudHypervisorAdapter::new().map_err(|e| {
+            BuildError::ContextError(format!("Failed to create cloud-hypervisor adapter: {}", e))
+        })?;
 
         let vm_builder = crate::builder::VmBuilder::new(
             Box::new(adapter),
@@ -1168,18 +1137,13 @@ impl LinuxVmBuilder {
 
         let layer_id = format!("layer-{}", uuid::Uuid::new_v4());
         let output_dir = self.work_dir.join("layers");
-        std::fs::create_dir_all(&output_dir).map_err(|e| BuildError::IoError {
-            path: output_dir.clone(),
-            source: e,
-        })?;
+        std::fs::create_dir_all(&output_dir)
+            .map_err(|e| BuildError::IoError { path: output_dir.clone(), source: e })?;
 
         let output_layer = output_dir.join(format!("{}.tar", layer_id));
         let context_dir = self.work_dir.join("context");
 
-        let step = BuildStep::Run {
-            command: command.to_string(),
-            workdir: self.workdir.clone(),
-        };
+        let step = BuildStep::Run { command: command.to_string(), workdir: self.workdir.clone() };
 
         // Verify base rootfs exists before building
         if self.base_rootfs.is_none() {
@@ -1316,7 +1280,9 @@ impl BuildExecutor for LinuxVmBuilder {
                 }
                 Instruction::Cmd { command } => {
                     let cmd_vec = match command {
-                        crate::builder::parser::RunCommand::Shell(cmd) => vec!["/bin/sh".to_string(), "-c".to_string(), cmd.clone()],
+                        crate::builder::parser::RunCommand::Shell(cmd) => {
+                            vec!["/bin/sh".to_string(), "-c".to_string(), cmd.clone()]
+                        }
                         crate::builder::parser::RunCommand::Exec(args) => args.clone(),
                     };
                     self.config.cmd = Some(cmd_vec);
@@ -1324,7 +1290,9 @@ impl BuildExecutor for LinuxVmBuilder {
                 }
                 Instruction::Entrypoint { command } => {
                     let entry_vec = match command {
-                        crate::builder::parser::RunCommand::Shell(cmd) => vec!["/bin/sh".to_string(), "-c".to_string(), cmd.clone()],
+                        crate::builder::parser::RunCommand::Shell(cmd) => {
+                            vec!["/bin/sh".to_string(), "-c".to_string(), cmd.clone()]
+                        }
                         crate::builder::parser::RunCommand::Exec(args) => args.clone(),
                     };
                     self.config.entrypoint = Some(entry_vec);
@@ -1353,10 +1321,8 @@ impl BuildExecutor for LinuxVmBuilder {
         // Merge layers into final rootfs
         info!("Merging {} layers into final rootfs", final_layers.len());
         let final_rootfs = self.work_dir.join("rootfs");
-        std::fs::create_dir_all(&final_rootfs).map_err(|e| BuildError::IoError {
-            path: final_rootfs.clone(),
-            source: e,
-        })?;
+        std::fs::create_dir_all(&final_rootfs)
+            .map_err(|e| BuildError::IoError { path: final_rootfs.clone(), source: e })?;
 
         // Extract all layer tarballs
         for layer in &final_layers {
@@ -1364,10 +1330,7 @@ impl BuildExecutor for LinuxVmBuilder {
             let status = std::process::Command::new("tar")
                 .args(["-xf", layer.to_str().unwrap(), "-C", final_rootfs.to_str().unwrap()])
                 .status()
-                .map_err(|e| BuildError::IoError {
-                    path: layer.clone(),
-                    source: e,
-                })?;
+                .map_err(|e| BuildError::IoError { path: layer.clone(), source: e })?;
 
             if !status.success() {
                 return Err(BuildError::LayerExtractionFailed {
@@ -1389,10 +1352,7 @@ impl BuildExecutor for LinuxVmBuilder {
                 "zstd",
             ])
             .status()
-            .map_err(|e| BuildError::IoError {
-                path: squashfs_path.clone(),
-                source: e,
-            })?;
+            .map_err(|e| BuildError::IoError { path: squashfs_path.clone(), source: e })?;
 
         if !status.success() {
             return Err(BuildError::ContextError("mksquashfs failed".into()));
@@ -1431,7 +1391,6 @@ impl BuildExecutor for LinuxVmBuilder {
     }
 }
 
-
 #[cfg(target_os = "macos")]
 impl MacOsVmBuilder {
     /// Create a new macOS VM-based builder.
@@ -1440,10 +1399,8 @@ impl MacOsVmBuilder {
         use dirs::home_dir;
 
         let work_dir = std::env::temp_dir().join(format!("hypr-build-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&work_dir).map_err(|e| BuildError::IoError {
-            path: work_dir.clone(),
-            source: e,
-        })?;
+        std::fs::create_dir_all(&work_dir)
+            .map_err(|e| BuildError::IoError { path: work_dir.clone(), source: e })?;
 
         // Locate kernel (initramfs will be generated on-the-fly)
         let hypr_dir = home_dir()
@@ -1469,9 +1426,9 @@ impl MacOsVmBuilder {
         let builder_rootfs = PathBuf::from("/tmp/dummy-will-be-initramfs");
 
         // Create VMM adapter for macOS (HVF)
-        let adapter = HvfAdapter::new().map_err(|e| BuildError::ContextError(format!(
-            "Failed to create HVF adapter: {}", e
-        )))?;
+        let adapter = HvfAdapter::new().map_err(|e| {
+            BuildError::ContextError(format!("Failed to create HVF adapter: {}", e))
+        })?;
 
         let vm_builder = crate::builder::VmBuilder::new(
             Box::new(adapter),
@@ -1508,18 +1465,13 @@ impl MacOsVmBuilder {
 
         let layer_id = format!("layer-{}", uuid::Uuid::new_v4());
         let output_dir = self.work_dir.join("layers");
-        std::fs::create_dir_all(&output_dir).map_err(|e| BuildError::IoError {
-            path: output_dir.clone(),
-            source: e,
-        })?;
+        std::fs::create_dir_all(&output_dir)
+            .map_err(|e| BuildError::IoError { path: output_dir.clone(), source: e })?;
 
         let output_layer = output_dir.join(format!("{}.tar", layer_id));
         let context_dir = self.work_dir.join("context");
 
-        let step = BuildStep::Run {
-            command: command.to_string(),
-            workdir: self.workdir.clone(),
-        };
+        let step = BuildStep::Run { command: command.to_string(), workdir: self.workdir.clone() };
 
         // Verify base rootfs exists before building
         if self.base_rootfs.is_none() {
@@ -1656,7 +1608,9 @@ impl BuildExecutor for MacOsVmBuilder {
                 }
                 Instruction::Cmd { command } => {
                     let cmd_vec = match command {
-                        crate::builder::parser::RunCommand::Shell(cmd) => vec!["/bin/sh".to_string(), "-c".to_string(), cmd.clone()],
+                        crate::builder::parser::RunCommand::Shell(cmd) => {
+                            vec!["/bin/sh".to_string(), "-c".to_string(), cmd.clone()]
+                        }
                         crate::builder::parser::RunCommand::Exec(args) => args.clone(),
                     };
                     self.config.cmd = Some(cmd_vec);
@@ -1664,7 +1618,9 @@ impl BuildExecutor for MacOsVmBuilder {
                 }
                 Instruction::Entrypoint { command } => {
                     let entry_vec = match command {
-                        crate::builder::parser::RunCommand::Shell(cmd) => vec!["/bin/sh".to_string(), "-c".to_string(), cmd.clone()],
+                        crate::builder::parser::RunCommand::Shell(cmd) => {
+                            vec!["/bin/sh".to_string(), "-c".to_string(), cmd.clone()]
+                        }
                         crate::builder::parser::RunCommand::Exec(args) => args.clone(),
                     };
                     self.config.entrypoint = Some(entry_vec);
@@ -1693,10 +1649,8 @@ impl BuildExecutor for MacOsVmBuilder {
         // Merge layers into final rootfs
         info!("Merging {} layers into final rootfs", final_layers.len());
         let final_rootfs = self.work_dir.join("rootfs");
-        std::fs::create_dir_all(&final_rootfs).map_err(|e| BuildError::IoError {
-            path: final_rootfs.clone(),
-            source: e,
-        })?;
+        std::fs::create_dir_all(&final_rootfs)
+            .map_err(|e| BuildError::IoError { path: final_rootfs.clone(), source: e })?;
 
         // Extract all layer tarballs
         for layer in &final_layers {
@@ -1704,10 +1658,7 @@ impl BuildExecutor for MacOsVmBuilder {
             let status = std::process::Command::new("tar")
                 .args(["-xf", layer.to_str().unwrap(), "-C", final_rootfs.to_str().unwrap()])
                 .status()
-                .map_err(|e| BuildError::IoError {
-                    path: layer.clone(),
-                    source: e,
-                })?;
+                .map_err(|e| BuildError::IoError { path: layer.clone(), source: e })?;
 
             if !status.success() {
                 return Err(BuildError::LayerExtractionFailed {
@@ -1729,10 +1680,7 @@ impl BuildExecutor for MacOsVmBuilder {
                 "zstd",
             ])
             .status()
-            .map_err(|e| BuildError::IoError {
-                path: squashfs_path.clone(),
-                source: e,
-            })?;
+            .map_err(|e| BuildError::IoError { path: squashfs_path.clone(), source: e })?;
 
         if !status.success() {
             return Err(BuildError::ContextError("mksquashfs failed".into()));
@@ -1787,9 +1735,10 @@ pub fn create_builder() -> BuildResult<Box<dyn BuildExecutor>> {
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        Err(BuildError::PlatformNotSupported(
-            format!("Builds not supported on {}. Supported: Linux, macOS", std::env::consts::OS)
-        ))
+        Err(BuildError::PlatformNotSupported(format!(
+            "Builds not supported on {}. Supported: Linux, macOS",
+            std::env::consts::OS
+        )))
     }
 }
 

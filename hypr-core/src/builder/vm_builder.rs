@@ -63,7 +63,7 @@ impl VmBuilder {
     /// Note: builder_rootfs parameter removed (now uses on-the-fly initramfs)
     pub fn new(
         adapter: Box<dyn VmmAdapter>,
-        _builder_rootfs: PathBuf,  // Kept for compatibility, will be removed
+        _builder_rootfs: PathBuf, // Kept for compatibility, will be removed
         kernel_path: PathBuf,
         work_dir: PathBuf,
     ) -> Self {
@@ -89,10 +89,9 @@ impl VmBuilder {
 
         // Generate new initramfs
         info!("Generating builder initramfs");
-        let initramfs = crate::builder::initramfs::create_builder_initramfs()
-            .map_err(|e| HyprError::BuildFailed {
-                reason: format!("Failed to create initramfs: {}", e),
-            })?;
+        let initramfs = crate::builder::initramfs::create_builder_initramfs().map_err(|e| {
+            HyprError::BuildFailed { reason: format!("Failed to create initramfs: {}", e) }
+        })?;
 
         self.initramfs_cache = Some(initramfs.clone());
         Ok(initramfs)
@@ -127,7 +126,8 @@ impl VmBuilder {
         }
 
         // Spawn builder VM
-        let vm = self.spawn_builder_vm(context_dir, output_layer.parent().unwrap(), base_rootfs).await?;
+        let vm =
+            self.spawn_builder_vm(context_dir, output_layer.parent().unwrap(), base_rootfs).await?;
 
         // Send build command via vsock
         let result = self.send_build_command(&vm, step).await;
@@ -152,7 +152,12 @@ impl VmBuilder {
 
     /// Spawn an ephemeral builder VM with minimal initramfs.
     #[instrument(skip(self))]
-    async fn spawn_builder_vm(&mut self, context_dir: &Path, output_dir: &Path, base_rootfs: Option<&Path>) -> Result<VmHandle> {
+    async fn spawn_builder_vm(
+        &mut self,
+        context_dir: &Path,
+        output_dir: &Path,
+        base_rootfs: Option<&Path>,
+    ) -> Result<VmHandle> {
         debug!("Spawning builder VM");
 
         let vm_id = format!("builder-{}", uuid::Uuid::new_v4());
@@ -165,23 +170,15 @@ impl VmBuilder {
         // 2. Output directory for layers (read-write)
         // 3. Base image rootfs (optional, read-only)
         let mut virtio_fs_mounts = vec![
-            VirtioFsMount {
-                host_path: context_dir.to_path_buf(),
-                tag: "context".to_string(),
-            },
-            VirtioFsMount {
-                host_path: output_dir.to_path_buf(),
-                tag: "shared".to_string(),
-            },
+            VirtioFsMount { host_path: context_dir.to_path_buf(), tag: "context".to_string() },
+            VirtioFsMount { host_path: output_dir.to_path_buf(), tag: "shared".to_string() },
         ];
 
         // Add base rootfs mount if provided
         if let Some(base) = base_rootfs {
             debug!("Adding base rootfs mount: {}", base.display());
-            virtio_fs_mounts.push(VirtioFsMount {
-                host_path: base.to_path_buf(),
-                tag: "base".to_string(),
-            });
+            virtio_fs_mounts
+                .push(VirtioFsMount { host_path: base.to_path_buf(), tag: "base".to_string() });
         }
 
         use crate::types::vm::VmResources;
@@ -200,7 +197,7 @@ impl VmBuilder {
                 "console=ttyS0".to_string(),
             ],
             initramfs_path: Some(initramfs),
-            disks: vec![],  // No disks, using initramfs only
+            disks: vec![], // No disks, using initramfs only
             network: Default::default(),
             ports: vec![],
             env: Default::default(),
@@ -212,9 +209,7 @@ impl VmBuilder {
 
         let handle = self.adapter.create(&config).await.map_err(|e| {
             error!("Failed to spawn builder VM: {}", e);
-            HyprError::BuildFailed {
-                reason: format!("Failed to spawn builder VM: {}", e),
-            }
+            HyprError::BuildFailed { reason: format!("Failed to spawn builder VM: {}", e) }
         })?;
 
         // Wait for VM to boot and builder-agent to be ready
@@ -257,25 +252,19 @@ impl VmBuilder {
         let vsock_path = self.adapter.vsock_path(handle);
 
         let mut stream = UnixStream::connect(vsock_path).await.map_err(|e| {
-            HyprError::BuildFailed {
-                reason: format!("Failed to connect to builder agent: {}", e),
-            }
+            HyprError::BuildFailed { reason: format!("Failed to connect to builder agent: {}", e) }
         })?;
 
         // Send Ping command
         let ping_cmd = r#"{"Ping":{}}"#;
-        stream.write_all(ping_cmd.as_bytes()).await.map_err(|e| {
-            HyprError::BuildFailed {
-                reason: format!("Failed to send ping: {}", e),
-            }
+        stream.write_all(ping_cmd.as_bytes()).await.map_err(|e| HyprError::BuildFailed {
+            reason: format!("Failed to send ping: {}", e),
         })?;
 
         // Read response
         let mut response = String::new();
-        stream.read_to_string(&mut response).await.map_err(|e| {
-            HyprError::BuildFailed {
-                reason: format!("Failed to read ping response: {}", e),
-            }
+        stream.read_to_string(&mut response).await.map_err(|e| HyprError::BuildFailed {
+            reason: format!("Failed to read ping response: {}", e),
         })?;
 
         if response.contains("Pong") {
@@ -295,36 +284,28 @@ impl VmBuilder {
         let vsock_path = self.adapter.vsock_path(handle);
 
         let mut stream = UnixStream::connect(vsock_path).await.map_err(|e| {
-            HyprError::BuildFailed {
-                reason: format!("Failed to connect to builder agent: {}", e),
-            }
+            HyprError::BuildFailed { reason: format!("Failed to connect to builder agent: {}", e) }
         })?;
 
         // Serialize build command
         let command = self.build_command_json(step)?;
 
         // Send command
-        stream.write_all(command.as_bytes()).await.map_err(|e| {
-            HyprError::BuildFailed {
-                reason: format!("Failed to send build command: {}", e),
-            }
+        stream.write_all(command.as_bytes()).await.map_err(|e| HyprError::BuildFailed {
+            reason: format!("Failed to send build command: {}", e),
         })?;
 
         // Read response
         let mut response = String::new();
-        stream.read_to_string(&mut response).await.map_err(|e| {
-            HyprError::BuildFailed {
-                reason: format!("Failed to read build response: {}", e),
-            }
+        stream.read_to_string(&mut response).await.map_err(|e| HyprError::BuildFailed {
+            reason: format!("Failed to read build response: {}", e),
         })?;
 
         // Check for success
         if response.contains(r#""Ok""#) {
             Ok(())
         } else {
-            Err(HyprError::BuildFailed {
-                reason: format!("Build command failed: {}", response),
-            })
+            Err(HyprError::BuildFailed { reason: format!("Build command failed: {}", response) })
         }
     }
 
@@ -356,9 +337,7 @@ impl VmBuilder {
     async fn terminate_vm(&self, handle: &VmHandle) -> Result<()> {
         debug!("Terminating builder VM");
 
-        let stop_result = self.adapter
-            .stop(handle, Duration::from_secs(5))
-            .await;
+        let stop_result = self.adapter.stop(handle, Duration::from_secs(5)).await;
 
         if stop_result.is_err() {
             warn!("Failed to gracefully stop VM, force killing");
@@ -373,28 +352,21 @@ impl VmBuilder {
     /// Extract metadata from layer tarball.
     async fn extract_layer_metadata(&self, layer_path: &Path) -> Result<BuildLayerInfo> {
         let metadata = tokio::fs::metadata(layer_path).await.map_err(|e| {
-            HyprError::BuildFailed {
-                reason: format!("Failed to read layer metadata: {}", e),
-            }
+            HyprError::BuildFailed { reason: format!("Failed to read layer metadata: {}", e) }
         })?;
 
         // Compute SHA256 hash
         let hash = self.compute_layer_hash(layer_path).await?;
 
-        Ok(BuildLayerInfo {
-            size_bytes: metadata.len(),
-            sha256: hash,
-        })
+        Ok(BuildLayerInfo { size_bytes: metadata.len(), sha256: hash })
     }
 
     /// Compute SHA256 hash of layer tarball.
     async fn compute_layer_hash(&self, layer_path: &Path) -> Result<String> {
         use sha2::{Digest, Sha256};
 
-        let bytes = tokio::fs::read(layer_path).await.map_err(|e| {
-            HyprError::BuildFailed {
-                reason: format!("Failed to read layer for hashing: {}", e),
-            }
+        let bytes = tokio::fs::read(layer_path).await.map_err(|e| HyprError::BuildFailed {
+            reason: format!("Failed to read layer for hashing: {}", e),
         })?;
 
         let mut hasher = Sha256::new();
@@ -447,15 +419,11 @@ mod tests {
 
     #[test]
     fn test_build_step_type() {
-        let run_step = BuildStep::Run {
-            command: "echo hello".into(),
-            workdir: "/workspace".into(),
-        };
+        let run_step =
+            BuildStep::Run { command: "echo hello".into(), workdir: "/workspace".into() };
         assert_eq!(run_step.step_type(), "RUN");
 
-        let finalize_step = BuildStep::Finalize {
-            layer_id: "layer-123".into(),
-        };
+        let finalize_step = BuildStep::Finalize { layer_id: "layer-123".into() };
         assert_eq!(finalize_step.step_type(), "FINALIZE");
     }
 
@@ -481,10 +449,7 @@ mod tests {
             PathBuf::from("/tmp"),
         );
 
-        let step = BuildStep::Run {
-            command: "apk add nginx".into(),
-            workdir: "/workspace".into(),
-        };
+        let step = BuildStep::Run { command: "apk add nginx".into(), workdir: "/workspace".into() };
 
         let json = builder.build_command_json(&step).unwrap();
         assert!(json.contains(r#""Run""#));
@@ -514,9 +479,7 @@ mod tests {
             PathBuf::from("/tmp"),
         );
 
-        let step = BuildStep::Finalize {
-            layer_id: "layer-abc123".into(),
-        };
+        let step = BuildStep::Finalize { layer_id: "layer-abc123".into() };
 
         let json = builder.build_command_json(&step).unwrap();
         assert!(json.contains(r#""Finalize""#));

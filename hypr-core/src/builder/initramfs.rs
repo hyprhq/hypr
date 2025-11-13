@@ -27,10 +27,8 @@ pub fn create_builder_initramfs() -> BuildResult<PathBuf> {
 
     // Create temporary directory for initramfs contents
     let temp_dir = std::env::temp_dir().join(format!("hypr-initramfs-{}", uuid::Uuid::new_v4()));
-    fs::create_dir_all(&temp_dir).map_err(|e| BuildError::IoError {
-        path: temp_dir.clone(),
-        source: e,
-    })?;
+    fs::create_dir_all(&temp_dir)
+        .map_err(|e| BuildError::IoError { path: temp_dir.clone(), source: e })?;
 
     debug!("Initramfs staging directory: {}", temp_dir.display());
 
@@ -56,23 +54,12 @@ pub fn create_builder_initramfs() -> BuildResult<PathBuf> {
 
 /// Create basic directory structure in initramfs.
 fn create_directory_structure(root: &Path) -> BuildResult<()> {
-    let dirs = vec![
-        "bin",
-        "dev",
-        "proc",
-        "sys",
-        "tmp",
-        "workspace",
-        "shared",
-        "etc",
-    ];
+    let dirs = vec!["bin", "dev", "proc", "sys", "tmp", "workspace", "shared", "etc"];
 
     for dir in dirs {
         let path = root.join(dir);
-        fs::create_dir_all(&path).map_err(|e| BuildError::IoError {
-            path: path.clone(),
-            source: e,
-        })?;
+        fs::create_dir_all(&path)
+            .map_err(|e| BuildError::IoError { path: path.clone(), source: e })?;
     }
 
     Ok(())
@@ -116,10 +103,8 @@ fn copy_kestrel_binary(root: &Path) -> BuildResult<()> {
         if let Ok(kestrel_src) = std::env::var("KESTREL_BIN_PATH") {
             if PathBuf::from(&kestrel_src).exists() {
                 debug!("Using build.rs compiled kestrel: {}", kestrel_src);
-                fs::copy(&kestrel_src, &kestrel_dst).map_err(|e| BuildError::IoError {
-                    path: kestrel_dst.clone(),
-                    source: e,
-                })?;
+                fs::copy(&kestrel_src, &kestrel_dst)
+                    .map_err(|e| BuildError::IoError { path: kestrel_dst.clone(), source: e })?;
 
                 set_executable(&kestrel_dst)?;
                 return Ok(());
@@ -136,10 +121,8 @@ fn copy_kestrel_binary(root: &Path) -> BuildResult<()> {
 
         if local_kestrel.exists() {
             debug!("Using locally built kestrel: {}", local_kestrel.display());
-            fs::copy(&local_kestrel, &kestrel_dst).map_err(|e| BuildError::IoError {
-                path: kestrel_dst.clone(),
-                source: e,
-            })?;
+            fs::copy(&local_kestrel, &kestrel_dst)
+                .map_err(|e| BuildError::IoError { path: kestrel_dst.clone(), source: e })?;
 
             set_executable(&kestrel_dst)?;
             return Ok(());
@@ -161,10 +144,8 @@ fn copy_kestrel_binary(root: &Path) -> BuildResult<()> {
 /// Download kestrel from GitHub releases.
 fn download_kestrel(arch: &str, dest: &Path) -> BuildResult<()> {
     // GitHub's "latest" redirect automatically points to the most recent release
-    let url = format!(
-        "https://github.com/hyprhq/hypr/releases/latest/download/kestrel-linux-{}",
-        arch
-    );
+    let url =
+        format!("https://github.com/hyprhq/hypr/releases/latest/download/kestrel-linux-{}", arch);
 
     debug!("Downloading kestrel from: {}", url);
 
@@ -212,16 +193,11 @@ fn set_executable(path: &Path) -> BuildResult<()> {
     {
         use std::os::unix::fs::PermissionsExt;
         let mut perms = fs::metadata(path)
-            .map_err(|e| BuildError::IoError {
-                path: path.to_path_buf(),
-                source: e,
-            })?
+            .map_err(|e| BuildError::IoError { path: path.to_path_buf(), source: e })?
             .permissions();
         perms.set_mode(0o755);
-        fs::set_permissions(path, perms).map_err(|e| BuildError::IoError {
-            path: path.to_path_buf(),
-            source: e,
-        })?;
+        fs::set_permissions(path, perms)
+            .map_err(|e| BuildError::IoError { path: path.to_path_buf(), source: e })?;
     }
     Ok(())
 }
@@ -237,11 +213,11 @@ fn copy_busybox_binary(root: &Path) -> BuildResult<()> {
     let (deb_arch, deb_url) = match host_arch {
         "x86_64" => (
             "amd64",
-            "https://ftp.debian.org/debian/pool/main/b/busybox/busybox-static_1.37.0-7_amd64.deb"
+            "https://ftp.debian.org/debian/pool/main/b/busybox/busybox-static_1.37.0-7_amd64.deb",
         ),
         "aarch64" | "arm64" => (
             "arm64",
-            "https://ftp.debian.org/debian/pool/main/b/busybox/busybox-static_1.37.0-7_arm64.deb"
+            "https://ftp.debian.org/debian/pool/main/b/busybox/busybox-static_1.37.0-7_arm64.deb",
         ),
         other => {
             return Err(BuildError::ContextError(format!(
@@ -260,10 +236,8 @@ fn copy_busybox_binary(root: &Path) -> BuildResult<()> {
 
     // Create temp directory for extraction
     let temp_dir = std::env::temp_dir().join(format!("hypr-busybox-{}", uuid::Uuid::new_v4()));
-    fs::create_dir_all(&temp_dir).map_err(|e| BuildError::IoError {
-        path: temp_dir.clone(),
-        source: e,
-    })?;
+    fs::create_dir_all(&temp_dir)
+        .map_err(|e| BuildError::IoError { path: temp_dir.clone(), source: e })?;
 
     let deb_file = temp_dir.join(format!("busybox-static_{}.deb", deb_arch));
 
@@ -274,7 +248,10 @@ fn copy_busybox_binary(root: &Path) -> BuildResult<()> {
         .arg("-c")
         .arg(format!(
             "curl -fsSL {} -o {} || wget -q -O {} {}",
-            deb_url, deb_file.display(), deb_file.display(), deb_url
+            deb_url,
+            deb_file.display(),
+            deb_file.display(),
+            deb_url
         ))
         .status()
         .map_err(|e| BuildError::ContextError(format!("Failed to download busybox: {}", e)))?;
@@ -332,13 +309,10 @@ fn copy_busybox_binary(root: &Path) -> BuildResult<()> {
 ///
 /// Uses `cpio` command to create newc format archive.
 fn create_cpio_archive(source_dir: &Path) -> BuildResult<PathBuf> {
-    let output_path = std::env::temp_dir().join(format!("hypr-initramfs-{}.cpio", uuid::Uuid::new_v4()));
+    let output_path =
+        std::env::temp_dir().join(format!("hypr-initramfs-{}.cpio", uuid::Uuid::new_v4()));
 
-    debug!(
-        "Creating cpio archive: {} → {}",
-        source_dir.display(),
-        output_path.display()
-    );
+    debug!("Creating cpio archive: {} → {}", source_dir.display(), output_path.display());
 
     // Create cpio archive using find + cpio
     // Command: cd <source_dir> && find . | cpio -o -H newc > <output>
@@ -368,10 +342,7 @@ fn create_cpio_archive(source_dir: &Path) -> BuildResult<PathBuf> {
     }
 
     let size = fs::metadata(&output_path)
-        .map_err(|e| BuildError::IoError {
-            path: output_path.clone(),
-            source: e,
-        })?
+        .map_err(|e| BuildError::IoError { path: output_path.clone(), source: e })?
         .len();
 
     info!("Initramfs cpio created: {} KB", size / 1024);

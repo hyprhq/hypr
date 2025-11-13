@@ -1,4 +1,7 @@
-use hypr_core::{adapters::AdapterFactory, init_observability, shutdown_observability, HealthChecker, StateManager};
+use hypr_core::{
+    adapters::AdapterFactory, init_observability, shutdown_observability, HealthChecker,
+    StateManager,
+};
 use std::sync::Arc;
 use tracing::{error, info};
 

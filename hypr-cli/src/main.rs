@@ -234,7 +234,15 @@ async fn main() -> Result<()> {
                 })
                 .collect::<Result<Vec<_>>>()?;
 
-            commands::build::build(&path, tag.as_deref(), &file, build_args, target.as_deref(), no_cache).await?;
+            commands::build::build(
+                &path,
+                tag.as_deref(),
+                &file,
+                build_args,
+                target.as_deref(),
+                no_cache,
+            )
+            .await?;
         }
 
         Commands::Images => {

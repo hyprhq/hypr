@@ -96,7 +96,6 @@ impl HyprClient {
         Ok(vm.try_into()?)
     }
 
-
     /// Delete an image
     #[allow(dead_code)]
     pub async fn delete_image(&mut self, id: &str, force: bool) -> Result<bool> {

@@ -35,9 +35,10 @@ fn linux_platform_resolver(manifests: &[ImageIndexEntry]) -> Option<String> {
     manifests
         .iter()
         .find(|entry| {
-            entry.platform.as_ref().is_some_and(|platform| {
-                platform.os == "linux" && platform.architecture == arch
-            })
+            entry
+                .platform
+                .as_ref()
+                .is_some_and(|platform| platform.os == "linux" && platform.architecture == arch)
         })
         .map(|entry| entry.digest.clone())
 }
@@ -95,16 +96,11 @@ impl OciClient {
                 reason: e.to_string(),
             })?;
 
-        info!(
-            layers = image_data.layers.len(),
-            "Image manifest fetched successfully"
-        );
+        info!(layers = image_data.layers.len(), "Image manifest fetched successfully");
 
         // Create destination directory
-        std::fs::create_dir_all(dest_dir).map_err(|e| BuildError::IoError {
-            path: dest_dir.to_path_buf(),
-            source: e,
-        })?;
+        std::fs::create_dir_all(dest_dir)
+            .map_err(|e| BuildError::IoError { path: dest_dir.to_path_buf(), source: e })?;
 
         // Extract layers in order
         for (i, layer) in image_data.layers.iter().enumerate() {
@@ -200,7 +196,10 @@ impl OciClient {
             if let Err(e) = entry.unpack_in(dest_dir) {
                 // On macOS tmpfs, some operations fail (hardlinks, extended attrs)
                 // Log warning but continue - the file might be a hardlink we can skip
-                let path = entry.path().ok().map(|p| p.to_string_lossy().to_string())
+                let path = entry
+                    .path()
+                    .ok()
+                    .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_else(|| "<unknown>".to_string());
                 eprintln!("Warning: failed to unpack {} ({}), continuing...", path, e);
             }

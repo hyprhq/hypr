@@ -15,8 +15,8 @@ pub mod vm_builder;
 
 pub use cache::{CacheError, CacheLookupResult, CacheManager, LayerMetadata};
 pub use executor::{
-    BuildContext, BuildError, BuildExecutor, BuildOutput, BuildResult, ImageConfig,
-    ImageManifest, create_builder,
+    create_builder, BuildContext, BuildError, BuildExecutor, BuildOutput, BuildResult, ImageConfig,
+    ImageManifest,
 };
 pub use graph::{BuildGraph, BuildNode, GraphError};
 pub use http_proxy::BuilderHttpProxy;

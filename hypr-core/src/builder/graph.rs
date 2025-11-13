@@ -40,17 +40,11 @@ pub struct BuildNode {
 #[derive(Debug, Clone)]
 pub enum GraphError {
     /// Circular dependency detected
-    CircularDependency {
-        cycle: Vec<usize>,
-    },
+    CircularDependency { cycle: Vec<usize> },
     /// Unknown stage reference
-    UnknownStage {
-        stage_name: String,
-    },
+    UnknownStage { stage_name: String },
     /// Invalid graph state
-    InvalidGraph {
-        message: String,
-    },
+    InvalidGraph { message: String },
 }
 
 impl fmt::Display for GraphError {
@@ -133,12 +127,8 @@ impl BuildGraph {
         // Check if all nodes were processed
         if result.len() != self.nodes.len() {
             // Circular dependency detected
-            let unprocessed: Vec<usize> = self
-                .nodes
-                .iter()
-                .map(|n| n.id)
-                .filter(|id| !result.contains(id))
-                .collect();
+            let unprocessed: Vec<usize> =
+                self.nodes.iter().map(|n| n.id).filter(|id| !result.contains(id)).collect();
 
             return Err(GraphError::CircularDependency { cycle: unprocessed });
         }
@@ -197,18 +187,10 @@ impl<'a> GraphBuilder<'a> {
             all_targets.extend(targets);
         }
 
-        let roots: Vec<usize> = self
-            .nodes
-            .iter()
-            .filter(|n| !all_targets.contains(&n.id))
-            .map(|n| n.id)
-            .collect();
+        let roots: Vec<usize> =
+            self.nodes.iter().filter(|n| !all_targets.contains(&n.id)).map(|n| n.id).collect();
 
-        Ok(BuildGraph {
-            nodes: self.nodes,
-            edges: self.edges,
-            roots,
-        })
+        Ok(BuildGraph { nodes: self.nodes, edges: self.edges, roots })
     }
 
     fn process_stage(
@@ -261,9 +243,7 @@ impl<'a> GraphBuilder<'a> {
             if let Some(&source_node_id) = self.stage_outputs.get(from_stage_name) {
                 self.add_edge(source_node_id, node_id);
             } else {
-                return Err(GraphError::UnknownStage {
-                    stage_name: from_stage_name.clone(),
-                });
+                return Err(GraphError::UnknownStage { stage_name: from_stage_name.clone() });
             }
         }
 
@@ -393,11 +373,7 @@ RUN apk add curl
         // All nodes should have unique cache keys
         let mut keys = HashSet::new();
         for node in &graph.nodes {
-            assert!(
-                keys.insert(node.cache_key.clone()),
-                "Duplicate cache key: {}",
-                node.cache_key
-            );
+            assert!(keys.insert(node.cache_key.clone()), "Duplicate cache key: {}", node.cache_key);
         }
     }
 
@@ -438,18 +414,19 @@ ADD archive.tar.gz /data/
         let graph = BuildGraph::from_dockerfile(&parsed).unwrap();
 
         // Find COPY node
-        let copy_node = graph.nodes.iter().find(|n| {
-            matches!(&n.instruction, Instruction::Copy { .. })
-        }).unwrap();
+        let copy_node = graph
+            .nodes
+            .iter()
+            .find(|n| matches!(&n.instruction, Instruction::Copy { .. }))
+            .unwrap();
 
         assert_eq!(copy_node.context_dependencies.len(), 2);
         assert!(copy_node.context_dependencies.contains(&"file1.txt".to_string()));
         assert!(copy_node.context_dependencies.contains(&"file2.txt".to_string()));
 
         // Find ADD node
-        let add_node = graph.nodes.iter().find(|n| {
-            matches!(&n.instruction, Instruction::Add { .. })
-        }).unwrap();
+        let add_node =
+            graph.nodes.iter().find(|n| matches!(&n.instruction, Instruction::Add { .. })).unwrap();
 
         assert_eq!(add_node.context_dependencies.len(), 1);
         assert!(add_node.context_dependencies.contains(&"archive.tar.gz".to_string()));

@@ -114,15 +114,17 @@ impl StackOrchestrator {
         info!("Deploying stack from compose file");
 
         // Parse compose file
-        let compose = ComposeParser::parse_file(compose_file_path).map_err(|e| {
-            HyprError::Internal(format!("Failed to parse compose file: {}", e))
-        })?;
+        let compose = ComposeParser::parse_file(compose_file_path)
+            .map_err(|e| HyprError::Internal(format!("Failed to parse compose file: {}", e)))?;
 
         // Convert to stack config
         let stack_config = ComposeConverter::convert(compose, stack_name)?;
 
         // Generate stack ID
-        let stack_id = format!("stack_{}", std::time::SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs());
+        let stack_id = format!(
+            "stack_{}",
+            std::time::SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs()
+        );
 
         info!(stack_id = %stack_id, stack_name = %stack_config.name, "Generated stack ID");
 
@@ -185,11 +187,10 @@ impl StackOrchestrator {
         let mut created_vms = Vec::new();
 
         for service_name in ordered_services {
-            let service = stack_config
-                .services
-                .iter()
-                .find(|s| s.name == service_name)
-                .ok_or_else(|| HyprError::Internal(format!("Service {} not found", service_name)))?;
+            let service =
+                stack_config.services.iter().find(|s| s.name == service_name).ok_or_else(|| {
+                    HyprError::Internal(format!("Service {} not found", service_name))
+                })?;
 
             info!(service = %service.name, "Creating VM for service");
 
@@ -258,9 +259,10 @@ impl StackOrchestrator {
         // Get stack info
         let stack_info = {
             let stacks = self.stacks.read().await;
-            stacks.get(stack_id).cloned().ok_or_else(|| {
-                HyprError::Internal(format!("Stack {} not found", stack_id))
-            })?
+            stacks
+                .get(stack_id)
+                .cloned()
+                .ok_or_else(|| HyprError::Internal(format!("Stack {} not found", stack_id)))?
         };
 
         // Stop and delete all VMs
@@ -269,11 +271,8 @@ impl StackOrchestrator {
 
             // Get VM from state
             if let Ok(vm) = self.state.get_vm(&service.vm_id).await {
-                let handle = VmHandle {
-                    id: vm.id.clone(),
-                    pid: vm.pid,
-                    socket_path: vm.vsock_path.clone(),
-                };
+                let handle =
+                    VmHandle { id: vm.id.clone(), pid: vm.pid, socket_path: vm.vsock_path.clone() };
 
                 // Stop VM (30 second timeout)
                 let timeout = Duration::from_secs(30);
@@ -317,10 +316,8 @@ impl StackOrchestrator {
 
         // Get all VMs for this stack
         let vms = self.state.list_vms().await?;
-        let stack_vms: Vec<_> = vms
-            .into_iter()
-            .filter(|vm| vm.image_id == format!("stack_{}", stack_id))
-            .collect();
+        let stack_vms: Vec<_> =
+            vms.into_iter().filter(|vm| vm.image_id == format!("stack_{}", stack_id)).collect();
 
         // Delete all VMs
         for vm in stack_vms {
@@ -389,8 +386,11 @@ impl StackOrchestrator {
         }
 
         // Topological sort using Kahn's algorithm
-        let mut queue: Vec<String> =
-            in_degree.iter().filter(|(_, &count)| count == 0).map(|(name, _)| name.clone()).collect();
+        let mut queue: Vec<String> = in_degree
+            .iter()
+            .filter(|(_, &count)| count == 0)
+            .map(|(name, _)| name.clone())
+            .collect();
 
         let mut result = Vec::new();
 
@@ -429,8 +429,8 @@ mod tests {
         // let orchestrator =
         //     StackOrchestrator::new(Arc::new(create_test_state()), Arc::new(MockVmmAdapter));
 
-        let _services = [create_test_service("web", vec!["db".to_string()]),
-            create_test_service("db", vec![])];
+        let _services =
+            [create_test_service("web", vec!["db".to_string()]), create_test_service("db", vec![])];
 
         // let result = orchestrator.topological_sort(&services).unwrap();
         // assert_eq!(result, vec!["db".to_string(), "web".to_string()]);
@@ -442,10 +442,12 @@ mod tests {
         // let orchestrator =
         //     StackOrchestrator::new(Arc::new(create_test_state()), Arc::new(MockVmmAdapter));
 
-        let _services = [create_test_service("web", vec!["api".to_string(), "cache".to_string()]),
+        let _services = [
+            create_test_service("web", vec!["api".to_string(), "cache".to_string()]),
             create_test_service("api", vec!["db".to_string()]),
             create_test_service("cache", vec![]),
-            create_test_service("db", vec![])];
+            create_test_service("db", vec![]),
+        ];
 
         // let result = orchestrator.topological_sort(&services).unwrap();
 
@@ -468,9 +470,11 @@ mod tests {
         // let orchestrator =
         //     StackOrchestrator::new(Arc::new(create_test_state()), Arc::new(MockVmmAdapter));
 
-        let _services = [create_test_service("a", vec!["b".to_string()]),
+        let _services = [
+            create_test_service("a", vec!["b".to_string()]),
             create_test_service("b", vec!["c".to_string()]),
-            create_test_service("c", vec!["a".to_string()])];
+            create_test_service("c", vec!["a".to_string()]),
+        ];
 
         // let result = orchestrator.topological_sort(&services);
         // assert!(result.is_err());
@@ -507,9 +511,9 @@ mod tests {
     // Helper functions for tests - using async runtime for test setup
     #[allow(dead_code)]
     fn create_test_state() -> StateManager {
-        tokio::runtime::Runtime::new().unwrap().block_on(async {
-            StateManager::new(&":memory:".to_string()).await.unwrap()
-        })
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { StateManager::new(&":memory:".to_string()).await.unwrap() })
     }
 
     fn create_test_service(name: &str, depends_on: Vec<String>) -> ServiceConfig {

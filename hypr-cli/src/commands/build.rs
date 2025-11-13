@@ -4,10 +4,8 @@
 
 use anyhow::{Context, Result};
 use colored::Colorize;
-use hypr_core::builder::{
-    create_builder, BuildContext, BuildGraph, CacheManager,
-};
 use hypr_core::builder::parser::parse_dockerfile;
+use hypr_core::builder::{create_builder, BuildContext, BuildGraph, CacheManager};
 use hypr_core::state::StateManager;
 use hypr_core::types::Image;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -47,10 +45,7 @@ pub async fn build(
     }
 
     // Parse tag (use directory name if not provided)
-    let default_name = context_dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("image");
+    let default_name = context_dir.file_name().and_then(|n| n.to_str()).unwrap_or("image");
     let (image_name, image_tag) = parse_tag(tag, default_name)?;
 
     println!(
@@ -64,15 +59,12 @@ pub async fn build(
     let dockerfile_content = fs::read_to_string(&dockerfile_path)
         .with_context(|| format!("Failed to read Dockerfile: {}", dockerfile_path.display()))?;
 
-    let parsed_dockerfile = parse_dockerfile(&dockerfile_content)
-        .with_context(|| "Failed to parse Dockerfile")?;
+    let parsed_dockerfile =
+        parse_dockerfile(&dockerfile_content).with_context(|| "Failed to parse Dockerfile")?;
 
     let num_stages = parsed_dockerfile.stages.len();
-    let total_instructions: usize = parsed_dockerfile
-        .stages
-        .iter()
-        .map(|s| s.instructions.len())
-        .sum();
+    let total_instructions: usize =
+        parsed_dockerfile.stages.iter().map(|s| s.instructions.len()).sum();
 
     println!(
         "  {} stages, {} instructions",
@@ -85,14 +77,9 @@ pub async fn build(
     let graph = BuildGraph::from_dockerfile(&parsed_dockerfile)
         .with_context(|| "Failed to construct build graph")?;
 
-    let execution_order = graph
-        .topological_sort()
-        .with_context(|| "Failed to sort build graph")?;
+    let execution_order = graph.topological_sort().with_context(|| "Failed to sort build graph")?;
 
-    println!(
-        "  {} steps in execution order",
-        execution_order.len().to_string().yellow()
-    );
+    println!("  {} steps in execution order", execution_order.len().to_string().yellow());
 
     // Initialize cache
     println!("{} Initializing cache", "[3/4]".bold().blue());
@@ -142,10 +129,8 @@ pub async fn build(
     }
 
     // Execute the actual build
-    let output = builder
-        .execute(&graph, &context, &mut cache)
-        .await
-        .with_context(|| "Build failed")?;
+    let output =
+        builder.execute(&graph, &context, &mut cache).await.with_context(|| "Build failed")?;
 
     pb.finish_with_message("Build complete");
 
@@ -159,23 +144,14 @@ pub async fn build(
     println!("  Image ID:    {}", output.image_id.cyan());
     println!("  Name:        {}:{}", image_name.green(), image_tag.cyan());
     println!("  Rootfs:      {}", output.rootfs_path.display().to_string().yellow());
-    println!(
-        "  Layers:      {} ({} cached)",
-        output.stats.layer_count, output.stats.cached_layers
-    );
-    println!(
-        "  Total size:  {:.1} MB",
-        output.stats.total_size as f64 / 1024.0 / 1024.0
-    );
+    println!("  Layers:      {} ({} cached)", output.stats.layer_count, output.stats.cached_layers);
+    println!("  Total size:  {:.1} MB", output.stats.total_size as f64 / 1024.0 / 1024.0);
     println!("  Duration:    {}", duration_str.yellow());
 
     if output.stats.cached_layers > 0 {
         let cache_pct =
             (output.stats.cached_layers as f64 / output.stats.layer_count as f64) * 100.0;
-        println!(
-            "  Cache hit:   {:.0}%",
-            cache_pct
-        );
+        println!("  Cache hit:   {:.0}%", cache_pct);
     }
 
     println!();
@@ -197,12 +173,13 @@ pub async fn build(
     let permanent_rootfs = image_dir.join("rootfs.squashfs");
 
     // Move rootfs from temp location to permanent location
-    fs::rename(&output.rootfs_path, &permanent_rootfs)
-        .with_context(|| format!(
+    fs::rename(&output.rootfs_path, &permanent_rootfs).with_context(|| {
+        format!(
             "Failed to move rootfs from {} to {}",
             output.rootfs_path.display(),
             permanent_rootfs.display()
-        ))?;
+        )
+    })?;
 
     println!("  Moved rootfs to {}", permanent_rootfs.display().to_string().yellow());
 
@@ -213,8 +190,8 @@ pub async fn build(
         .with_context(|| "Failed to connect to state database")?;
 
     // Convert builder manifest to types manifest
+    use hypr_core::types::image::{RestartPolicy, RuntimeConfig};
     use hypr_core::types::ImageManifest;
-    use hypr_core::types::image::{RuntimeConfig, RestartPolicy};
     let manifest = ImageManifest {
         version: "1".to_string(),
         name: output.manifest.name.clone(),
@@ -225,7 +202,10 @@ pub async fn build(
         cmd: output.manifest.config.cmd.unwrap_or_default(),
         env: output.manifest.config.env.clone(),
         workdir: output.manifest.config.workdir.unwrap_or_else(|| "/".to_string()),
-        exposed_ports: output.manifest.config.exposed_ports
+        exposed_ports: output
+            .manifest
+            .config
+            .exposed_ports
             .iter()
             .filter_map(|p| p.parse::<u16>().ok())
             .collect(),
@@ -249,9 +229,7 @@ pub async fn build(
         created_at: SystemTime::now(),
     };
 
-    state.insert_image(&image)
-        .await
-        .with_context(|| "Failed to register image in database")?;
+    state.insert_image(&image).await.with_context(|| "Failed to register image in database")?;
 
     println!("  Registered image: {}:{}", image_name.green(), image_tag.cyan());
     println!();

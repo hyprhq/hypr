@@ -1,4 +1,3 @@
-
 //! Images command implementation for HYPR CLI.
 //!
 //! Lists all images stored in the HYPR image registry.
@@ -16,10 +15,7 @@ pub async fn images() -> Result<()> {
         .await
         .with_context(|| "Failed to connect to state database")?;
 
-    let images = state
-        .list_images()
-        .await
-        .with_context(|| "Failed to list images")?;
+    let images = state.list_images().await.with_context(|| "Failed to list images")?;
 
     if images.is_empty() {
         println!("No images found.");
@@ -91,9 +87,7 @@ fn format_size(bytes: u64) -> String {
 fn format_created(created_at: std::time::SystemTime) -> String {
     use std::time::SystemTime;
 
-    let elapsed = SystemTime::now()
-        .duration_since(created_at)
-        .unwrap_or_default();
+    let elapsed = SystemTime::now().duration_since(created_at).unwrap_or_default();
 
     let secs = elapsed.as_secs();
     if secs < 60 {

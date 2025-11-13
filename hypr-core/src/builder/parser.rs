@@ -35,11 +35,7 @@ pub struct BuildStage {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ImageRef {
     /// Regular image (e.g., "alpine:3.19", "ubuntu")
-    Image {
-        name: String,
-        tag: Option<String>,
-        digest: Option<String>,
-    },
+    Image { name: String, tag: Option<String>, digest: Option<String> },
     /// Reference to another build stage
     Stage(String),
     /// Scratch (empty base)
@@ -50,16 +46,10 @@ pub enum ImageRef {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Instruction {
     /// FROM base_image [AS name]
-    From {
-        image: ImageRef,
-        stage_name: Option<String>,
-        platform: Option<String>,
-    },
+    From { image: ImageRef, stage_name: Option<String>, platform: Option<String> },
 
     /// RUN command
-    Run {
-        command: RunCommand,
-    },
+    Run { command: RunCommand },
 
     /// COPY [--from=stage] src... dest
     Copy {
@@ -70,72 +60,43 @@ pub enum Instruction {
     },
 
     /// ADD src... dest
-    Add {
-        sources: Vec<String>,
-        destination: String,
-        chown: Option<String>,
-    },
+    Add { sources: Vec<String>, destination: String, chown: Option<String> },
 
     /// ENV key=value or ENV key value
-    Env {
-        vars: HashMap<String, String>,
-    },
+    Env { vars: HashMap<String, String> },
 
     /// ARG name[=default]
-    Arg {
-        name: String,
-        default: Option<String>,
-    },
+    Arg { name: String, default: Option<String> },
 
     /// LABEL key=value
-    Label {
-        labels: HashMap<String, String>,
-    },
+    Label { labels: HashMap<String, String> },
 
     /// EXPOSE port[/protocol]
-    Expose {
-        ports: Vec<PortSpec>,
-    },
+    Expose { ports: Vec<PortSpec> },
 
     /// WORKDIR /path
-    Workdir {
-        path: String,
-    },
+    Workdir { path: String },
 
     /// USER user[:group]
-    User {
-        user: String,
-    },
+    User { user: String },
 
     /// VOLUME ["/data"]
-    Volume {
-        paths: Vec<String>,
-    },
+    Volume { paths: Vec<String> },
 
     /// ENTRYPOINT ["exec", "form"] or ENTRYPOINT command
-    Entrypoint {
-        command: RunCommand,
-    },
+    Entrypoint { command: RunCommand },
 
     /// CMD ["exec", "form"] or CMD command
-    Cmd {
-        command: RunCommand,
-    },
+    Cmd { command: RunCommand },
 
     /// HEALTHCHECK --options CMD command
-    Healthcheck {
-        config: HealthcheckConfig,
-    },
+    Healthcheck { config: HealthcheckConfig },
 
     /// STOPSIGNAL signal
-    Stopsignal {
-        signal: String,
-    },
+    Stopsignal { signal: String },
 
     /// SHELL ["executable", "parameters"]
-    Shell {
-        shell: Vec<String>,
-    },
+    Shell { shell: Vec<String> },
 }
 
 /// RUN/CMD/ENTRYPOINT command format.
@@ -241,12 +202,7 @@ impl DockerfileParser {
         // Preprocess: combine continuation lines, remove comments
         let lines = Self::preprocess(content);
 
-        Self {
-            lines,
-            pos: 0,
-            global_args: HashMap::new(),
-            current_args: HashMap::new(),
-        }
+        Self { lines, pos: 0, global_args: HashMap::new(), current_args: HashMap::new() }
     }
 
     /// Preprocess Dockerfile: handle line continuations and remove comments.
@@ -260,11 +216,7 @@ impl DockerfileParser {
             let line_num = line_num + 1; // 1-based line numbers
 
             // Remove comments (but not in strings - simplified for now)
-            let line = if let Some(pos) = line.find('#') {
-                &line[..pos]
-            } else {
-                line
-            };
+            let line = if let Some(pos) = line.find('#') { &line[..pos] } else { line };
 
             let trimmed = line.trim_end();
 
@@ -333,10 +285,7 @@ impl DockerfileParser {
             });
         }
 
-        Ok(Dockerfile {
-            stages,
-            global_args: self.global_args.clone(),
-        })
+        Ok(Dockerfile { stages, global_args: self.global_args.clone() })
     }
 
     fn parse_stage(&mut self) -> Result<BuildStage, ParseError> {
@@ -380,14 +329,14 @@ impl DockerfileParser {
             self.pos += 1;
         }
 
-        Ok(BuildStage {
-            name: stage_name,
-            from: from_image,
-            instructions,
-        })
+        Ok(BuildStage { name: stage_name, from: from_image, instructions })
     }
 
-    fn parse_instruction(&mut self, line_num: usize, line: &str) -> Result<Instruction, ParseError> {
+    fn parse_instruction(
+        &mut self,
+        line_num: usize,
+        line: &str,
+    ) -> Result<Instruction, ParseError> {
         let instruction = Self::extract_instruction(line);
         let args = Self::extract_args(line);
 
@@ -442,24 +391,21 @@ impl DockerfileParser {
         let image = self.parse_image_ref(image_ref);
 
         // Check for AS name
-        let stage_name = if image_start + 1 < args.len() && args[image_start + 1].eq_ignore_ascii_case("AS") {
-            if image_start + 2 >= args.len() {
-                return Err(ParseError {
-                    line: line_num,
-                    message: "FROM ... AS requires a stage name".into(),
-                    hint: None,
-                });
-            }
-            Some(args[image_start + 2].clone())
-        } else {
-            None
-        };
+        let stage_name =
+            if image_start + 1 < args.len() && args[image_start + 1].eq_ignore_ascii_case("AS") {
+                if image_start + 2 >= args.len() {
+                    return Err(ParseError {
+                        line: line_num,
+                        message: "FROM ... AS requires a stage name".into(),
+                        hint: None,
+                    });
+                }
+                Some(args[image_start + 2].clone())
+            } else {
+                None
+            };
 
-        Ok(Instruction::From {
-            image,
-            stage_name,
-            platform,
-        })
+        Ok(Instruction::From { image, stage_name, platform })
     }
 
     fn parse_image_ref(&self, s: &str) -> ImageRef {
@@ -475,22 +421,18 @@ impl DockerfileParser {
 
         // Parse image:tag@digest format
         let (name_tag, digest) = if let Some(idx) = s.find('@') {
-            (&s[..idx], Some(s[idx+1..].to_string()))
+            (&s[..idx], Some(s[idx + 1..].to_string()))
         } else {
             (s, None)
         };
 
         let (name, tag) = if let Some(idx) = name_tag.rfind(':') {
-            (&name_tag[..idx], Some(name_tag[idx+1..].to_string()))
+            (&name_tag[..idx], Some(name_tag[idx + 1..].to_string()))
         } else {
             (name_tag, None)
         };
 
-        ImageRef::Image {
-            name: name.to_string(),
-            tag,
-            digest,
-        }
+        ImageRef::Image { name: name.to_string(), tag, digest }
     }
 
     fn parse_run(&self, line_num: usize, args: &[String]) -> Result<Instruction, ParseError> {
@@ -552,12 +494,7 @@ impl DockerfileParser {
         let sources = remaining_args[..remaining_args.len() - 1].to_vec();
         let destination = remaining_args.last().unwrap().clone();
 
-        Ok(Instruction::Copy {
-            from_stage,
-            sources,
-            destination,
-            chown,
-        })
+        Ok(Instruction::Copy { from_stage, sources, destination, chown })
     }
 
     fn parse_add(&self, line_num: usize, args: &[String]) -> Result<Instruction, ParseError> {
@@ -582,11 +519,7 @@ impl DockerfileParser {
         let sources = remaining_args[..remaining_args.len() - 1].to_vec();
         let destination = remaining_args.last().unwrap().clone();
 
-        Ok(Instruction::Add {
-            sources,
-            destination,
-            chown,
-        })
+        Ok(Instruction::Add { sources, destination, chown })
     }
 
     fn parse_env(&self, line_num: usize, args: &[String]) -> Result<Instruction, ParseError> {
@@ -607,7 +540,7 @@ impl DockerfileParser {
             for arg in args {
                 if let Some(idx) = arg.find('=') {
                     let key = arg[..idx].to_string();
-                    let value = arg[idx+1..].to_string();
+                    let value = arg[idx + 1..].to_string();
                     vars.insert(key, value);
                 }
             }
@@ -637,7 +570,7 @@ impl DockerfileParser {
 
         let (name, default) = if let Some(idx) = args[0].find('=') {
             let name = args[0][..idx].to_string();
-            let default = Some(args[0][idx+1..].to_string());
+            let default = Some(args[0][idx + 1..].to_string());
             (name, default)
         } else {
             (args[0].clone(), None)
@@ -668,7 +601,7 @@ impl DockerfileParser {
         for arg in args {
             if let Some(idx) = arg.find('=') {
                 let key = arg[..idx].to_string();
-                let value = arg[idx+1..].trim_matches('"').to_string();
+                let value = arg[idx + 1..].trim_matches('"').to_string();
                 labels.insert(key, value);
             }
         }
@@ -696,11 +629,13 @@ impl DockerfileParser {
             let protocol = match protocol.to_lowercase().as_str() {
                 "tcp" => Protocol::Tcp,
                 "udp" => Protocol::Udp,
-                _ => return Err(ParseError {
-                    line: line_num,
-                    message: format!("Unknown protocol: {}", protocol),
-                    hint: Some("Protocol must be 'tcp' or 'udp'".into()),
-                }),
+                _ => {
+                    return Err(ParseError {
+                        line: line_num,
+                        message: format!("Unknown protocol: {}", protocol),
+                        hint: Some("Protocol must be 'tcp' or 'udp'".into()),
+                    })
+                }
             };
 
             ports.push(PortSpec { port, protocol });
@@ -710,15 +645,11 @@ impl DockerfileParser {
     }
 
     fn parse_workdir(&self, _line_num: usize, args: &[String]) -> Result<Instruction, ParseError> {
-        Ok(Instruction::Workdir {
-            path: args.join(" "),
-        })
+        Ok(Instruction::Workdir { path: args.join(" ") })
     }
 
     fn parse_user(&self, _line_num: usize, args: &[String]) -> Result<Instruction, ParseError> {
-        Ok(Instruction::User {
-            user: args.join(" "),
-        })
+        Ok(Instruction::User { user: args.join(" ") })
     }
 
     fn parse_volume(&self, line_num: usize, args: &[String]) -> Result<Instruction, ParseError> {
@@ -737,7 +668,11 @@ impl DockerfileParser {
         Ok(Instruction::Volume { paths })
     }
 
-    fn parse_entrypoint(&self, _line_num: usize, args: &[String]) -> Result<Instruction, ParseError> {
+    fn parse_entrypoint(
+        &self,
+        _line_num: usize,
+        args: &[String],
+    ) -> Result<Instruction, ParseError> {
         let command = self.parse_run_command(args);
         Ok(Instruction::Entrypoint { command })
     }
@@ -747,7 +682,11 @@ impl DockerfileParser {
         Ok(Instruction::Cmd { command })
     }
 
-    fn parse_healthcheck(&self, line_num: usize, args: &[String]) -> Result<Instruction, ParseError> {
+    fn parse_healthcheck(
+        &self,
+        line_num: usize,
+        args: &[String],
+    ) -> Result<Instruction, ParseError> {
         // HEALTHCHECK [OPTIONS] CMD command
         // Options: --interval=30s --timeout=3s --start-period=0s --retries=3
 
@@ -785,20 +724,16 @@ impl DockerfileParser {
         let command = self.parse_run_command(cmd_args);
 
         Ok(Instruction::Healthcheck {
-            config: HealthcheckConfig {
-                command,
-                interval,
-                timeout,
-                start_period,
-                retries,
-            },
+            config: HealthcheckConfig { command, interval, timeout, start_period, retries },
         })
     }
 
-    fn parse_stopsignal(&self, _line_num: usize, args: &[String]) -> Result<Instruction, ParseError> {
-        Ok(Instruction::Stopsignal {
-            signal: args.join(" "),
-        })
+    fn parse_stopsignal(
+        &self,
+        _line_num: usize,
+        args: &[String],
+    ) -> Result<Instruction, ParseError> {
+        Ok(Instruction::Stopsignal { signal: args.join(" ") })
     }
 
     fn parse_shell(&self, line_num: usize, args: &[String]) -> Result<Instruction, ParseError> {
@@ -814,10 +749,7 @@ impl DockerfileParser {
     }
 
     fn extract_instruction(line: &str) -> String {
-        line.split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_uppercase()
+        line.split_whitespace().next().unwrap_or("").to_uppercase()
     }
 
     fn extract_args(line: &str) -> Vec<String> {
@@ -909,7 +841,9 @@ CMD ["nginx", "-g", "daemon off;"]
 
         let stage = &parsed.stages[0];
         assert_eq!(stage.name, None);
-        assert!(matches!(&stage.from, ImageRef::Image { name, tag, .. } if name == "alpine" && tag.as_deref() == Some("3.19")));
+        assert!(
+            matches!(&stage.from, ImageRef::Image { name, tag, .. } if name == "alpine" && tag.as_deref() == Some("3.19"))
+        );
 
         // Should have FROM + RUN + CMD = 3 instructions
         assert_eq!(stage.instructions.len(), 3);

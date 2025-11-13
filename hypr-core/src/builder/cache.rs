@@ -93,10 +93,7 @@ impl CacheManager {
             ))
         })?;
 
-        Ok(Self {
-            cache_dir,
-            size_limit,
-        })
+        Ok(Self { cache_dir, size_limit })
     }
 
     /// Looks up a layer by cache key.
@@ -121,10 +118,7 @@ impl CacheManager {
 
         info!("Cache hit for key: {} ({})", cache_key, metadata.step_description);
 
-        Ok(CacheLookupResult::Hit {
-            layer_path,
-            metadata,
-        })
+        Ok(CacheLookupResult::Hit { layer_path, metadata })
     }
 
     /// Inserts a new layer into the cache.
@@ -167,10 +161,7 @@ impl CacheManager {
         // Save metadata
         self.save_metadata(&metadata)?;
 
-        info!(
-            "Cached layer {} ({} bytes): {}",
-            cache_key, size_bytes, metadata.step_description
-        );
+        info!("Cached layer {} ({} bytes): {}", cache_key, size_bytes, metadata.step_description);
 
         // Check if we need to evict old layers
         self.evict_if_needed()?;
@@ -253,10 +244,8 @@ impl CacheManager {
 
             // Only process .json metadata files
             if path.is_file() && path.extension().map(|e| e == "json").unwrap_or(false) {
-                if let Some(cache_key) = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .and_then(|s| s.strip_prefix("layer-"))
+                if let Some(cache_key) =
+                    path.file_stem().and_then(|s| s.to_str()).and_then(|s| s.strip_prefix("layer-"))
                 {
                     if let Ok(metadata) = self.load_metadata(cache_key) {
                         layers.push(metadata);
@@ -407,9 +396,7 @@ mod tests {
         let layer_data = b"fake layer data";
 
         // Insert layer
-        manager
-            .insert(cache_key, layer_data, "test layer".into(), 0)
-            .unwrap();
+        manager.insert(cache_key, layer_data, "test layer".into(), 0).unwrap();
 
         // Lookup should hit
         let result = manager.lookup(cache_key).unwrap();
@@ -434,24 +421,16 @@ mod tests {
         let cache_key = "abc789def012";
         let layer_data = b"some data";
 
-        manager
-            .insert(cache_key, layer_data, "test".into(), 0)
-            .unwrap();
+        manager.insert(cache_key, layer_data, "test".into(), 0).unwrap();
 
         // Should hit
-        assert!(matches!(
-            manager.lookup(cache_key).unwrap(),
-            CacheLookupResult::Hit { .. }
-        ));
+        assert!(matches!(manager.lookup(cache_key).unwrap(), CacheLookupResult::Hit { .. }));
 
         // Remove
         manager.remove(cache_key).unwrap();
 
         // Should miss
-        assert!(matches!(
-            manager.lookup(cache_key).unwrap(),
-            CacheLookupResult::Miss
-        ));
+        assert!(matches!(manager.lookup(cache_key).unwrap(), CacheLookupResult::Miss));
 
         // Cleanup
         let _ = fs::remove_dir_all(cache_dir);
@@ -519,20 +498,11 @@ mod tests {
         assert!(total <= size_limit, "Total size {} exceeds limit {}", total, size_limit);
 
         // aaa111 (oldest) should have been evicted
-        assert!(matches!(
-            manager.lookup("aaa111").unwrap(),
-            CacheLookupResult::Miss
-        ));
+        assert!(matches!(manager.lookup("aaa111").unwrap(), CacheLookupResult::Miss));
 
         // bbb222 and ccc333 should still exist
-        assert!(matches!(
-            manager.lookup("bbb222").unwrap(),
-            CacheLookupResult::Hit { .. }
-        ));
-        assert!(matches!(
-            manager.lookup("ccc333").unwrap(),
-            CacheLookupResult::Hit { .. }
-        ));
+        assert!(matches!(manager.lookup("bbb222").unwrap(), CacheLookupResult::Hit { .. }));
+        assert!(matches!(manager.lookup("ccc333").unwrap(), CacheLookupResult::Hit { .. }));
 
         // Cleanup
         let _ = fs::remove_dir_all(cache_dir);
@@ -554,12 +524,7 @@ mod tests {
 
         // Total size should be <= 5KB (eviction should have happened)
         let total = manager.total_size().unwrap();
-        assert!(
-            total <= size_limit,
-            "Cache size {} exceeds limit {}",
-            total,
-            size_limit
-        );
+        assert!(total <= size_limit, "Cache size {} exceeds limit {}", total, size_limit);
 
         // Should have ~5 layers remaining (5KB / 1KB per layer)
         let count = manager.layer_count().unwrap();

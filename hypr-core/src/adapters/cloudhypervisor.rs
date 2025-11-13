@@ -9,8 +9,8 @@
 
 use crate::adapters::{AdapterCapabilities, VmmAdapter};
 use crate::error::{HyprError, Result};
-use crate::types::vm::{DiskConfig, GpuConfig, VmConfig, VmHandle};
 use crate::types::network::NetworkConfig;
+use crate::types::vm::{DiskConfig, GpuConfig, VmConfig, VmHandle};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -75,16 +75,18 @@ impl CloudHypervisorAdapter {
             }
         }
 
-        Err(HyprError::HypervisorNotFound {
-            hypervisor: name.to_string(),
-        })
+        Err(HyprError::HypervisorNotFound { hypervisor: name.to_string() })
     }
 
     /// Start virtiofsd daemons for virtio-fs mounts.
     ///
     /// Each mount gets its own virtiofsd daemon listening on a Unix socket.
     #[instrument(skip(self))]
-    async fn start_virtiofsd_daemons(&self, vm_id: &str, mounts: &[crate::types::vm::VirtioFsMount]) -> Result<Vec<VirtiofsdDaemon>> {
+    async fn start_virtiofsd_daemons(
+        &self,
+        vm_id: &str,
+        mounts: &[crate::types::vm::VirtioFsMount],
+    ) -> Result<Vec<VirtiofsdDaemon>> {
         let mut daemons = Vec::new();
 
         for mount in mounts {
@@ -139,11 +141,7 @@ impl CloudHypervisorAdapter {
             // Detach child process (it will continue running)
             std::mem::forget(child);
 
-            daemons.push(VirtiofsdDaemon {
-                tag: mount.tag.clone(),
-                socket_path,
-                pid,
-            });
+            daemons.push(VirtiofsdDaemon { tag: mount.tag.clone(), socket_path, pid });
         }
 
         Ok(daemons)
@@ -162,11 +160,8 @@ impl CloudHypervisorAdapter {
                 debug!("Stopping virtiofsd: tag={}, pid={}", daemon.tag, daemon.pid);
 
                 // Send SIGTERM to virtiofsd process
-                let kill_result = Command::new("kill")
-                    .arg("-TERM")
-                    .arg(daemon.pid.to_string())
-                    .status()
-                    .await;
+                let kill_result =
+                    Command::new("kill").arg("-TERM").arg(daemon.pid.to_string()).status().await;
 
                 if let Err(e) = kill_result {
                     warn!("Failed to kill virtiofsd daemon (pid={}): {}", daemon.pid, e);
@@ -184,7 +179,11 @@ impl CloudHypervisorAdapter {
 
     /// Build cloud-hypervisor command-line arguments.
     #[instrument(skip(self))]
-    fn build_args(&self, config: &VmConfig, virtiofsd_daemons: &[VirtiofsdDaemon]) -> Result<Vec<String>> {
+    fn build_args(
+        &self,
+        config: &VmConfig,
+        virtiofsd_daemons: &[VirtiofsdDaemon],
+    ) -> Result<Vec<String>> {
         let mut args = Vec::new();
 
         // API socket
@@ -302,7 +301,8 @@ impl VmmAdapter for CloudHypervisorAdapter {
         // Start virtiofsd daemons BEFORE spawning cloud-hypervisor
         let virtiofsd_daemons = if !config.virtio_fs_mounts.is_empty() {
             info!("Starting {} virtiofsd daemons", config.virtio_fs_mounts.len());
-            let daemons = self.start_virtiofsd_daemons(&config.id, &config.virtio_fs_mounts).await?;
+            let daemons =
+                self.start_virtiofsd_daemons(&config.id, &config.virtio_fs_mounts).await?;
 
             // Store daemons for cleanup
             {
@@ -351,27 +351,19 @@ impl VmmAdapter for CloudHypervisorAdapter {
 
         // Wait for API socket
         let api_socket = self.api_socket_path(&config.id);
-        self.wait_for_api_socket(&api_socket, Duration::from_secs(5))
-            .await?;
+        self.wait_for_api_socket(&api_socket, Duration::from_secs(5)).await?;
 
         // Record metrics
-        let histogram = metrics::histogram!("hypr_vm_boot_duration_seconds", "adapter" => "cloudhypervisor");
+        let histogram =
+            metrics::histogram!("hypr_vm_boot_duration_seconds", "adapter" => "cloudhypervisor");
         histogram.record(start.elapsed().as_secs_f64());
 
         let counter = metrics::counter!("hypr_vm_created_total", "adapter" => "cloudhypervisor");
         counter.increment(1);
 
-        info!(
-            pid = pid,
-            duration_ms = start.elapsed().as_millis(),
-            "VM created successfully"
-        );
+        info!(pid = pid, duration_ms = start.elapsed().as_millis(), "VM created successfully");
 
-        Ok(VmHandle {
-            id: config.id.clone(),
-            pid: Some(pid),
-            socket_path: Some(api_socket),
-        })
+        Ok(VmHandle { id: config.id.clone(), pid: Some(pid), socket_path: Some(api_socket) })
     }
 
     #[instrument(skip(self), fields(vm_id = %handle.id))]
@@ -407,11 +399,7 @@ impl VmmAdapter for CloudHypervisorAdapter {
 
         if let Some(pid) = handle.pid {
             // Send SIGKILL
-            let result = Command::new("kill")
-                .arg("-9")
-                .arg(pid.to_string())
-                .output()
-                .await;
+            let result = Command::new("kill").arg("-9").arg(pid.to_string()).output().await;
 
             match result {
                 Ok(output) if output.status.success() => {

@@ -51,11 +51,7 @@ impl BuilderHttpProxy {
                 reason: format!("Failed to create HTTP client: {}", e),
             })?;
 
-        Ok(Self {
-            client,
-            port,
-            allowed_domains,
-        })
+        Ok(Self { client, port, allowed_domains })
     }
 
     /// Create proxy with default configuration (allow all domains).
@@ -69,11 +65,9 @@ impl BuilderHttpProxy {
     #[instrument(skip(self))]
     pub async fn run(self) -> Result<()> {
         let addr = format!("127.0.0.1:{}", self.port);
-        let listener = TcpListener::bind(&addr)
-            .await
-            .map_err(|e| HyprError::InvalidConfig {
-                reason: format!("Failed to bind proxy to {}: {}", addr, e),
-            })?;
+        let listener = TcpListener::bind(&addr).await.map_err(|e| HyprError::InvalidConfig {
+            reason: format!("Failed to bind proxy to {}: {}", addr, e),
+        })?;
 
         info!("Builder HTTP proxy listening on {}", addr);
         metrics::gauge!("hypr_build_proxy_active").set(1.0);
@@ -87,7 +81,9 @@ impl BuilderHttpProxy {
                     let allowed_domains = self.allowed_domains.clone();
 
                     tokio::spawn(async move {
-                        if let Err(e) = Self::handle_connection(stream, client, allowed_domains).await {
+                        if let Err(e) =
+                            Self::handle_connection(stream, client, allowed_domains).await
+                        {
                             debug!("Proxy connection error: {}", e);
                         }
                     });
@@ -113,7 +109,7 @@ impl BuilderHttpProxy {
             reason: format!("Failed to read request line: {}", e),
         })?;
 
-        let parts: Vec<&str> = request_line.trim().split_whitespace().collect();
+        let parts: Vec<&str> = request_line.split_whitespace().collect();
         if parts.len() < 2 {
             return Err(HyprError::InvalidConfig {
                 reason: "Invalid HTTP request line".to_string(),
@@ -149,15 +145,17 @@ impl BuilderHttpProxy {
                 Self::handle_http(stream, &method, &url, client).await?;
             }
             _ => {
-                let response = format!("HTTP/1.1 405 Method Not Allowed\r\n\r\nMethod {} not supported\n", method);
+                let response = format!(
+                    "HTTP/1.1 405 Method Not Allowed\r\n\r\nMethod {} not supported\n",
+                    method
+                );
                 stream.write_all(response.as_bytes()).await.ok();
                 return Ok(());
             }
         }
 
         let duration = start.elapsed();
-        metrics::histogram!("hypr_build_proxy_duration_seconds")
-            .record(duration.as_secs_f64());
+        metrics::histogram!("hypr_build_proxy_duration_seconds").record(duration.as_secs_f64());
 
         Ok(())
     }
@@ -170,19 +168,16 @@ impl BuilderHttpProxy {
         debug!("CONNECT tunnel to {}", target);
 
         // Connect to target
-        let mut target_stream = TcpStream::connect(target)
-            .await
-            .map_err(|e| HyprError::InvalidConfig {
-                reason: format!("Failed to connect to {}: {}", target, e),
-            })?;
+        let mut target_stream = TcpStream::connect(target).await.map_err(|e| {
+            HyprError::InvalidConfig { reason: format!("Failed to connect to {}: {}", target, e) }
+        })?;
 
         // Send 200 Connection Established
-        client_stream
-            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-            .await
-            .map_err(|e| HyprError::InvalidConfig {
+        client_stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await.map_err(
+            |e| HyprError::InvalidConfig {
                 reason: format!("Failed to send CONNECT response: {}", e),
-            })?;
+            },
+        )?;
 
         // Bidirectional copy (tunnel)
         let (mut client_read, mut client_write) = client_stream.split();
@@ -235,11 +230,7 @@ impl BuilderHttpProxy {
 
         // Write headers
         for (name, value) in response.headers() {
-            let header = format!(
-                "{}: {}\r\n",
-                name.as_str(),
-                value.to_str().unwrap_or("")
-            );
+            let header = format!("{}: {}\r\n", name.as_str(), value.to_str().unwrap_or(""));
             stream.write_all(header.as_bytes()).await.map_err(|e| HyprError::InvalidConfig {
                 reason: format!("Failed to write header: {}", e),
             })?;
