@@ -129,9 +129,10 @@ impl HvfAdapter {
         }
 
         // Vsock - expose port 41011 for builder agent
+        // Note: vfkit requires 'listen' for host to accept connections from guest
         args.push("--device".to_string());
         args.push(format!(
-            "virtio-vsock,port=41011,socketURL=unix://{}",
+            "virtio-vsock,port=41011,socketURL={},listen",
             config.vsock_path.display()
         ));
 

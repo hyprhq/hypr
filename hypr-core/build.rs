@@ -10,12 +10,6 @@ use std::process::Command;
 fn main() {
     // Only compile on Linux (kestrel.c uses Linux-specific headers)
     // On macOS, kestrel.c will be cross-compiled or distributed separately
-    if !cfg!(target_os = "linux") {
-        println!("cargo:warning=Skipping kestrel.c compilation on non-Linux platform");
-        println!("cargo:warning=kestrel.c requires Linux headers (linux/vm_sockets.h)");
-        println!("cargo:warning=On macOS, kestrel will run inside Linux VMs");
-        return;
-    }
 
     println!("cargo:rerun-if-changed=../guest/kestrel.c");
 
@@ -40,8 +34,11 @@ fn main() {
     //   -Os: Optimize for size
     //   -s: Strip symbols (reduce binary size)
     //   -o: Output file
-    let status = Command::new("cc")
+    let status = Command::new("zig")
         .args([
+            "cc",
+            "-target",
+            "aarch64-linux-musl",
             "-static",
             "-Os",
             "-s",

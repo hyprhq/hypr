@@ -67,6 +67,10 @@
 #define VMADDR_CID_ANY (~0U)
 #endif
 
+#ifndef VMADDR_CID_HOST
+#define VMADDR_CID_HOST 2
+#endif
+
 struct sockaddr_vm {
     sa_family_t svm_family;   // AF_VSOCK
     unsigned short svm_reserved1;
@@ -650,7 +654,8 @@ static void run_build_mode(void) {
     // Give proxy a moment to start listening
     usleep(100000); // 100ms
 
-    // Start vsock server for build commands
+    // Connect to host via vsock (guest connects, host listens)
+    // This is the correct model for cloud-hypervisor and vfkit vsock
     int sock = socket(AF_VSOCK, SOCK_STREAM, 0);
     if (sock < 0) {
         FATAL("socket(AF_VSOCK) failed: %s", strerror(errno));
@@ -659,32 +664,30 @@ static void run_build_mode(void) {
     struct sockaddr_vm addr = {
         .svm_family = AF_VSOCK,
         .svm_port = VSOCK_PORT_BUILD_AGENT,
-        .svm_cid = VMADDR_CID_ANY,
+        .svm_cid = VMADDR_CID_HOST,  // Connect to host (CID 2)
     };
 
-    if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        FATAL("bind(vsock:%d) failed: %s", VSOCK_PORT_BUILD_AGENT, strerror(errno));
-    }
+    LOG("Connecting to host via vsock port %d", VSOCK_PORT_BUILD_AGENT);
 
-    if (listen(sock, 5) < 0) {
-        FATAL("listen failed: %s", strerror(errno));
-    }
-
-    LOG("Listening on vsock port %d", VSOCK_PORT_BUILD_AGENT);
-
-    // Accept loop (blocks forever)
-    for (;;) {
-        struct sockaddr_vm client_addr;
-        socklen_t client_len = sizeof(client_addr);
-
-        int conn = accept(sock, (struct sockaddr*)&client_addr, &client_len);
-        if (conn < 0) {
-            LOG("accept failed: %s", strerror(errno));
-            continue;
+    // Retry connection (host might not be listening yet)
+    int connected = 0;
+    for (int retry = 0; retry < 30; retry++) {
+        if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+            connected = 1;
+            break;
         }
+        usleep(100000); // 100ms
+    }
 
-        handle_build_command(conn);
-        close(conn);
+    if (!connected) {
+        FATAL("connect(vsock:%d) failed after retries: %s", VSOCK_PORT_BUILD_AGENT, strerror(errno));
+    }
+
+    LOG("Connected to host builder on vsock port %d", VSOCK_PORT_BUILD_AGENT);
+
+    // Command loop (persistent connection)
+    for (;;) {
+        handle_build_command(sock);
     }
 }
 

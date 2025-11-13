@@ -255,9 +255,9 @@ impl CloudHypervisorAdapter {
             ));
         }
 
-        // Vsock
+        // Vsock (guest CID must be > 16 to avoid conflicts with host CID)
         args.push("--vsock".to_string());
-        args.push(format!("cid=3,socket={}", config.vsock_path.display()));
+        args.push(format!("cid=42,socket={}", config.vsock_path.display()));
 
         debug!("Built CH args: {:?}", args);
         Ok(args)
