@@ -373,7 +373,12 @@ impl VmmAdapter for CloudHypervisorAdapter {
 
         info!(pid = pid, duration_ms = start.elapsed().as_millis(), "VM created successfully");
 
-        Ok(VmHandle { id: config.id.clone(), pid: Some(pid), socket_path: Some(api_socket) })
+        // Store the vsock socket path (for guest communication), not the API socket
+        Ok(VmHandle {
+            id: config.id.clone(),
+            pid: Some(pid),
+            socket_path: Some(config.vsock_path.clone()),
+        })
     }
 
     #[instrument(skip(self), fields(vm_id = %handle.id))]
@@ -480,7 +485,12 @@ impl VmmAdapter for CloudHypervisorAdapter {
     }
 
     fn vsock_path(&self, handle: &VmHandle) -> PathBuf {
-        PathBuf::from(format!("/run/hypr/vm-{}.vsock", handle.id))
+        // Vsock path is stored in the VmHandle during creation from the config
+        // For cloud-hypervisor, this is the socket path we passed via --vsock
+        handle.socket_path.clone().unwrap_or_else(|| {
+            // Fallback if not set (shouldn't happen)
+            PathBuf::from(format!("/tmp/hypr-{}.sock", handle.id))
+        })
     }
 
     fn capabilities(&self) -> AdapterCapabilities {

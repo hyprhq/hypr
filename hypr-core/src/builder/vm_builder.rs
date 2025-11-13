@@ -266,8 +266,19 @@ impl VmBuilder {
     async fn ping_builder_agent(&self, handle: &VmHandle) -> Result<()> {
         let vsock_path = self.adapter.vsock_path(handle);
 
-        let mut stream = UnixStream::connect(vsock_path).await.map_err(|e| {
-            HyprError::BuildFailed { reason: format!("Failed to connect to builder agent: {}", e) }
+        debug!("Attempting to connect to builder agent at: {}", vsock_path.display());
+
+        // Check if socket exists
+        if !vsock_path.exists() {
+            return Err(HyprError::BuildFailed {
+                reason: format!("Vsock socket does not exist: {}", vsock_path.display()),
+            });
+        }
+
+        let mut stream = UnixStream::connect(&vsock_path).await.map_err(|e| {
+            HyprError::BuildFailed {
+                reason: format!("Failed to connect to builder agent at {}: {}", vsock_path.display(), e),
+            }
         })?;
 
         // Send Ping command

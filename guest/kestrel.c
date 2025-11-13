@@ -111,6 +111,12 @@ static void mount_essentials_build(void) {
     // Build mode: Mount build-specific filesystems
     // Essential filesystems (/proc, /sys, /dev, /run) already mounted in main()
 
+    // Bring up loopback interface FIRST (needed for HTTP proxy)
+    if (system("ip link set lo up") != 0) {
+        FATAL("Failed to bring up loopback interface");
+    }
+    LOG("Loopback interface configured");
+
     // Create directories
     mkdir("/tmp", 0777);
     mkdir("/workspace", 0755);
@@ -127,6 +133,17 @@ static void mount_essentials_build(void) {
     // Mount tmpfs workspace (where builds happen)
     if (mount("tmpfs", "/workspace", "tmpfs", 0, "size=4G") && errno != EBUSY) {
         LOG("Warning: mount /workspace failed: %s", strerror(errno));
+    }
+
+    // Wait for virtio-fs devices to be ready (kernel driver may still be initializing)
+    LOG("Waiting for virtio-fs devices...");
+    for (int i = 0; i < 30; i++) {
+        if (access("/sys/fs/virtiofs/context", F_OK) == 0 ||
+            access("/sys/fs/virtiofs/shared", F_OK) == 0) {
+            LOG("virtio-fs devices detected");
+            break;
+        }
+        usleep(100000); // 100ms
     }
 
     // Mount virtio-fs mounts (tags configured by host)
