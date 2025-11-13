@@ -229,13 +229,20 @@ impl CloudHypervisorAdapter {
         }
 
         // virtio-fs mounts (using pre-started virtiofsd daemons)
-        for daemon in virtiofsd_daemons {
+        // Cloud-hypervisor requires a single --fs argument with multiple devices separated by space
+        if !virtiofsd_daemons.is_empty() {
             args.push("--fs".to_string());
-            args.push(format!(
-                "tag={},socket={},num_queues=1",
-                daemon.tag,
-                daemon.socket_path.display()
-            ));
+            let fs_configs: Vec<String> = virtiofsd_daemons
+                .iter()
+                .map(|daemon| {
+                    format!(
+                        "tag={},socket={},num_queues=1",
+                        daemon.tag,
+                        daemon.socket_path.display()
+                    )
+                })
+                .collect();
+            args.push(fs_configs.join(" "));
         }
 
         // Network (simplified - will be enhanced in Phase 2)

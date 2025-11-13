@@ -122,9 +122,9 @@ impl HvfAdapter {
             config.network.mac_address.as_ref().map(|m| format!(",mac={}", m)).unwrap_or_default();
         args.push(format!("virtio-net,nat{}", mac));
 
-        // Vsock
+        // Vsock - expose port 41011 for builder agent
         args.push("--device".to_string());
-        args.push(format!("virtio-vsock,socketURL=unix://{}", config.vsock_path.display()));
+        args.push(format!("virtio-vsock,port=41011,socketURL=unix://{}", config.vsock_path.display()));
 
         debug!("Built vfkit args: {:?}", args);
         Ok(args)
