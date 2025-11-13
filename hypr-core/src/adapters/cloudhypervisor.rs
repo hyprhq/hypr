@@ -196,9 +196,9 @@ impl CloudHypervisorAdapter {
         args.push("--cpus".to_string());
         args.push(format!("boot={}", config.resources.cpus));
 
-        // Memory
+        // Memory (shared=on required for virtio-fs vhost-user)
         args.push("--memory".to_string());
-        args.push(format!("size={}M", config.resources.memory_mb));
+        args.push(format!("size={}M,shared=on", config.resources.memory_mb));
 
         // Kernel
         let kernel = config.kernel_path.as_ref().unwrap_or(&self.kernel_path);
