@@ -1409,16 +1409,41 @@ impl MacOsVmBuilder {
 
         let kernel_path = hypr_dir.join("kernel").join("vmlinuz");
 
-        // TODO: Download/bundle default kernel if not present
-        // For now, require manual kernel setup
+        // Download kernel if not present
         if !kernel_path.exists() {
-            return Err(BuildError::ContextError(format!(
-                "Kernel not found at: {}\n\
-                 Please download a Linux kernel and place at:\n\
-                 mkdir -p ~/.hypr/kernel\n\
-                 curl -L https://... -o ~/.hypr/kernel/vmlinuz",
-                kernel_path.display()
-            )));
+            info!("Kernel not found, downloading...");
+            let kernel_dir = hypr_dir.join("kernel");
+            std::fs::create_dir_all(&kernel_dir)
+                .map_err(|e| BuildError::IoError { path: kernel_dir.clone(), source: e })?;
+
+            // Detect architecture
+            let arch = std::env::consts::ARCH;
+            let kernel_url = match arch {
+                "x86_64" => "https://github.com/cloud-hypervisor/linux/releases/latest/download/vmlinux-x86_64",
+                "aarch64" | "arm64" => "https://github.com/cloud-hypervisor/linux/releases/latest/download/Image-arm64",
+                _ => return Err(BuildError::ContextError(format!("Unsupported architecture: {}", arch)))
+            };
+
+            info!("Downloading kernel from: {}", kernel_url);
+            let response = reqwest::blocking::get(kernel_url).map_err(|e| {
+                BuildError::ContextError(format!("Failed to download kernel: {}", e))
+            })?;
+
+            if !response.status().is_success() {
+                return Err(BuildError::ContextError(format!(
+                    "Failed to download kernel: HTTP {}",
+                    response.status()
+                )));
+            }
+
+            let kernel_bytes = response
+                .bytes()
+                .map_err(|e| BuildError::ContextError(format!("Failed to read kernel: {}", e)))?;
+
+            std::fs::write(&kernel_path, kernel_bytes)
+                .map_err(|e| BuildError::IoError { path: kernel_path.clone(), source: e })?;
+
+            info!("Kernel downloaded to: {}", kernel_path.display());
         }
 
         // Placeholder: builder_rootfs will be replaced by on-the-fly initramfs
