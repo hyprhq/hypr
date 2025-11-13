@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::UnixStream;
 use tracing::{debug, error, info, instrument, warn};
 
 /// VM-based builder that executes builds in isolated Linux VMs with minimal initramfs.
@@ -208,80 +208,65 @@ impl VmBuilder {
             virtio_fs_mounts,
         };
 
-        // CRITICAL: Start listening for vsock connection BEFORE booting VM
-        // (guest will connect, host must be listening first)
+        // Clean up stale socket from previous run (hypervisor will create it)
         let vsock_path = config.vsock_path.clone();
         if vsock_path.exists() {
+            debug!("Removing stale vsock socket: {}", vsock_path.display());
             let _ = std::fs::remove_file(&vsock_path);
         }
 
-        debug!("Starting vsock listener at: {}", vsock_path.display());
-        let listener = UnixListener::bind(&vsock_path).map_err(|e| {
-            error!("Failed to bind vsock listener: {}", e);
-            HyprError::BuildFailed { reason: format!("Failed to bind vsock listener: {}", e) }
-        })?;
-
-        // Now boot the VM (guest will connect to our listener)
+        // Boot the VM (hypervisor creates the Unix socket, guest connects via vsock)
         let handle = self.adapter.create(&config).await.map_err(|e| {
             error!("Failed to spawn builder VM: {}", e);
             HyprError::BuildFailed { reason: format!("Failed to spawn builder VM: {}", e) }
         })?;
 
-        // Wait for VM to boot and builder-agent to connect
-        self.wait_for_builder_ready(&handle, listener).await?;
+        // Wait for VM to boot and builder-agent to connect (hypervisor creates socket)
+        self.wait_for_builder_ready(&handle).await?;
 
         Ok(handle)
     }
 
     /// Wait for builder-agent to become ready.
-    #[instrument(skip(self, handle, listener))]
-    async fn wait_for_builder_ready(
-        &self,
-        handle: &VmHandle,
-        listener: UnixListener,
-    ) -> Result<()> {
-        info!("Waiting for builder-agent to connect");
+    #[instrument(skip(self, handle))]
+    async fn wait_for_builder_ready(&self, handle: &VmHandle) -> Result<()> {
+        info!("Waiting for builder-agent to be ready");
 
         let timeout = Duration::from_secs(30);
         let start = Instant::now();
+        let mut last_error: Option<String> = None;
 
-        // Accept incoming connection from guest with timeout
-        let mut stream = tokio::time::timeout(timeout, async {
-            listener.accept().await.map(|(stream, _)| stream)
-        })
-        .await
-        .map_err(|_| HyprError::BuildFailed {
-            reason: format!(
-                "Timeout ({}s) waiting for guest to connect via vsock",
-                timeout.as_secs()
-            ),
-        })?
-        .map_err(|e| HyprError::BuildFailed {
-            reason: format!("Failed to accept connection from guest: {}", e),
-        })?;
+        loop {
+            if start.elapsed() > timeout {
+                let err_msg = if let Some(last_err) = last_error {
+                    format!("Builder agent did not become ready in time. Last error: {}", last_err)
+                } else {
+                    "Builder agent did not become ready in time (no connection attempts succeeded)"
+                        .to_string()
+                };
+                error!("{}", err_msg);
+                return Err(HyprError::BuildFailed { reason: err_msg });
+            }
 
-        info!("Guest connected after {:.1}s", start.elapsed().as_secs_f64());
-
-        // Send ping to verify agent is functional
-        let ping_cmd = r#"{"Ping":{}}"#;
-        stream.write_all(ping_cmd.as_bytes()).await.map_err(|e| HyprError::BuildFailed {
-            reason: format!("Failed to send ping: {}", e),
-        })?;
-
-        // Read response
-        let mut response = String::new();
-        stream.read_to_string(&mut response).await.map_err(|e| HyprError::BuildFailed {
-            reason: format!("Failed to read ping response: {}", e),
-        })?;
-
-        if response.contains("Pong") {
-            info!("Builder agent ready and responding");
-            // TODO: Store the stream for reuse in send_build_command
-            Ok(())
-        } else {
-            Err(HyprError::BuildFailed {
-                reason: format!("Unexpected ping response: {}", response),
-            })
+            // Try to ping the agent
+            match self.ping_builder_agent(handle).await {
+                Ok(()) => {
+                    info!("Builder agent ready after {:.1}s", start.elapsed().as_secs_f64());
+                    return Ok(());
+                }
+                Err(e) => {
+                    // Not ready yet, log and retry
+                    last_error = Some(e.to_string());
+                    if start.elapsed().as_secs() % 5 == 0 {
+                        debug!(
+                            "Still waiting for agent... ({:.0}s elapsed, last error: {})",
+                            start.elapsed().as_secs_f64(),
+                            e
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
         }
     }
 
@@ -289,30 +274,24 @@ impl VmBuilder {
     async fn ping_builder_agent(&self, handle: &VmHandle) -> Result<()> {
         let vsock_path = self.adapter.vsock_path(handle);
 
-        debug!("Listening for connection from builder agent at: {}", vsock_path.display());
+        debug!("Attempting to connect to builder agent at: {}", vsock_path.display());
 
-        // Remove socket if it exists (leftover from previous run)
-        if vsock_path.exists() {
-            let _ = std::fs::remove_file(&vsock_path);
+        // Wait for socket to exist (hypervisor creates it when guest connects)
+        if !vsock_path.exists() {
+            return Err(HyprError::BuildFailed {
+                reason: format!("Vsock socket does not exist yet: {}", vsock_path.display()),
+            });
         }
 
-        // Listen for incoming connection from guest
-        let listener = UnixListener::bind(&vsock_path).map_err(|e| HyprError::BuildFailed {
-            reason: format!("Failed to bind to {}: {}", vsock_path.display(), e),
-        })?;
-
-        // Accept connection with timeout
-        let accept_timeout = Duration::from_secs(5);
-        let mut stream = tokio::time::timeout(accept_timeout, async {
-            listener.accept().await.map(|(stream, _)| stream)
-        })
-        .await
-        .map_err(|_| HyprError::BuildFailed {
-            reason: format!("Timeout waiting for guest to connect to {}", vsock_path.display()),
-        })?
-        .map_err(|e| HyprError::BuildFailed {
-            reason: format!("Failed to accept connection from guest: {}", e),
-        })?;
+        // Connect to the socket (hypervisor already listening, guest already connected)
+        let mut stream =
+            UnixStream::connect(&vsock_path).await.map_err(|e| HyprError::BuildFailed {
+                reason: format!(
+                    "Failed to connect to builder agent at {}: {}",
+                    vsock_path.display(),
+                    e
+                ),
+            })?;
 
         // Send Ping command
         let ping_cmd = r#"{"Ping":{}}"#;
