@@ -116,11 +116,13 @@ impl HvfAdapter {
             ));
         }
 
-        // Network (NAT mode)
-        args.push("--device".to_string());
-        let mac =
-            config.network.mac_address.as_ref().map(|m| format!(",mac={}", m)).unwrap_or_default();
-        args.push(format!("virtio-net,nat{}", mac));
+        // Network (only if enabled - build VMs have this disabled for security)
+        if config.network_enabled {
+            args.push("--device".to_string());
+            let mac =
+                config.network.mac_address.as_ref().map(|m| format!(",mac={}", m)).unwrap_or_default();
+            args.push(format!("virtio-net,nat{}", mac));
+        }
 
         // Vsock - expose port 41011 for builder agent
         args.push("--device".to_string());

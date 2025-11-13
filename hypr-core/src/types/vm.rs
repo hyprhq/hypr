@@ -77,6 +77,9 @@ impl std::fmt::Display for VmStatus {
 /// VM configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmConfig {
+    /// Whether this VM needs network access (false for build VMs - security isolation)
+    #[serde(default)]
+    pub network_enabled: bool,
     /// VM identifier
     pub id: String,
 

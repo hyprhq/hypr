@@ -184,6 +184,7 @@ impl VmBuilder {
         use crate::types::vm::VmResources;
 
         let config = VmConfig {
+            network_enabled: false, // Build VMs are network-isolated for security
             id: vm_id.clone(),
             name: vm_id.clone(),
             resources: VmResources {

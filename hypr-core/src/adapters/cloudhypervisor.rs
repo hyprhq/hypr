@@ -245,13 +245,15 @@ impl CloudHypervisorAdapter {
             args.push(fs_configs.join(" "));
         }
 
-        // Network (simplified - will be enhanced in Phase 2)
-        args.push("--net".to_string());
-        args.push(format!(
-            "tap=tap{},mac={}",
-            config.id,
-            config.network.mac_address.as_ref().unwrap_or(&"auto".to_string())
-        ));
+        // Network (only if enabled - build VMs have this disabled for security)
+        if config.network_enabled {
+            args.push("--net".to_string());
+            args.push(format!(
+                "tap=tap{},mac={}",
+                config.id,
+                config.network.mac_address.as_ref().map(|m| m.as_str()).unwrap_or("auto")
+            ));
+        }
 
         // Vsock
         args.push("--vsock".to_string());
