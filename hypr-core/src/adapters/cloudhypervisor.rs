@@ -259,6 +259,14 @@ impl CloudHypervisorAdapter {
         args.push("--vsock".to_string());
         args.push(format!("cid=42,socket={}", config.vsock_path.display()));
 
+        // Serial console (for debugging - kestrel logs output here)
+        args.push("--serial".to_string());
+        args.push("tty".to_string());
+
+        // Console mode
+        args.push("--console".to_string());
+        args.push("off".to_string());
+
         debug!("Built CH args: {:?}", args);
         Ok(args)
     }

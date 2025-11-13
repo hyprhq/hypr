@@ -258,15 +258,20 @@ static void mount_essentials_build(void) {
     LOG("Base image mounted, creating overlayfs");
 
     // Create overlayfs with base as lower (read-only) and workspace as upper (writable)
-    // This allows RUN commands to modify the filesystem while preserving base image
-    // overlayfs options: lowerdir=/base,upperdir=/workspace,workdir=/overlay-work
+    // CRITICAL: upperdir and workdir MUST be on the same mount
+    // Create dedicated tmpfs for overlay layer (portable across VMMs)
+    mkdir("/overlay", 0755);
+    if (mount("tmpfs", "/overlay", "tmpfs", 0, "size=512M")) {
+        FATAL("Failed to mount overlay tmpfs: %s", strerror(errno));
+    }
 
-    mkdir("/overlay-work", 0755);
+    mkdir("/overlay/upper", 0755);
+    mkdir("/overlay/work", 0755);
 
-    // Mount overlayfs
+    // Mount overlayfs (lowerdir can be on different mount)
     char overlay_opts[512];
     snprintf(overlay_opts, sizeof(overlay_opts),
-        "lowerdir=/base,upperdir=/workspace,workdir=/overlay-work");
+        "lowerdir=/base,upperdir=/overlay/upper,workdir=/overlay/work");
 
     if (mount("overlay", "/newroot", "overlay", 0, overlay_opts)) {
         FATAL("Failed to mount overlayfs: %s\nOptions: %s", strerror(errno), overlay_opts);
