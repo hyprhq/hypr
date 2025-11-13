@@ -124,7 +124,10 @@ impl HvfAdapter {
 
         // Vsock - expose port 41011 for builder agent
         args.push("--device".to_string());
-        args.push(format!("virtio-vsock,port=41011,socketURL=unix://{}", config.vsock_path.display()));
+        args.push(format!(
+            "virtio-vsock,port=41011,socketURL=unix://{}",
+            config.vsock_path.display()
+        ));
 
         // Serial console for debugging (logs to stdout)
         args.push("--device".to_string());

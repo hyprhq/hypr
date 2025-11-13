@@ -232,7 +232,8 @@ impl VmBuilder {
                 let err_msg = if let Some(last_err) = last_error {
                     format!("Builder agent did not become ready in time. Last error: {}", last_err)
                 } else {
-                    "Builder agent did not become ready in time (no connection attempts succeeded)".to_string()
+                    "Builder agent did not become ready in time (no connection attempts succeeded)"
+                        .to_string()
                 };
                 error!("{}", err_msg);
                 return Err(HyprError::BuildFailed { reason: err_msg });
@@ -248,8 +249,11 @@ impl VmBuilder {
                     // Not ready yet, log and retry
                     last_error = Some(e.to_string());
                     if start.elapsed().as_secs() % 5 == 0 {
-                        debug!("Still waiting for agent... ({:.0}s elapsed, last error: {})",
-                               start.elapsed().as_secs_f64(), e);
+                        debug!(
+                            "Still waiting for agent... ({:.0}s elapsed, last error: {})",
+                            start.elapsed().as_secs_f64(),
+                            e
+                        );
                     }
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
