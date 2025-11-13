@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::fs;
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 use tracing::{debug, error, info, instrument, span, warn, Level};
 
 /// cloud-hypervisor adapter.
@@ -36,7 +36,7 @@ pub struct CloudHypervisorAdapter {
 }
 
 /// Handle to a running virtiofsd daemon.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct VirtiofsdDaemon {
     tag: String,
     socket_path: PathBuf,
