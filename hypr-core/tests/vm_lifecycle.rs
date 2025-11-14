@@ -135,7 +135,6 @@ async fn test_vm_lifecycle_create_start_stop_delete() {
         ports: vec![],
         env: HashMap::new(),
         volumes: vec![],
-        vsock_path: PathBuf::from("/tmp/test.vsock"),
         virtio_fs_mounts: vec![],
         gpu: None,
     };
@@ -155,7 +154,6 @@ async fn test_vm_lifecycle_create_start_stop_delete() {
         config: config.clone(),
         ip_address: None,
         pid: handle.pid,
-        vsock_path: handle.socket_path.clone(),
         created_at: SystemTime::now(),
         started_at: None,
         stopped_at: None,
@@ -228,7 +226,6 @@ async fn test_state_persistence_across_sessions() {
             ports: vec![],
             env: HashMap::new(),
             volumes: vec![],
-            vsock_path: PathBuf::from("/tmp/persistent.vsock"),
             virtio_fs_mounts: vec![],
             gpu: None,
         };
@@ -241,7 +238,6 @@ async fn test_state_persistence_across_sessions() {
             config,
             ip_address: Some("100.64.0.5".to_string()),
             pid: Some(99999),
-            vsock_path: Some(PathBuf::from("/tmp/persistent.vsock")),
             created_at: SystemTime::now(),
             started_at: Some(SystemTime::now()),
             stopped_at: None,
@@ -309,7 +305,6 @@ async fn test_multiple_vms_concurrent_operations() {
             ports: vec![],
             env: HashMap::new(),
             volumes: vec![],
-            vsock_path: PathBuf::from(format!("/tmp/{}.vsock", vm_id)),
             virtio_fs_mounts: vec![],
             gpu: None,
         };
@@ -324,7 +319,6 @@ async fn test_multiple_vms_concurrent_operations() {
             config,
             ip_address: None,
             pid: handle.pid,
-            vsock_path: handle.socket_path,
             created_at: SystemTime::now(),
             started_at: Some(SystemTime::now()),
             stopped_at: None,

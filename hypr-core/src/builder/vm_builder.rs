@@ -12,8 +12,6 @@ use crate::types::vm::{VirtioFsMount, VmConfig, VmHandle};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
 use tracing::{debug, error, info, instrument, warn};
 
 /// VM-based builder that executes builds in isolated Linux VMs with minimal initramfs.
@@ -129,8 +127,8 @@ impl VmBuilder {
         let vm =
             self.spawn_builder_vm(context_dir, output_layer.parent().unwrap(), base_rootfs).await?;
 
-        // Send build command via vsock
-        let result = self.send_build_command(&vm, step).await;
+        // Send build command via filesystem IPC
+        let exit_code = self.send_build_command(&vm, step, context_dir).await;
 
         // Terminate VM (always, even on error)
         if let Err(e) = self.terminate_vm(&vm).await {
@@ -138,7 +136,12 @@ impl VmBuilder {
         }
 
         // Check build result
-        let () = result?;
+        let exit_code = exit_code?;
+        if exit_code != 0 {
+            return Err(HyprError::BuildFailed {
+                reason: format!("Build command exited with code {}", exit_code),
+            });
+        }
 
         // Extract layer metadata
         let metadata = self.extract_layer_metadata(output_layer).await?;
@@ -204,16 +207,8 @@ impl VmBuilder {
             env: Default::default(),
             volumes: vec![],
             gpu: None,
-            vsock_path: PathBuf::from(format!("/tmp/hypr-{}.sock", vm_id)),
             virtio_fs_mounts,
         };
-
-        // Clean up stale socket from previous run (hypervisor will create it)
-        let vsock_path = config.vsock_path.clone();
-        if vsock_path.exists() {
-            debug!("Removing stale vsock socket: {}", vsock_path.display());
-            let _ = std::fs::remove_file(&vsock_path);
-        }
 
         // Boot the VM (hypervisor creates the Unix socket, guest connects via vsock)
         let handle = self.adapter.create(&config).await.map_err(|e| {
@@ -221,153 +216,93 @@ impl VmBuilder {
             HyprError::BuildFailed { reason: format!("Failed to spawn builder VM: {}", e) }
         })?;
 
-        // Wait for VM to boot and builder-agent to connect (hypervisor creates socket)
-        self.wait_for_builder_ready(&handle).await?;
+        // Wait for kestrel to be ready (watches for "[kestrel] READY" in stdout)
+        // TODO: Implement stdout monitoring
+        info!("Builder VM started, waiting for kestrel to be ready...");
+        tokio::time::sleep(Duration::from_secs(2)).await; // Temporary: give VM time to boot
 
         Ok(handle)
     }
 
-    /// Wait for builder-agent to become ready.
-    #[instrument(skip(self, handle))]
-    async fn wait_for_builder_ready(&self, handle: &VmHandle) -> Result<()> {
-        info!("Waiting for builder-agent to be ready");
+    /// Send a build command to builder via filesystem IPC.
+    ///
+    /// Writes command file to /context/.hypr/commands/NNN.cmd
+    /// Waits for kestrel to process and delete the file
+    /// Parses [HYPR-RESULT] block from stdout
+    #[instrument(skip(self, step), fields(step_type = %step.step_type()))]
+    async fn send_build_command(
+        &self,
+        _handle: &VmHandle,
+        step: &BuildStep,
+        context_dir: &std::path::Path,
+    ) -> Result<i32> {
+        debug!("Sending build command via filesystem");
 
-        let timeout = Duration::from_secs(30);
-        let start = Instant::now();
-        let mut last_error: Option<String> = None;
-
-        loop {
-            if start.elapsed() > timeout {
-                let err_msg = if let Some(last_err) = last_error {
-                    format!("Builder agent did not become ready in time. Last error: {}", last_err)
-                } else {
-                    "Builder agent did not become ready in time (no connection attempts succeeded)"
-                        .to_string()
-                };
-                error!("{}", err_msg);
-                return Err(HyprError::BuildFailed { reason: err_msg });
-            }
-
-            // Try to ping the agent
-            match self.ping_builder_agent(handle).await {
-                Ok(()) => {
-                    info!("Builder agent ready after {:.1}s", start.elapsed().as_secs_f64());
-                    return Ok(());
-                }
-                Err(e) => {
-                    // Not ready yet, log and retry
-                    last_error = Some(e.to_string());
-                    if start.elapsed().as_secs() % 5 == 0 {
-                        debug!(
-                            "Still waiting for agent... ({:.0}s elapsed, last error: {})",
-                            start.elapsed().as_secs_f64(),
-                            e
-                        );
-                    }
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-            }
-        }
-    }
-
-    /// Send a ping to builder-agent to check if it's ready.
-    async fn ping_builder_agent(&self, handle: &VmHandle) -> Result<()> {
-        let vsock_path = self.adapter.vsock_path(handle);
-
-        debug!("Attempting to connect to builder agent at: {}", vsock_path.display());
-
-        // Wait for socket to exist (hypervisor creates it when guest connects)
-        if !vsock_path.exists() {
-            return Err(HyprError::BuildFailed {
-                reason: format!("Vsock socket does not exist yet: {}", vsock_path.display()),
-            });
-        }
-
-        // Connect to the socket (hypervisor already listening, guest already connected)
-        let mut stream =
-            UnixStream::connect(&vsock_path).await.map_err(|e| HyprError::BuildFailed {
-                reason: format!(
-                    "Failed to connect to builder agent at {}: {}",
-                    vsock_path.display(),
-                    e
-                ),
-            })?;
-
-        // Send Ping command
-        let ping_cmd = r#"{"Ping":{}}"#;
-        stream.write_all(ping_cmd.as_bytes()).await.map_err(|e| HyprError::BuildFailed {
-            reason: format!("Failed to send ping: {}", e),
+        // Create .hypr/commands directory if it doesn't exist
+        let commands_dir = context_dir.join(".hypr/commands");
+        tokio::fs::create_dir_all(&commands_dir).await.map_err(|e| {
+            HyprError::BuildFailed { reason: format!("Failed to create commands directory: {}", e) }
         })?;
 
-        // Read response
-        let mut response = String::new();
-        stream.read_to_string(&mut response).await.map_err(|e| HyprError::BuildFailed {
-            reason: format!("Failed to read ping response: {}", e),
-        })?;
+        // Generate command file (sequential numbering)
+        static COMMAND_COUNTER: std::sync::atomic::AtomicU32 =
+            std::sync::atomic::AtomicU32::new(0);
+        let cmd_num = COMMAND_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let cmd_file = commands_dir.join(format!("{:03}.cmd", cmd_num));
 
-        if response.contains("Pong") {
-            Ok(())
-        } else {
-            Err(HyprError::BuildFailed {
-                reason: format!("Unexpected ping response: {}", response),
-            })
-        }
-    }
-
-    /// Send a build command to builder-agent via vsock.
-    #[instrument(skip(self, handle, step))]
-    async fn send_build_command(&self, handle: &VmHandle, step: &BuildStep) -> Result<()> {
-        debug!("Sending build command via vsock");
-
-        let vsock_path = self.adapter.vsock_path(handle);
-
-        let mut stream = UnixStream::connect(vsock_path).await.map_err(|e| {
-            HyprError::BuildFailed { reason: format!("Failed to connect to builder agent: {}", e) }
-        })?;
-
-        // Serialize build command
-        let command = self.build_command_json(step)?;
-
-        // Send command
-        stream.write_all(command.as_bytes()).await.map_err(|e| HyprError::BuildFailed {
-            reason: format!("Failed to send build command: {}", e),
-        })?;
-
-        // Read response
-        let mut response = String::new();
-        stream.read_to_string(&mut response).await.map_err(|e| HyprError::BuildFailed {
-            reason: format!("Failed to read build response: {}", e),
-        })?;
-
-        // Check for success
-        if response.contains(r#""Ok""#) {
-            Ok(())
-        } else {
-            Err(HyprError::BuildFailed { reason: format!("Build command failed: {}", response) })
-        }
-    }
-
-    /// Convert build step to JSON command for builder-agent.
-    fn build_command_json(&self, step: &BuildStep) -> Result<String> {
-        match step {
+        // Build command content
+        let command_text = match step {
             BuildStep::Run { command, workdir } => {
-                let json = serde_json::json!({
-                    "Run": {
-                        "command": command,
-                        "workdir": workdir
-                    }
-                });
-                Ok(json.to_string())
+                format!("RUN {}\n{}", workdir, command)
             }
             BuildStep::Finalize { layer_id } => {
-                let json = serde_json::json!({
-                    "Finalize": {
-                        "layer_id": layer_id
-                    }
-                });
-                Ok(json.to_string())
+                format!("FINALIZE {}", layer_id)
             }
+        };
+
+        // Write command file
+        tokio::fs::write(&cmd_file, command_text).await.map_err(|e| {
+            HyprError::BuildFailed { reason: format!("Failed to write command file: {}", e) }
+        })?;
+
+        debug!("Command file written: {}", cmd_file.display());
+
+        // Wait for result file to appear (kestrel writes NNN.cmd.result)
+        let result_file = cmd_file.with_extension("cmd.result");
+        let start = Instant::now();
+        while !result_file.exists() {
+            if start.elapsed() > Duration::from_secs(300) {
+                // 5 minute timeout
+                return Err(HyprError::BuildFailed {
+                    reason: "Command execution timeout (5 minutes)".to_string(),
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
+
+        // Read result file
+        let result_contents = tokio::fs::read_to_string(&result_file).await.map_err(|e| {
+            HyprError::BuildFailed { reason: format!("Failed to read result file: {}", e) }
+        })?;
+
+        // Parse exit code from "exit=N" format
+        let exit_code = if let Some(line) = result_contents.lines().next() {
+            if line.starts_with("exit=") {
+                line[5..].parse::<i32>().unwrap_or(127)
+            } else {
+                127
+            }
+        } else {
+            127
+        };
+
+        debug!("Command processed by kestrel, exit_code={}", exit_code);
+
+        // Clean up command and result files
+        let _ = tokio::fs::remove_file(&cmd_file).await;
+        let _ = tokio::fs::remove_file(&result_file).await;
+
+        Ok(exit_code)
     }
 
     /// Terminate a builder VM.

@@ -255,11 +255,7 @@ impl CloudHypervisorAdapter {
             ));
         }
 
-        // Vsock (guest CID must be > 16 to avoid conflicts with host CID)
-        args.push("--vsock".to_string());
-        args.push(format!("cid=42,socket={}", config.vsock_path.display()));
-
-        // Serial console (for debugging - kestrel logs output here)
+        // Serial console (build VM stdout/stderr visible on host)
         args.push("--serial".to_string());
         args.push("tty".to_string());
 
@@ -381,11 +377,11 @@ impl VmmAdapter for CloudHypervisorAdapter {
 
         info!(pid = pid, duration_ms = start.elapsed().as_millis(), "VM created successfully");
 
-        // Store the vsock socket path (for guest communication), not the API socket
+        // Store the API socket path for VM control
         Ok(VmHandle {
             id: config.id.clone(),
             pid: Some(pid),
-            socket_path: Some(config.vsock_path.clone()),
+            socket_path: Some(api_socket),
         })
     }
 
@@ -492,13 +488,9 @@ impl VmmAdapter for CloudHypervisorAdapter {
         })
     }
 
-    fn vsock_path(&self, handle: &VmHandle) -> PathBuf {
-        // Vsock path is stored in the VmHandle during creation from the config
-        // For cloud-hypervisor, this is the socket path we passed via --vsock
-        handle.socket_path.clone().unwrap_or_else(|| {
-            // Fallback if not set (shouldn't happen)
-            PathBuf::from(format!("/tmp/hypr-{}.sock", handle.id))
-        })
+    fn vsock_path(&self, _handle: &VmHandle) -> PathBuf {
+        // No longer used - communication via virtio-fs + stdout parsing
+        PathBuf::from("/dev/null")
     }
 
     fn capabilities(&self) -> AdapterCapabilities {

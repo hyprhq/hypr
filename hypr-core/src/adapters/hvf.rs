@@ -128,15 +128,7 @@ impl HvfAdapter {
             args.push(format!("virtio-net,nat{}", mac));
         }
 
-        // Vsock - expose port 41011 for builder agent
-        // Note: vfkit requires 'listen' for host to accept connections from guest
-        args.push("--device".to_string());
-        args.push(format!(
-            "virtio-vsock,port=41011,socketURL={},listen",
-            config.vsock_path.display()
-        ));
-
-        // Serial console for debugging (logs to stdout)
+        // Serial console (build VM stdout/stderr visible on host)
         args.push("--device".to_string());
         args.push("virtio-serial,logFilePath=stdio".to_string());
 
@@ -212,7 +204,7 @@ impl VmmAdapter for HvfAdapter {
         Ok(VmHandle {
             id: config.id.clone(),
             pid: Some(pid),
-            socket_path: Some(config.vsock_path.clone()),
+            socket_path: None, // No control socket for vfkit
         })
     }
 
@@ -302,13 +294,9 @@ impl VmmAdapter for HvfAdapter {
         })
     }
 
-    fn vsock_path(&self, handle: &VmHandle) -> PathBuf {
-        // Vsock path is stored in the VmHandle during creation from the config
-        // For vfkit, this is the socket path we passed via virtio-vsock,socketURL
-        handle.socket_path.clone().unwrap_or_else(|| {
-            // Fallback if not set (shouldn't happen)
-            PathBuf::from(format!("/tmp/hypr-{}.sock", handle.id))
-        })
+    fn vsock_path(&self, _handle: &VmHandle) -> PathBuf {
+        // No longer used - communication via virtio-fs + stdout parsing
+        PathBuf::from("/dev/null")
     }
 
     fn capabilities(&self) -> AdapterCapabilities {

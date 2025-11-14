@@ -217,7 +217,6 @@ impl StackOrchestrator {
                 config: vm_config.clone(),
                 ip_address: Some(ip.to_string()),
                 pid: handle.pid,
-                vsock_path: handle.socket_path.clone(),
                 created_at: SystemTime::now(),
                 started_at: None,
                 stopped_at: None,
@@ -272,7 +271,7 @@ impl StackOrchestrator {
             // Get VM from state
             if let Ok(vm) = self.state.get_vm(&service.vm_id).await {
                 let handle =
-                    VmHandle { id: vm.id.clone(), pid: vm.pid, socket_path: vm.vsock_path.clone() };
+                    VmHandle { id: vm.id.clone(), pid: vm.pid, socket_path: None };
 
                 // Stop VM (30 second timeout)
                 let timeout = Duration::from_secs(30);
@@ -321,7 +320,7 @@ impl StackOrchestrator {
 
         // Delete all VMs
         for vm in stack_vms {
-            let handle = VmHandle { id: vm.id.clone(), pid: vm.pid, socket_path: vm.vsock_path };
+            let handle = VmHandle { id: vm.id.clone(), pid: vm.pid, socket_path: None };
 
             // Try to stop
             let _ = self.adapter.stop(&handle, Duration::from_secs(5)).await;
@@ -538,7 +537,6 @@ mod tests {
                 env: std::collections::HashMap::new(),
                 volumes: vec![],
                 gpu: None,
-                vsock_path: "/tmp/vsock".into(),
                 virtio_fs_mounts: vec![],
             },
             depends_on,

@@ -59,7 +59,6 @@ impl HyprService for HyprServiceImpl {
             config: vm_config,
             ip_address: None,
             pid: handle.pid,
-            vsock_path: handle.socket_path,
             created_at: SystemTime::now(),
             started_at: None,
             stopped_at: None,
@@ -90,7 +89,7 @@ impl HyprService for HyprServiceImpl {
         let handle = hypr_core::VmHandle {
             id: vm.id.clone(),
             pid: vm.pid,
-            socket_path: vm.vsock_path.clone(),
+            socket_path: None,
         };
 
         // Start via adapter
@@ -127,7 +126,7 @@ impl HyprService for HyprServiceImpl {
         let handle = hypr_core::VmHandle {
             id: vm.id.clone(),
             pid: vm.pid,
-            socket_path: vm.vsock_path.clone(),
+            socket_path: None,
         };
 
         // Stop via adapter
@@ -170,7 +169,7 @@ impl HyprService for HyprServiceImpl {
         let handle = hypr_core::VmHandle {
             id: vm.id.clone(),
             pid: vm.pid,
-            socket_path: vm.vsock_path.clone(),
+            socket_path: None,
         };
 
         // Delete via adapter

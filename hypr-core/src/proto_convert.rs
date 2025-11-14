@@ -85,7 +85,6 @@ impl TryFrom<ProtoVm> for Vm {
             config,
             ip_address: proto.ip_address,
             pid: proto.pid,
-            vsock_path: None, // Reconstructed from config
             created_at: UNIX_EPOCH + std::time::Duration::from_secs(proto.created_at as u64),
             started_at: proto
                 .started_at
@@ -111,7 +110,7 @@ impl From<VmConfig> for ProtoVmConfig {
             kernel_args: config.kernel_args,
             kernel_path: config.kernel_path.and_then(|p| p.to_str().map(String::from)),
             gpu: config.gpu.map(|g| g.into()),
-            vsock_path: config.vsock_path.to_str().unwrap_or_default().to_string(),
+            vsock_path: String::new(), // Removed: vsock communication no longer used
         }
     }
 }
@@ -146,7 +145,6 @@ impl TryFrom<ProtoVmConfig> for VmConfig {
             env: proto.env,
             volumes: proto.volumes.into_iter().map(|v| v.try_into()).collect::<Result<Vec<_>>>()?,
             gpu: proto.gpu.map(|g| g.try_into()).transpose()?,
-            vsock_path: PathBuf::from(proto.vsock_path),
             virtio_fs_mounts: vec![], // Proto support for virtio-fs not yet added to hypr.proto
         })
     }

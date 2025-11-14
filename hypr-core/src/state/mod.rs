@@ -97,8 +97,8 @@ impl StateManager {
 
         sqlx::query(
             r#"
-            INSERT INTO vms (id, name, image_id, status, config, ip_address, pid, vsock_path, created_at, started_at, stopped_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO vms (id, name, image_id, status, config, ip_address, pid, created_at, started_at, stopped_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&vm.id)
@@ -108,7 +108,6 @@ impl StateManager {
         .bind(config_json)
         .bind(&vm.ip_address)
         .bind(vm.pid.map(|p| p as i64))
-        .bind(vm.vsock_path.as_ref().and_then(|p| p.to_str()))
         .bind(created_at)
         .bind(vm.started_at.map(|t| {
             t.duration_since(SystemTime::UNIX_EPOCH)
@@ -219,7 +218,6 @@ impl StateManager {
             config,
             ip_address: row.get("ip_address"),
             pid: row.get::<Option<i64>, _>("pid").map(|p| p as u32),
-            vsock_path: row.get::<Option<String>, _>("vsock_path").map(|p| p.into()),
             created_at,
             started_at,
             stopped_at,

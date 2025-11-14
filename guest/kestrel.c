@@ -5,12 +5,15 @@
 // DUAL MODE AGENT:
 //
 // BUILD MODE (when mode=build in kernel cmdline):
-// 1. PID 1 init (minimal - mount essential filesystems)
-// 2. Mount virtio-fs at /shared
-// 3. Forward HTTP via vsock to host proxy (port 41010)
-// 4. Listen on vsock for build commands from host (port 41011)
-// 5. Execute shell commands in base image chroot
-// 6. Create layer tarballs
+// 1. PID 1 init (mount essential filesystems: /proc, /sys, /dev, /run)
+// 2. Mount virtio-fs: /context (build context), /shared (layer output), /base (FROM image)
+// 3. Create overlayfs: /base (lower) + tmpfs (upper) → /newroot
+// 4. Chroot into overlayfs
+// 5. Watch /context/.hypr/commands/ for command files
+// 6. Execute commands, print results to stdout with [HYPR-RESULT] markers
+// 7. Create layer tarballs to /shared/layers/
+//
+// NO VSOCK, NO NETWORK - Pure filesystem-based IPC via virtio-fs + stdout
 //
 // RUNTIME MODE (when manifest=<base64> in kernel cmdline):
 // 1. PID 1 init (full - mount proc/sys/dev)
@@ -38,10 +41,8 @@
 #include <sys/wait.h>
 #include <sys/mount.h>
 #include <sys/socket.h>
-#include <sys/select.h>
 #include <sys/ioctl.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include <dirent.h>
 
 // ===== MAKEDEV (self-contained) =====
 #ifndef makedev
@@ -58,27 +59,7 @@
 #endif
 
 
-// ====== SELF-CONTAINED VSOCK DEFINITIONS (portable) ======
-#ifndef AF_VSOCK
-#define AF_VSOCK 40
-#endif
-
-#ifndef VMADDR_CID_ANY
-#define VMADDR_CID_ANY (~0U)
-#endif
-
-#ifndef VMADDR_CID_HOST
-#define VMADDR_CID_HOST 2
-#endif
-
-struct sockaddr_vm {
-    sa_family_t svm_family;   // AF_VSOCK
-    unsigned short svm_reserved1;
-    unsigned int svm_port;    // Guest/host port
-    unsigned int svm_cid;     // Context ID
-};
-
-// ====== SELF-CONTAINED IFF/TAP DEFINITIONS ======
+// ====== SELF-CONTAINED IFF DEFINITIONS ======
 #ifndef IFNAMSIZ
 #define IFNAMSIZ 16
 #endif
@@ -97,11 +78,10 @@ struct ifreq {
 };
 
 
-// Port definitions (aligned with hypr-core/src/ports.rs)
-#define VSOCK_PORT_BUILD_AGENT 41011  // Build commands
-#define VSOCK_PORT_HTTP_PROXY  41010  // HTTP proxy forwarding
+// Constants
 #define MAX_CMD_LEN 8192
 #define MAX_CMDLINE_LEN 8192
+#define COMMAND_DIR "/context/.hypr/commands"
 
 // ============================================================================
 // LOGGING
@@ -261,18 +241,22 @@ static void mount_essentials_build(void) {
     // CRITICAL: upperdir and workdir MUST be on the same mount
     // Create dedicated tmpfs for overlay layer (portable across VMMs)
     mkdir("/overlay", 0755);
+    LOG("Creating tmpfs for overlay at /overlay");
     if (mount("tmpfs", "/overlay", "tmpfs", 0, "size=512M")) {
         FATAL("Failed to mount overlay tmpfs: %s", strerror(errno));
     }
+    LOG("Tmpfs mounted at /overlay");
 
     mkdir("/overlay/upper", 0755);
     mkdir("/overlay/work", 0755);
+    LOG("Created upper and work directories");
 
     // Mount overlayfs (lowerdir can be on different mount)
     char overlay_opts[512];
     snprintf(overlay_opts, sizeof(overlay_opts),
         "lowerdir=/base,upperdir=/overlay/upper,workdir=/overlay/work");
 
+    LOG("Mounting overlayfs with options: %s", overlay_opts);
     if (mount("overlay", "/newroot", "overlay", 0, overlay_opts)) {
         FATAL("Failed to mount overlayfs: %s\nOptions: %s", strerror(errno), overlay_opts);
     }
@@ -319,150 +303,80 @@ static void mount_essentials_build(void) {
 }
 
 // ============================================================================
-// BUILD MODE - HTTP PROXY (Direct vsock forwarding, no socat)
+// BUILD MODE - FILESYSTEM-BASED IPC
 // ============================================================================
 
-// Forward data from one fd to another
-static ssize_t forward_data(int from_fd, int to_fd, char *buf, size_t bufsize) {
-    ssize_t n = read(from_fd, buf, bufsize);
-    if (n <= 0) return n;
-
-    ssize_t written = 0;
-    while (written < n) {
-        ssize_t w = write(to_fd, buf + written, n - written);
-        if (w <= 0) return -1;
-        written += w;
-    }
-    return n;
-}
-
-// Handle one HTTP proxy connection: TCP client <-> vsock host
-static void handle_http_proxy_connection(int client_fd) {
-    // Connect to host vsock:41010
-    int vsock_fd = socket(AF_VSOCK, SOCK_STREAM, 0);
-    if (vsock_fd < 0) {
-        LOG("HTTP proxy: socket(AF_VSOCK) failed: %s", strerror(errno));
-        close(client_fd);
-        return;
+// Scan /context/.hypr/commands/ for the next command file
+// Returns malloc'd path to command file, or NULL if none found
+static char* scan_for_command(void) {
+    DIR *dir = opendir(COMMAND_DIR);
+    if (!dir) {
+        // Directory doesn't exist yet - host will create it
+        return NULL;
     }
 
-    struct sockaddr_vm host_addr = {
-        .svm_family = AF_VSOCK,
-        .svm_cid = 2, // Host CID
-        .svm_port = VSOCK_PORT_HTTP_PROXY,
-    };
+    struct dirent *entry;
+    char *cmd_path = NULL;
+    int min_number = 999999;
 
-    if (connect(vsock_fd, (struct sockaddr*)&host_addr, sizeof(host_addr)) < 0) {
-        LOG("HTTP proxy: connect to host vsock:%d failed: %s",
-            VSOCK_PORT_HTTP_PROXY, strerror(errno));
-        close(vsock_fd);
-        close(client_fd);
-        return;
-    }
-
-    // Set non-blocking for select()
-    fcntl(client_fd, F_SETFL, O_NONBLOCK);
-    fcntl(vsock_fd, F_SETFL, O_NONBLOCK);
-
-    // Bidirectional forwarding loop
-    char buf[8192];
-    fd_set readfds;
-    int maxfd = (client_fd > vsock_fd) ? client_fd : vsock_fd;
-
-    for (;;) {
-        FD_ZERO(&readfds);
-        FD_SET(client_fd, &readfds);
-        FD_SET(vsock_fd, &readfds);
-
-        struct timeval timeout = {.tv_sec = 300, .tv_usec = 0}; // 5 min timeout
-        int ret = select(maxfd + 1, &readfds, NULL, NULL, &timeout);
-
-        if (ret < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
-        if (ret == 0) break; // Timeout
-
-        // Forward client → host
-        if (FD_ISSET(client_fd, &readfds)) {
-            ssize_t n = forward_data(client_fd, vsock_fd, buf, sizeof(buf));
-            if (n <= 0) break;
-        }
-
-        // Forward host → client
-        if (FD_ISSET(vsock_fd, &readfds)) {
-            ssize_t n = forward_data(vsock_fd, client_fd, buf, sizeof(buf));
-            if (n <= 0) break;
-        }
-    }
-
-    close(vsock_fd);
-    close(client_fd);
-}
-
-// Background process: HTTP proxy server (TCP localhost:41010 → vsock host:41010)
-static pid_t start_http_proxy(void) {
-    pid_t pid = fork();
-    if (pid < 0) {
-        FATAL("Failed to fork for HTTP proxy: %s", strerror(errno));
-    }
-
-    if (pid > 0) {
-        // Parent: return child PID
-        LOG("HTTP proxy started (pid=%d): TCP localhost:41010 → vsock host:41010", pid);
-        return pid;
-    }
-
-    // Child: run HTTP proxy server
-    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (listen_fd < 0) {
-        FATAL("HTTP proxy: socket() failed: %s", strerror(errno));
-    }
-
-    int opt = 1;
-    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    struct sockaddr_in addr = {
-        .sin_family = AF_INET,
-        .sin_port = htons(VSOCK_PORT_HTTP_PROXY),
-        .sin_addr.s_addr = htonl(INADDR_LOOPBACK),
-    };
-
-    if (bind(listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        FATAL("HTTP proxy: bind(localhost:41010) failed: %s", strerror(errno));
-    }
-
-    if (listen(listen_fd, 128) < 0) {
-        FATAL("HTTP proxy: listen() failed: %s", strerror(errno));
-    }
-
-    LOG("HTTP proxy listening on localhost:41010");
-
-    // Accept loop
-    for (;;) {
-        int client_fd = accept(listen_fd, NULL, NULL);
-        if (client_fd < 0) {
-            if (errno == EINTR) continue;
-            LOG("HTTP proxy: accept() failed: %s", strerror(errno));
+    // Find lowest numbered .cmd file
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_type != DT_REG && entry->d_type != DT_UNKNOWN) {
             continue;
         }
 
-        // Fork per connection (simple, no thread pool needed for builds)
-        pid_t conn_pid = fork();
-        if (conn_pid == 0) {
-            // Connection handler child
-            close(listen_fd);
-            handle_http_proxy_connection(client_fd);
-            exit(0);
+        // Look for NNN.cmd pattern
+        int num;
+        if (sscanf(entry->d_name, "%d.cmd", &num) == 1) {
+            if (num < min_number) {
+                min_number = num;
+                if (cmd_path) free(cmd_path);
+
+                // Build full path
+                size_t len = strlen(COMMAND_DIR) + 1 + strlen(entry->d_name) + 1;
+                cmd_path = malloc(len);
+                if (cmd_path) {
+                    snprintf(cmd_path, len, "%s/%s", COMMAND_DIR, entry->d_name);
+                }
+            }
         }
-
-        close(client_fd); // Parent closes its copy
-
-        // Reap finished connections (non-blocking)
-        while (waitpid(-1, NULL, WNOHANG) > 0);
     }
 
-    exit(0); // Never reached
+    closedir(dir);
+    return cmd_path;
+}
+
+// Read entire file into malloc'd buffer
+static char* read_file_contents(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return NULL;
+
+    // Get file size
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (size <= 0 || size > MAX_CMD_LEN) {
+        fclose(f);
+        return NULL;
+    }
+
+    char *buf = malloc(size + 1);
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
+
+    size_t read_bytes = fread(buf, 1, size, f);
+    fclose(f);
+
+    if (read_bytes != (size_t)size) {
+        free(buf);
+        return NULL;
+    }
+
+    buf[size] = '\0';
+    return buf;
 }
 
 // ============================================================================
@@ -470,11 +384,14 @@ static pid_t start_http_proxy(void) {
 // ============================================================================
 
 static int execute_shell_command(const char *cmd, const char *workdir) {
-    LOG("Executing: %s (workdir=%s)", cmd, workdir);
+    // Flush all output before forking to avoid duplicate logs
+    fflush(stdout);
+    fflush(stderr);
 
     pid_t pid = fork();
     if (pid < 0) {
-        LOG("fork failed: %s", strerror(errno));
+        fprintf(stderr, "fork failed: %s\n", strerror(errno));
+        fflush(stderr);
         return -1;
     }
 
@@ -485,13 +402,7 @@ static int execute_shell_command(const char *cmd, const char *workdir) {
             exit(127);
         }
 
-        // Set HTTP proxy environment (forwarded via vsock to host)
-        setenv("http_proxy", "http://localhost:41010", 1);
-        setenv("https_proxy", "http://localhost:41010", 1);
-        setenv("HTTP_PROXY", "http://localhost:41010", 1);
-        setenv("HTTPS_PROXY", "http://localhost:41010", 1);
-
-        // Execute via sh -c
+        // Execute via sh -c (no HTTP proxy - all tools pre-installed)
         execl("/bin/sh", "sh", "-c", cmd, NULL);
         fprintf(stderr, "execl failed: %s\n", strerror(errno));
         exit(127);
@@ -500,150 +411,165 @@ static int execute_shell_command(const char *cmd, const char *workdir) {
     // Parent: wait for completion
     int status;
     if (waitpid(pid, &status, 0) < 0) {
-        LOG("waitpid failed: %s", strerror(errno));
+        fprintf(stderr, "waitpid failed: %s\n", strerror(errno));
+        fflush(stderr);
         return -1;
     }
 
     if (WIFEXITED(status)) {
-        int exit_code = WEXITSTATUS(status);
-        LOG("Command exited with code %d", exit_code);
-        return exit_code;
+        return WEXITSTATUS(status);
     } else if (WIFSIGNALED(status)) {
-        int sig = WTERMSIG(status);
-        LOG("Command killed by signal %d", sig);
-        return 128 + sig;
+        return 128 + WTERMSIG(status);
     }
 
     return -1;
 }
 
-static int create_tarball(const char *source_dir, const char *output_tar) {
-    LOG("Creating tarball: %s → %s", source_dir, output_tar);
+static int create_tarball(const char *layer_id) {
+    // Create tarball of /overlay/upper (the changes made during this build step)
+    char output_tar[512];
+    snprintf(output_tar, sizeof(output_tar), "/shared/layers/%s.tar", layer_id);
 
-    // Use tar to create tarball of source_dir
+    // Ensure layers directory exists
+    mkdir("/shared/layers", 0755);
+
+    // Create tarball
     char cmd[2048];
     snprintf(cmd, sizeof(cmd),
-        "tar -C %s -cf %s . 2>/dev/null",
-        source_dir, output_tar);
+        "tar -C /overlay/upper -cf %s . 2>/dev/null",
+        output_tar);
 
     int ret = system(cmd);
     if (ret == 0) {
         // Check if file was created
         struct stat st;
         if (stat(output_tar, &st) == 0) {
-            LOG("Tarball created: %ld bytes", st.st_size);
-            return 0;
+            return 0; // Success
         }
     }
 
-    LOG("Failed to create tarball");
-    return -1;
+    return -1; // Failure
 }
 
 // ============================================================================
-// BUILD MODE - JSON PARSING (Minimal, no library)
+// BUILD MODE - COMMAND PARSING (Simple text format)
 // ============================================================================
 
-// Extract string value from JSON field
-// Input: {"Run":{"command":"apk add nginx","workdir":"/workspace"}}
-// json_get_string(input, "command") → "apk add nginx"
-static char* json_get_string(const char *json, const char *key) {
-    char search[256];
-    snprintf(search, sizeof(search), "\"%s\":\"", key);
+// Parse command file and execute
+// Format options:
+//   RUN <workdir>
+//   <shell command>
+//   ---
+//   FINALIZE <layer_id>
+//
+// Writes result to <cmd_path>.result with format: "exit=N"
+static void handle_command_file(const char *cmd_path) {
+    char *contents = read_file_contents(cmd_path);
+    if (!contents) {
+        printf("[HYPR-RESULT]\nexit=127\nerror=Failed to read command file\n[HYPR-RESULT-END]\n");
+        fflush(stdout);
 
-    char *start = strstr(json, search);
-    if (!start) return NULL;
-
-    start += strlen(search);
-    char *end = strchr(start, '"');
-    if (!end) return NULL;
-
-    size_t len = end - start;
-    char *value = malloc(len + 1);
-    if (!value) return NULL;
-
-    memcpy(value, start, len);
-    value[len] = '\0';
-    return value;
-}
-
-// ============================================================================
-// BUILD MODE - VSOCK SERVER
-// ============================================================================
-
-static void handle_build_command(int conn) {
-    char buffer[MAX_CMD_LEN];
-    ssize_t n = read(conn, buffer, sizeof(buffer) - 1);
-    if (n <= 0) return;
-
-    buffer[n] = '\0';
-    LOG("Received command: %.*s", (n > 100 ? 100 : (int)n), buffer);
-
-    char *response = NULL;
-
-    // Parse and handle command
-    if (strstr(buffer, "\"Ping\"")) {
-        // Health check
-        response = strdup("{\"Pong\":{}}");
-    }
-    else if (strstr(buffer, "\"Run\"")) {
-        // Execute RUN instruction
-        char *cmd = json_get_string(buffer, "command");
-        char *workdir = json_get_string(buffer, "workdir");
-
-        if (!workdir) workdir = strdup("/workspace");
-
-        if (cmd) {
-            int exit_code = execute_shell_command(cmd, workdir);
-
-            if (exit_code == 0) {
-                response = strdup("{\"Ok\":{}}");
-            } else {
-                char err[256];
-                snprintf(err, sizeof(err),
-                    "{\"Error\":{\"message\":\"Command failed\",\"exit_code\":%d}}",
-                    exit_code);
-                response = strdup(err);
-            }
-
-            free(cmd);
-        } else {
-            response = strdup("{\"Error\":{\"message\":\"Missing command\"}}");
+        // Write result file
+        char result_path[1024];
+        snprintf(result_path, sizeof(result_path), "%s.result", cmd_path);
+        FILE *f = fopen(result_path, "w");
+        if (f) {
+            fprintf(f, "exit=127\n");
+            fclose(f);
         }
+        return;
+    }
+
+    int exit_code = 0;
+
+    // Parse command type
+    if (strncmp(contents, "RUN ", 4) == 0) {
+        // RUN command format:
+        // RUN /workspace
+        // apk add nginx
+
+        char *newline = strchr(contents + 4, '\n');
+        if (!newline) {
+            free(contents);
+            printf("[HYPR-RESULT]\nexit=127\nerror=Invalid RUN format (no newline after workdir)\n[HYPR-RESULT-END]\n");
+            fflush(stdout);
+            exit_code = 127;
+            goto write_result;
+        }
+
+        // Extract workdir
+        size_t workdir_len = newline - (contents + 4);
+        char *workdir = malloc(workdir_len + 1);
+        if (!workdir) {
+            free(contents);
+            printf("[HYPR-RESULT]\nexit=127\nerror=malloc failed\n[HYPR-RESULT-END]\n");
+            fflush(stdout);
+            exit_code = 127;
+            goto write_result;
+        }
+        memcpy(workdir, contents + 4, workdir_len);
+        workdir[workdir_len] = '\0';
+
+        // Extract command (rest of file after newline)
+        char *cmd = newline + 1;
+
+        // Execute
+        printf("[kestrel] EXEC: %s\n", cmd);
+        fflush(stdout);
+
+        exit_code = execute_shell_command(cmd, workdir);
+
+        printf("[HYPR-RESULT]\nexit=%d\n[HYPR-RESULT-END]\n", exit_code);
+        fflush(stdout);
 
         free(workdir);
     }
-    else if (strstr(buffer, "\"Finalize\"")) {
-        // Create layer tarball
-        char *layer_id = json_get_string(buffer, "layer_id");
+    else if (strncmp(contents, "FINALIZE ", 9) == 0) {
+        // FINALIZE command format:
+        // FINALIZE layer-abc123
+
+        char *newline = strchr(contents + 9, '\n');
+        size_t layer_id_len = newline ? (size_t)(newline - (contents + 9)) : strlen(contents + 9);
+
+        char *layer_id = malloc(layer_id_len + 1);
         if (!layer_id) {
-            response = strdup("{\"Error\":{\"message\":\"Missing layer_id\"}}");
-        } else {
-            char output_tar[512];
-            snprintf(output_tar, sizeof(output_tar), "/shared/layers/%s.tar", layer_id);
-
-            // Ensure layers directory exists
-            mkdir("/shared/layers", 0755);
-
-            int ret = create_tarball("/workspace", output_tar);
-            if (ret == 0) {
-                response = strdup("{\"Ok\":{}}");
-            } else {
-                response = strdup("{\"Error\":{\"message\":\"Failed to create tarball\"}}");
-            }
-
-            free(layer_id);
+            free(contents);
+            printf("[HYPR-RESULT]\nexit=127\nerror=malloc failed\n[HYPR-RESULT-END]\n");
+            fflush(stdout);
+            exit_code = 127;
+            goto write_result;
         }
+        memcpy(layer_id, contents + 9, layer_id_len);
+        layer_id[layer_id_len] = '\0';
+
+        printf("[kestrel] FINALIZE: %s\n", layer_id);
+        fflush(stdout);
+
+        exit_code = create_tarball(layer_id);
+        printf("[HYPR-RESULT]\nexit=%d\n[HYPR-RESULT-END]\n", exit_code);
+        fflush(stdout);
+
+        free(layer_id);
     }
     else {
-        response = strdup("{\"Error\":{\"message\":\"Unknown command\"}}");
+        printf("[HYPR-RESULT]\nexit=127\nerror=Unknown command type\n[HYPR-RESULT-END]\n");
+        fflush(stdout);
+        exit_code = 127;
     }
 
-    // Send response
-    if (response) {
-        write(conn, response, strlen(response));
-        write(conn, "\n", 1);
-        free(response);
+write_result:
+    free(contents);
+
+    // Write result file so host can read exit code
+    char result_path[1024];
+    snprintf(result_path, sizeof(result_path), "%s.result", cmd_path);
+    FILE *f = fopen(result_path, "w");
+    if (f) {
+        fprintf(f, "exit=%d\n", exit_code);
+        fclose(f);
+        LOG("Wrote result file: %s (exit=%d)", result_path, exit_code);
+    } else {
+        LOG("Warning: Failed to write result file: %s", result_path);
     }
 }
 
@@ -653,46 +579,26 @@ static void run_build_mode(void) {
     // Mount essential filesystems
     mount_essentials_build();
 
-    // Start HTTP proxy (TCP localhost:41010 → vsock host:41010)
-    start_http_proxy();
+    LOG("Build VM ready, waiting for commands at %s", COMMAND_DIR);
+    printf("[kestrel] READY\n");
+    fflush(stdout);
 
-    // Give proxy a moment to start listening
-    usleep(100000); // 100ms
-
-    // Connect to host via vsock (guest connects, host listens)
-    // This is the correct model for cloud-hypervisor and vfkit vsock
-    int sock = socket(AF_VSOCK, SOCK_STREAM, 0);
-    if (sock < 0) {
-        FATAL("socket(AF_VSOCK) failed: %s", strerror(errno));
-    }
-
-    struct sockaddr_vm addr = {
-        .svm_family = AF_VSOCK,
-        .svm_port = VSOCK_PORT_BUILD_AGENT,
-        .svm_cid = VMADDR_CID_HOST,  // Connect to host (CID 2)
-    };
-
-    LOG("Connecting to host via vsock port %d", VSOCK_PORT_BUILD_AGENT);
-
-    // Retry connection (host might not be listening yet)
-    int connected = 0;
-    for (int retry = 0; retry < 30; retry++) {
-        if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
-            connected = 1;
-            break;
-        }
-        usleep(100000); // 100ms
-    }
-
-    if (!connected) {
-        FATAL("connect(vsock:%d) failed after retries: %s", VSOCK_PORT_BUILD_AGENT, strerror(errno));
-    }
-
-    LOG("Connected to host builder on vsock port %d", VSOCK_PORT_BUILD_AGENT);
-
-    // Command loop (persistent connection)
+    // Command loop: watch for command files in /context/.hypr/commands/
     for (;;) {
-        handle_build_command(sock);
+        char *cmd_path = scan_for_command();
+
+        if (!cmd_path) {
+            // No command found, sleep and retry
+            usleep(100000); // 100ms
+            continue;
+        }
+
+        // Execute command
+        handle_command_file(cmd_path);
+
+        // Delete command file (signal completion to host)
+        unlink(cmd_path);
+        free(cmd_path);
     }
 }
 

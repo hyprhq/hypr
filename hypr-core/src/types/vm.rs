@@ -29,9 +29,6 @@ pub struct Vm {
     /// Hypervisor process PID
     pub pid: Option<u32>,
 
-    /// Path to vsock socket
-    pub vsock_path: Option<PathBuf>,
-
     /// Creation timestamp
     pub created_at: SystemTime,
 
@@ -115,9 +112,6 @@ pub struct VmConfig {
 
     /// GPU configuration (optional)
     pub gpu: Option<GpuConfig>,
-
-    /// Path to vsock socket
-    pub vsock_path: PathBuf,
 
     /// virtio-fs shared directory mounts
     pub virtio_fs_mounts: Vec<VirtioFsMount>,

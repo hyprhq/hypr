@@ -51,7 +51,6 @@ pub async fn run(
         env: env.into_iter().collect(),
         volumes: vec![],
         gpu: None,
-        vsock_path: PathBuf::from(format!("/tmp/hypr-{}.vsock", vm_id)),
         virtio_fs_mounts: vec![],
     };
 
