@@ -287,8 +287,8 @@ impl VmBuilder {
 
         // Parse exit code from "exit=N" format
         let exit_code = if let Some(line) = result_contents.lines().next() {
-            if line.starts_with("exit=") {
-                line[5..].parse::<i32>().unwrap_or(127)
+            if let Some(code_str) = line.strip_prefix("exit=") {
+                code_str.parse::<i32>().unwrap_or(127)
             } else {
                 127
             }
