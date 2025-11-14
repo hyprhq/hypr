@@ -7,7 +7,7 @@
 //! - Kill: SIGKILL the CH process
 //! - Delete: Clean up resources
 
-use crate::adapters::{AdapterCapabilities, VmmAdapter};
+use crate::adapters::{AdapterCapabilities, CommandSpec, VmmAdapter};
 use crate::error::{HyprError, Result};
 use crate::types::network::NetworkConfig;
 use crate::types::vm::{DiskConfig, GpuConfig, VmConfig, VmHandle};
@@ -303,6 +303,33 @@ impl Default for CloudHypervisorAdapter {
 
 #[async_trait]
 impl VmmAdapter for CloudHypervisorAdapter {
+    async fn build_command(&self, config: &VmConfig) -> Result<CommandSpec> {
+        // Start virtiofsd daemons if virtio-fs mounts are present
+        let virtiofsd_daemons = if !config.virtio_fs_mounts.is_empty() {
+            info!("Starting {} virtiofsd daemons for build VM", config.virtio_fs_mounts.len());
+            let daemons = self.start_virtiofsd_daemons(&config.id, &config.virtio_fs_mounts).await?;
+
+            // Store daemons for cleanup (vm_builder will need to call delete() later)
+            {
+                let mut map = self.virtiofsd_daemons.lock().unwrap();
+                map.insert(config.id.clone(), daemons.clone());
+            }
+
+            daemons
+        } else {
+            Vec::new()
+        };
+
+        // Build arguments with virtiofsd socket paths
+        let args = self.build_args(config, &virtiofsd_daemons)?;
+
+        Ok(CommandSpec {
+            program: self.binary_path.to_string_lossy().to_string(),
+            args,
+            env: vec![],
+        })
+    }
+
     #[instrument(skip(self), fields(vm_id = %config.id))]
     async fn create(&self, config: &VmConfig) -> Result<VmHandle> {
         info!("Creating VM with cloud-hypervisor");

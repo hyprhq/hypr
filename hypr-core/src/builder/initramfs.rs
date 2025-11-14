@@ -1,23 +1,26 @@
-// src/builder/initramfs.rs - On-the-fly initramfs generation for builder VMs
-//
-// Creates minimal initramfs containing:
-// - kestrel binary (PID 1 init)
-// - busybox (static)
-// - Basic directory structure
-//
-// Format: uncompressed cpio archive (newc format)
+//! Initramfs generation for builder VMs with embedded kestrel.
+//!
+//! Creates minimal initramfs containing:
+//! - kestrel binary (PID 1 init, embedded at compile-time)
+//! - busybox (static, downloaded from Debian)
+//! - Basic directory structure
+//!
+//! Format: uncompressed cpio archive (newc format)
 
+use crate::builder::embedded::{self, KestrelSource};
 use crate::builder::executor::{BuildError, BuildResult};
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, warn};
 
 /// Creates an initramfs for builder VMs.
 ///
 /// The initramfs contains:
-/// - `/init` - kestrel binary (from build.rs compilation)
-/// - `/bin/busybox` - static busybox (downloaded or bundled)
+/// - `/init` - kestrel binary (embedded or override)
+/// - `/bin/busybox` - static busybox (downloaded from Debian)
 /// - Basic directory structure (/dev, /proc, /sys, /tmp, /workspace, /shared)
 ///
 /// Returns path to the generated initramfs.cpio file.
@@ -35,8 +38,8 @@ pub fn create_builder_initramfs() -> BuildResult<PathBuf> {
     // Create directory structure
     create_directory_structure(&temp_dir)?;
 
-    // Copy kestrel binary
-    copy_kestrel_binary(&temp_dir)?;
+    // Extract kestrel binary (embedded or override)
+    extract_kestrel_binary(&temp_dir)?;
 
     // Copy or download busybox
     copy_busybox_binary(&temp_dir)?;
@@ -65,18 +68,17 @@ fn create_directory_structure(root: &Path) -> BuildResult<()> {
     Ok(())
 }
 
-/// Copy kestrel binary from build output to initramfs /init.
-fn copy_kestrel_binary(root: &Path) -> BuildResult<()> {
+/// Extract kestrel binary to initramfs /init.
+///
+/// Uses embedded binary by default, or KESTREL_BIN_PATH override if set.
+fn extract_kestrel_binary(root: &Path) -> BuildResult<()> {
     let kestrel_dst = root.join("init");
 
-    // Determine architecture of the HOST (where hypr is running)
-    // We need to download a LINUX binary for this architecture because
-    // kestrel runs inside Linux VMs regardless of host OS
+    // Determine target architecture (Linux VMs always run Linux kestrel)
     let host_arch = std::env::consts::ARCH;
     let linux_arch = match host_arch {
         "x86_64" => "amd64",
-        "aarch64" => "arm64",
-        "arm64" => "arm64", // macOS reports arm64 instead of aarch64
+        "aarch64" | "arm64" => "arm64",
         other => {
             return Err(BuildError::ContextError(format!(
                 "Unsupported host architecture: {}. Only x86_64 and aarch64/arm64 are supported.",
@@ -85,105 +87,110 @@ fn copy_kestrel_binary(root: &Path) -> BuildResult<()> {
         }
     };
 
-    debug!(
-        "Host: {} {} → downloading kestrel-linux-{}",
-        std::env::consts::OS,
-        host_arch,
-        linux_arch
-    );
+    debug!("Target architecture: linux-{}", linux_arch);
 
-    // Fallback chain:
-    // 1. Check KESTREL_BIN_PATH env var (build.rs compiled version, Linux only)
-    // 2. Check ~/.hypr/bin/kestrel-linux-{arch} (locally built/manually placed)
-    // 3. Download from GitHub releases (future CI/CD, proper distribution)
-
-    #[cfg(target_os = "linux")]
-    {
-        // On Linux, prefer build.rs compiled version if architecture matches
-        if let Ok(kestrel_src) = std::env::var("KESTREL_BIN_PATH") {
-            if PathBuf::from(&kestrel_src).exists() {
-                debug!("Using build.rs compiled kestrel: {}", kestrel_src);
-                fs::copy(&kestrel_src, &kestrel_dst)
-                    .map_err(|e| BuildError::IoError { path: kestrel_dst.clone(), source: e })?;
-
-                set_executable(&kestrel_dst)?;
-                return Ok(());
-            }
+    // Resolve kestrel source (embedded or override)
+    match embedded::resolve_kestrel_source() {
+        KestrelSource::Embedded => {
+            info!("Using embedded kestrel binary (linux-{})", linux_arch);
+            extract_embedded_kestrel(linux_arch, &kestrel_dst)?;
+        }
+        KestrelSource::Override(override_path) => {
+            info!("Using KESTREL_BIN_PATH override: {}", override_path.display());
+            validate_and_copy_override(&override_path, &kestrel_dst)?;
         }
     }
 
-    // Check for locally built binary in ~/.hypr/bin/
-    if let Ok(home) = std::env::var("HOME") {
-        let local_kestrel = PathBuf::from(home)
-            .join(".hypr")
-            .join("bin")
-            .join(format!("kestrel-linux-{}", linux_arch));
-
-        if local_kestrel.exists() {
-            debug!("Using locally built kestrel: {}", local_kestrel.display());
-            fs::copy(&local_kestrel, &kestrel_dst)
-                .map_err(|e| BuildError::IoError { path: kestrel_dst.clone(), source: e })?;
-
-            set_executable(&kestrel_dst)?;
-            return Ok(());
-        } else {
-            debug!("Local kestrel not found at: {}", local_kestrel.display());
-        }
-    }
-
-    // Download Linux binary from GitHub releases
-    // (works on both darwin and linux hosts)
-    // Note: Requires GitHub Actions CI/CD to build and release kestrel binaries
-    debug!("Attempting to download kestrel from GitHub releases");
-    download_kestrel(linux_arch, &kestrel_dst)?;
     set_executable(&kestrel_dst)?;
 
     Ok(())
 }
 
-/// Download kestrel from GitHub releases.
-fn download_kestrel(arch: &str, dest: &Path) -> BuildResult<()> {
-    // GitHub's "latest" redirect automatically points to the most recent release
-    let url =
-        format!("https://github.com/hyprhq/hypr/releases/latest/download/kestrel-linux-{}", arch);
+/// Extract embedded kestrel binary atomically.
+fn extract_embedded_kestrel(arch: &str, dest: &Path) -> BuildResult<()> {
+    let kestrel_bytes = embedded::get_embedded_kestrel(arch).ok_or_else(|| {
+        BuildError::ContextError(format!("No embedded kestrel binary for architecture: {}", arch))
+    })?;
 
-    debug!("Downloading kestrel from: {}", url);
+    debug!("Extracting embedded kestrel ({} bytes)", kestrel_bytes.len());
 
-    // Use curl with -L to follow redirects (GitHub uses 302 redirect for "latest")
-    let status = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "curl -fsSL {} -o {} || wget -q -O {} {}",
-            url,
-            dest.display(),
-            dest.display(),
-            url
-        ))
-        .status()
-        .map_err(|e| BuildError::ContextError(format!("Failed to download kestrel: {}", e)))?;
+    // Atomic write: temp file → rename
+    let temp_path = dest.with_extension("tmp");
 
-    if !status.success() {
+    {
+        let mut f = File::create(&temp_path)
+            .map_err(|e| BuildError::IoError { path: temp_path.clone(), source: e })?;
+        f.write_all(kestrel_bytes)
+            .map_err(|e| BuildError::IoError { path: temp_path.clone(), source: e })?;
+        f.flush()
+            .map_err(|e| BuildError::IoError { path: temp_path.clone(), source: e })?;
+    }
+
+    // Atomic rename
+    fs::rename(&temp_path, dest)
+        .map_err(|e| BuildError::IoError { path: dest.to_path_buf(), source: e })?;
+
+    debug!("Embedded kestrel extracted successfully");
+
+    Ok(())
+}
+
+/// Validate and copy override kestrel binary.
+///
+/// Fails fast if override path is invalid (no silent fallback).
+fn validate_and_copy_override(src: &Path, dest: &Path) -> BuildResult<()> {
+    // Verify source exists
+    if !src.exists() {
         return Err(BuildError::ContextError(format!(
-            "Failed to download kestrel from {}.\n\
+            "KESTREL_BIN_PATH set but file not found: {}\n\
              \n\
-             This requires a HYPR release to exist. If you're developing locally:\n\
-             1. Build kestrel manually: cd guest && gcc -static -o kestrel kestrel.c\n\
-             2. Place at: ~/.hypr/bin/kestrel-linux-{}\n\
-             \n\
-             Or trigger a release via GitHub Actions to publish binaries.",
-            url, arch
+             To use embedded kestrel, unset KESTREL_BIN_PATH:\n\
+             unset KESTREL_BIN_PATH",
+            src.display()
         )));
     }
 
-    // Verify downloaded
-    if !dest.exists() {
+    // Verify it's a file
+    if !src.is_file() {
         return Err(BuildError::ContextError(format!(
-            "Kestrel binary not found after download: {}",
-            dest.display()
+            "KESTREL_BIN_PATH is not a file: {}",
+            src.display()
         )));
     }
 
-    debug!("Kestrel downloaded successfully");
+    // Verify it's executable
+    let metadata = fs::metadata(src)
+        .map_err(|e| BuildError::IoError { path: src.to_path_buf(), source: e })?;
+
+    #[cfg(unix)]
+    {
+        if metadata.permissions().mode() & 0o111 == 0 {
+            warn!("KESTREL_BIN_PATH file is not executable: {}", src.display());
+        }
+    }
+
+    // Verify it's an ELF binary (basic sanity check)
+    let mut f = File::open(src)
+        .map_err(|e| BuildError::IoError { path: src.to_path_buf(), source: e })?;
+    let mut magic = [0u8; 4];
+    use std::io::Read;
+    f.read_exact(&mut magic)
+        .map_err(|e| BuildError::ContextError(format!("Failed to read binary header: {}", e)))?;
+
+    if magic != [0x7F, 0x45, 0x4C, 0x46] {
+        return Err(BuildError::ContextError(format!(
+            "KESTREL_BIN_PATH is not a valid ELF binary: {} (magic: {:02X?})",
+            src.display(),
+            magic
+        )));
+    }
+
+    // Copy to destination
+    fs::copy(src, dest)
+        .map_err(|e| BuildError::IoError { path: dest.to_path_buf(), source: e })?;
+
+    debug!("Override kestrel copied successfully");
+
     Ok(())
 }
 
@@ -191,7 +198,6 @@ fn download_kestrel(arch: &str, dest: &Path) -> BuildResult<()> {
 fn set_executable(path: &Path) -> BuildResult<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
         let mut perms = fs::metadata(path)
             .map_err(|e| BuildError::IoError { path: path.to_path_buf(), source: e })?
             .permissions();
@@ -206,9 +212,7 @@ fn set_executable(path: &Path) -> BuildResult<()> {
 fn copy_busybox_binary(root: &Path) -> BuildResult<()> {
     let busybox_dst = root.join("bin/busybox");
 
-    // Determine architecture of the HOST (where hypr is running)
-    // We need to download a LINUX binary for this architecture because
-    // busybox runs inside Linux VMs regardless of host OS
+    // Determine target architecture
     let host_arch = std::env::consts::ARCH;
     let (deb_arch, deb_url) = match host_arch {
         "x86_64" => (
@@ -227,12 +231,7 @@ fn copy_busybox_binary(root: &Path) -> BuildResult<()> {
         }
     };
 
-    debug!(
-        "Host: {} {} → downloading busybox-static ({})",
-        std::env::consts::OS,
-        host_arch,
-        deb_arch
-    );
+    debug!("Downloading busybox-static ({})", deb_arch);
 
     // Create temp directory for extraction
     let temp_dir = std::env::temp_dir().join(format!("hypr-busybox-{}", uuid::Uuid::new_v4()));
@@ -241,10 +240,8 @@ fn copy_busybox_binary(root: &Path) -> BuildResult<()> {
 
     let deb_file = temp_dir.join(format!("busybox-static_{}.deb", deb_arch));
 
-    debug!("Downloading busybox-static from Debian: {}", deb_url);
-
     // Download .deb file
-    let download_status = std::process::Command::new("sh")
+    let download_status = Command::new("sh")
         .arg("-c")
         .arg(format!(
             "curl -fsSL {} -o {} || wget -q -O {} {}",
@@ -264,10 +261,8 @@ fn copy_busybox_binary(root: &Path) -> BuildResult<()> {
         )));
     }
 
-    debug!("Extracting busybox from .deb package");
-
-    // Extract .deb: ar x file.deb data.tar.xz, then tar -xf data.tar.xz ./usr/bin/busybox
-    let extract_status = std::process::Command::new("sh")
+    // Extract .deb
+    let extract_status = Command::new("sh")
         .arg("-c")
         .arg(format!(
             "cd {} && (ar x {} data.tar.xz 2>/dev/null || bsdtar -xf {} data.tar.xz) && \
@@ -280,7 +275,7 @@ fn copy_busybox_binary(root: &Path) -> BuildResult<()> {
         .status()
         .map_err(|e| BuildError::ContextError(format!("Failed to extract busybox: {}", e)))?;
 
-    // Cleanup temp directory
+    // Cleanup
     let _ = fs::remove_dir_all(&temp_dir);
 
     if !extract_status.success() {
@@ -291,7 +286,6 @@ fn copy_busybox_binary(root: &Path) -> BuildResult<()> {
         ));
     }
 
-    // Verify extracted
     if !busybox_dst.exists() {
         return Err(BuildError::ContextError(format!(
             "Busybox binary not found after extraction: {}",
@@ -302,12 +296,11 @@ fn copy_busybox_binary(root: &Path) -> BuildResult<()> {
     set_executable(&busybox_dst)?;
 
     debug!("Busybox extracted successfully");
+
     Ok(())
 }
 
 /// Create cpio archive from directory contents.
-///
-/// Uses `cpio` command to create newc format archive.
 fn create_cpio_archive(source_dir: &Path) -> BuildResult<PathBuf> {
     let output_path =
         std::env::temp_dir().join(format!("hypr-initramfs-{}.cpio", uuid::Uuid::new_v4()));
@@ -315,7 +308,6 @@ fn create_cpio_archive(source_dir: &Path) -> BuildResult<PathBuf> {
     debug!("Creating cpio archive: {} → {}", source_dir.display(), output_path.display());
 
     // Create cpio archive using find + cpio
-    // Command: cd <source_dir> && find . | cpio -o -H newc > <output>
     let output = Command::new("sh")
         .arg("-c")
         .arg(format!(
@@ -333,7 +325,6 @@ fn create_cpio_archive(source_dir: &Path) -> BuildResult<PathBuf> {
         )));
     }
 
-    // Verify cpio was created
     if !output_path.exists() {
         return Err(BuildError::ContextError(format!(
             "cpio archive not created at: {}",

@@ -50,6 +50,7 @@ impl VmmAdapter for MockAdapter {
             id: config.id.clone(),
             pid: Some(12345),
             socket_path: Some(PathBuf::from("/tmp/mock.sock")),
+            child: None,
         })
     }
 

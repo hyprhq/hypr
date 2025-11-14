@@ -6,7 +6,7 @@
 use crate::adapters::{AdapterCapabilities, VmmAdapter};
 use crate::error::{HyprError, Result};
 use crate::types::network::NetworkConfig;
-use crate::types::vm::{DiskConfig, GpuConfig, VmConfig, VmHandle};
+use crate::types::vm::{CommandSpec, DiskConfig, GpuConfig, VmConfig, VmHandle};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -162,6 +162,20 @@ impl Default for HvfAdapter {
 
 #[async_trait]
 impl VmmAdapter for HvfAdapter {
+    async fn build_command(&self, config: &VmConfig) -> Result<CommandSpec> {
+        // Check for GPU and warn
+        self.check_gpu_support(config)?;
+
+        // Build arguments
+        let args = self.build_args(config)?;
+
+        Ok(CommandSpec {
+            program: self.binary_path.to_string_lossy().to_string(),
+            args,
+            env: vec![],
+        })
+    }
+
     #[instrument(skip(self), fields(vm_id = %config.id))]
     async fn create(&self, config: &VmConfig) -> Result<VmHandle> {
         info!("Creating VM with HVF/vfkit");

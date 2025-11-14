@@ -462,21 +462,12 @@ static int create_tarball(const char *layer_id) {
 //   ---
 //   FINALIZE <layer_id>
 //
-// Writes result to <cmd_path>.result with format: "exit=N"
+// Prints result to stdout with [HYPR-RESULT] markers
 static void handle_command_file(const char *cmd_path) {
     char *contents = read_file_contents(cmd_path);
     if (!contents) {
         printf("[HYPR-RESULT]\nexit=127\nerror=Failed to read command file\n[HYPR-RESULT-END]\n");
         fflush(stdout);
-
-        // Write result file
-        char result_path[1024];
-        snprintf(result_path, sizeof(result_path), "%s.result", cmd_path);
-        FILE *f = fopen(result_path, "w");
-        if (f) {
-            fprintf(f, "exit=127\n");
-            fclose(f);
-        }
         return;
     }
 
@@ -559,18 +550,7 @@ static void handle_command_file(const char *cmd_path) {
 
 write_result:
     free(contents);
-
-    // Write result file so host can read exit code
-    char result_path[1024];
-    snprintf(result_path, sizeof(result_path), "%s.result", cmd_path);
-    FILE *f = fopen(result_path, "w");
-    if (f) {
-        fprintf(f, "exit=%d\n", exit_code);
-        fclose(f);
-        LOG("Wrote result file: %s (exit=%d)", result_path, exit_code);
-    } else {
-        LOG("Warning: Failed to write result file: %s", result_path);
-    }
+    // Exit code already sent via stdout markers - no result files needed
 }
 
 static void run_build_mode(void) {

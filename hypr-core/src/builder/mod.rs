@@ -4,6 +4,7 @@
 //! caching, and build execution for creating HYPR images.
 
 pub mod cache;
+pub mod embedded;
 pub mod executor;
 pub mod graph;
 pub mod http_proxy;

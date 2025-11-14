@@ -7,7 +7,7 @@
 
 use crate::error::Result;
 use crate::types::network::NetworkConfig;
-use crate::types::vm::{DiskConfig, GpuConfig, VmConfig, VmHandle};
+use crate::types::vm::{CommandSpec, DiskConfig, GpuConfig, VmConfig, VmHandle};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -19,9 +19,19 @@ use std::time::Duration;
 /// Methods are instrumented by implementations (not here) to maintain observability.
 #[async_trait]
 pub trait VmmAdapter: Send + Sync {
-    /// Create a new VM (allocate resources, configure).
+    /// Build command for spawning a VM (for builder VMs that need stdout capture).
     ///
-    /// This prepares the VM but does not start it. Call `start()` to boot.
+    /// Returns a CommandSpec that the caller can spawn with piped stdout/stderr.
+    /// Use this for build VMs where live output is needed.
+    ///
+    /// This method is async to allow adapters to start prerequisite processes
+    /// (e.g., virtiofsd daemons for CloudHypervisor).
+    async fn build_command(&self, config: &VmConfig) -> Result<CommandSpec>;
+
+    /// Create a new VM (allocate resources, configure, spawn).
+    ///
+    /// This prepares and starts the VM. For runtime VMs only.
+    /// Builder VMs should use `build_command()` instead.
     async fn create(&self, config: &VmConfig) -> Result<VmHandle>;
 
     /// Start an existing VM.

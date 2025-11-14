@@ -1,84 +1,88 @@
-// build.rs - Compile kestrel.c guest agent during cargo build
+// build.rs - Compile kestrel.c for both amd64 and arm64 during cargo build
 //
-// This script compiles kestrel.c into a static binary that can be
-// embedded in an initramfs for VM builds.
+// This script cross-compiles kestrel.c into static binaries for both architectures
+// and places them in embedded/ for compile-time inclusion via include_bytes!
 
 use std::env;
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    // Only compile on Linux (kestrel.c uses Linux-specific headers)
-    // On macOS, kestrel.c will be cross-compiled or distributed separately
-
     println!("cargo:rerun-if-changed=../guest/kestrel.c");
 
-    // Determine output directory
-    let out_dir = env::var("OUT_DIR").unwrap();
-    let kestrel_bin = PathBuf::from(&out_dir).join("kestrel");
-
-    // Source file
     let kestrel_src = PathBuf::from("../guest/kestrel.c");
 
-    // Check if source exists
     if !kestrel_src.exists() {
-        println!("cargo:warning=kestrel.c not found at {:?}, skipping compilation", kestrel_src);
+        println!("cargo:warning=kestrel.c not found, skipping compilation");
         return;
     }
 
-    println!("cargo:warning=Compiling kestrel.c to {:?}", kestrel_bin);
+    // Create embedded directory
+    let embedded_dir = PathBuf::from("embedded");
+    if let Err(e) = fs::create_dir_all(&embedded_dir) {
+        println!("cargo:warning=Failed to create embedded/ directory: {}", e);
+        return;
+    }
 
-    // Compile kestrel.c with static linking and optimization
-    // Flags:
-    //   -static: Static linking (no dynamic dependencies)
-    //   -Os: Optimize for size
-    //   -s: Strip symbols (reduce binary size)
-    //   -o: Output file
+    // Compile for both architectures
+    let targets = [
+        ("x86_64-linux-musl", "amd64"),
+        ("aarch64-linux-musl", "arm64"),
+    ];
+
+    for (zig_target, arch_name) in targets {
+        compile_kestrel(&kestrel_src, &embedded_dir, zig_target, arch_name);
+    }
+}
+
+fn compile_kestrel(src: &PathBuf, embedded_dir: &PathBuf, zig_target: &str, arch_name: &str) {
+    let output_name = format!("kestrel-linux-{}", arch_name);
+    let output_path = embedded_dir.join(&output_name);
+
+    println!("cargo:warning=Compiling {} for {}", output_name, zig_target);
+
     let status = Command::new("zig")
         .args([
             "cc",
             "-target",
-            "aarch64-linux-musl",
+            zig_target,
             "-static",
             "-Os",
             "-s",
             "-o",
-            kestrel_bin.to_str().unwrap(),
-            kestrel_src.to_str().unwrap(),
+            output_path.to_str().unwrap(),
+            src.to_str().unwrap(),
         ])
         .status();
 
     match status {
         Ok(status) if status.success() => {
-            println!("cargo:warning=kestrel.c compiled successfully");
-
-            // Check binary size
-            if let Ok(metadata) = std::fs::metadata(&kestrel_bin) {
-                println!("cargo:warning=kestrel binary size: {} KB", metadata.len() / 1024);
+            if let Ok(metadata) = fs::metadata(&output_path) {
+                println!(
+                    "cargo:warning={} compiled successfully ({} KB)",
+                    output_name,
+                    metadata.len() / 1024
+                );
             }
 
             // Make executable
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                if let Ok(metadata) = std::fs::metadata(&kestrel_bin) {
+                if let Ok(metadata) = fs::metadata(&output_path) {
                     let mut permissions = metadata.permissions();
                     permissions.set_mode(0o755);
-                    let _ = std::fs::set_permissions(&kestrel_bin, permissions);
+                    let _ = fs::set_permissions(&output_path, permissions);
                 }
             }
-
-            // Set environment variable for runtime access
-            println!("cargo:rustc-env=KESTREL_BIN_PATH={}", kestrel_bin.display());
         }
         Ok(_) => {
-            println!("cargo:warning=kestrel.c compilation failed (non-zero exit code)");
-            println!("cargo:warning=Build will continue, but VM-based builder may not work");
+            println!("cargo:warning={} compilation failed (non-zero exit)", output_name);
         }
         Err(e) => {
-            println!("cargo:warning=Failed to execute cc: {}", e);
-            println!("cargo:warning=Make sure a C compiler (gcc/clang) is installed");
-            println!("cargo:warning=Build will continue, but VM-based builder may not work");
+            println!("cargo:warning=Failed to compile {}: {}", output_name, e);
+            println!("cargo:warning=Make sure zig is installed: brew install zig");
         }
     }
 }

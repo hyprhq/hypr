@@ -11,7 +11,10 @@ use crate::error::{HyprError, Result};
 use crate::types::vm::{VirtioFsMount, VmConfig, VmHandle};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::sync::Mutex;
 use tracing::{debug, error, info, instrument, warn};
 
 /// VM-based builder that executes builds in isolated Linux VMs with minimal initramfs.
@@ -123,20 +126,63 @@ impl VmBuilder {
             warn!("HTTP proxy not running - network operations in VM will fail");
         }
 
-        // Spawn builder VM
-        let vm =
+        // Spawn builder VM with stdout capture
+        let (vm, mut child) =
             self.spawn_builder_vm(context_dir, output_layer.parent().unwrap(), base_rootfs).await?;
 
+        // Spawn background task to stream stdout and parse [HYPR-RESULT] markers
+        let stdout = child.stdout.take().ok_or_else(|| {
+            HyprError::BuildFailed { reason: "Failed to capture VM stdout".to_string() }
+        })?;
+
+        let exit_code_result = Arc::new(Mutex::new(None));
+        let exit_code_clone = exit_code_result.clone();
+
+        // Background task: stream stdout and parse result markers
+        let stdout_task = tokio::spawn(async move {
+            let reader = BufReader::new(stdout);
+            let mut lines = reader.lines();
+
+            while let Ok(Some(line)) = lines.next_line().await {
+                // Print live output
+                println!("{}", line);
+
+                // Parse [HYPR-RESULT] markers
+                if line == "[HYPR-RESULT]" {
+                    // Read until [HYPR-RESULT-END]
+                    let mut exit_code = None;
+                    while let Ok(Some(result_line)) = lines.next_line().await {
+                        println!("{}", result_line);
+                        if result_line == "[HYPR-RESULT-END]" {
+                            break;
+                        }
+                        if let Some(code_str) = result_line.strip_prefix("exit=") {
+                            exit_code = code_str.parse::<i32>().ok();
+                        }
+                    }
+                    if let Some(code) = exit_code {
+                        *exit_code_clone.lock().await = Some(code);
+                    }
+                }
+            }
+        });
+
         // Send build command via filesystem IPC
-        let exit_code = self.send_build_command(&vm, step, context_dir).await;
+        let result = self.send_build_command(&vm, step, context_dir).await;
+
+        // Wait for stdout task to finish
+        let _ = stdout_task.await;
 
         // Terminate VM (always, even on error)
+        let _ = child.kill().await;
         if let Err(e) = self.terminate_vm(&vm).await {
             warn!("Failed to terminate builder VM: {}", e);
         }
 
-        // Check build result
-        let exit_code = exit_code?;
+        // Check build result from stdout markers
+        let exit_code = exit_code_result.lock().await.unwrap_or(127);
+        result?; // Check for IPC errors first
+
         if exit_code != 0 {
             return Err(HyprError::BuildFailed {
                 reason: format!("Build command exited with code {}", exit_code),
@@ -154,13 +200,14 @@ impl VmBuilder {
     }
 
     /// Spawn an ephemeral builder VM with minimal initramfs.
+    /// Returns (VmHandle, Child) where Child provides stdout/stderr access.
     #[instrument(skip(self))]
     async fn spawn_builder_vm(
         &mut self,
         context_dir: &Path,
         output_dir: &Path,
         base_rootfs: Option<&Path>,
-    ) -> Result<VmHandle> {
+    ) -> Result<(VmHandle, tokio::process::Child)> {
         debug!("Spawning builder VM");
 
         let vm_id = format!("builder-{}", uuid::Uuid::new_v4());
@@ -210,32 +257,52 @@ impl VmBuilder {
             virtio_fs_mounts,
         };
 
-        // Boot the VM (hypervisor creates the Unix socket, guest connects via vsock)
-        let handle = self.adapter.create(&config).await.map_err(|e| {
-            error!("Failed to spawn builder VM: {}", e);
-            HyprError::BuildFailed { reason: format!("Failed to spawn builder VM: {}", e) }
+        // Build command (async - allows adapters to start prerequisites like virtiofsd)
+        let cmd_spec = self.adapter.build_command(&config).await.map_err(|e| {
+            error!("Failed to build VM command: {}", e);
+            HyprError::BuildFailed { reason: format!("Failed to build VM command: {}", e) }
         })?;
 
-        // Wait for kestrel to be ready (watches for "[kestrel] READY" in stdout)
-        // TODO: Implement stdout monitoring
-        info!("Builder VM started, waiting for kestrel to be ready...");
-        tokio::time::sleep(Duration::from_secs(2)).await; // Temporary: give VM time to boot
+        // Spawn with piped stdout/stderr for live output
+        info!("Spawning builder VM: {} {:?}", cmd_spec.program, cmd_spec.args);
+        let child = tokio::process::Command::new(&cmd_spec.program)
+            .args(&cmd_spec.args)
+            .envs(cmd_spec.env)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                error!("Failed to spawn builder VM: {}", e);
+                HyprError::BuildFailed { reason: format!("Failed to spawn builder VM: {}", e) }
+            })?;
 
-        Ok(handle)
+        let pid = child.id().ok_or_else(|| {
+            HyprError::BuildFailed { reason: "Failed to get VM process PID".to_string() }
+        })?;
+
+        let handle = VmHandle {
+            id: vm_id.clone(),
+            pid: Some(pid),
+            socket_path: None,
+        };
+
+        info!("Builder VM spawned: pid={}", pid);
+
+        Ok((handle, child))
     }
 
     /// Send a build command to builder via filesystem IPC.
     ///
     /// Writes command file to /context/.hypr/commands/NNN.cmd
-    /// Waits for kestrel to process and delete the file
-    /// Parses [HYPR-RESULT] block from stdout
+    /// Waits for kestrel to delete the file (signals completion)
+    /// Exit code comes from stdout markers parsed by caller
     #[instrument(skip(self, step), fields(step_type = %step.step_type()))]
     async fn send_build_command(
         &self,
         _handle: &VmHandle,
         step: &BuildStep,
         context_dir: &std::path::Path,
-    ) -> Result<i32> {
+    ) -> Result<()> {
         debug!("Sending build command via filesystem");
 
         // Create .hypr/commands directory if it doesn't exist
@@ -264,14 +331,12 @@ impl VmBuilder {
             reason: format!("Failed to write command file: {}", e),
         })?;
 
-        debug!("Command file written: {}", cmd_file.display());
+        info!("Command file written: {}", cmd_file.display());
 
-        // Wait for result file to appear (kestrel writes NNN.cmd.result)
-        let result_file = cmd_file.with_extension("cmd.result");
+        // Wait for kestrel to delete the command file (signals completion)
         let start = Instant::now();
-        while !result_file.exists() {
+        while cmd_file.exists() {
             if start.elapsed() > Duration::from_secs(300) {
-                // 5 minute timeout
                 return Err(HyprError::BuildFailed {
                     reason: "Command execution timeout (5 minutes)".to_string(),
                 });
@@ -279,29 +344,8 @@ impl VmBuilder {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
-        // Read result file
-        let result_contents = tokio::fs::read_to_string(&result_file).await.map_err(|e| {
-            HyprError::BuildFailed { reason: format!("Failed to read result file: {}", e) }
-        })?;
-
-        // Parse exit code from "exit=N" format
-        let exit_code = if let Some(line) = result_contents.lines().next() {
-            if let Some(code_str) = line.strip_prefix("exit=") {
-                code_str.parse::<i32>().unwrap_or(127)
-            } else {
-                127
-            }
-        } else {
-            127
-        };
-
-        debug!("Command processed by kestrel, exit_code={}", exit_code);
-
-        // Clean up command and result files
-        let _ = tokio::fs::remove_file(&cmd_file).await;
-        let _ = tokio::fs::remove_file(&result_file).await;
-
-        Ok(exit_code)
+        info!("Command completed (file deleted by kestrel)");
+        Ok(())
     }
 
     /// Terminate a builder VM.

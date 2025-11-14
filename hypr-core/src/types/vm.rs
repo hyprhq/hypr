@@ -197,7 +197,22 @@ pub enum GpuVendor {
     Metal, // macOS Metal
 }
 
+/// Command specification for spawning a VM.
+/// Adapters build this, vm_builder spawns it.
+#[derive(Debug, Clone)]
+pub struct CommandSpec {
+    /// Program to execute (e.g., "vfkit", "cloud-hypervisor")
+    pub program: String,
+
+    /// Command-line arguments
+    pub args: Vec<String>,
+
+    /// Environment variables
+    pub env: Vec<(String, String)>,
+}
+
 /// VM handle returned by adapter after creation.
+/// Represents "this VM exists in the world" but doesn't own the process.
 #[derive(Debug, Clone)]
 pub struct VmHandle {
     /// VM identifier
