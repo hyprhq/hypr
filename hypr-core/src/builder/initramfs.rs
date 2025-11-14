@@ -122,8 +122,7 @@ fn extract_embedded_kestrel(arch: &str, dest: &Path) -> BuildResult<()> {
             .map_err(|e| BuildError::IoError { path: temp_path.clone(), source: e })?;
         f.write_all(kestrel_bytes)
             .map_err(|e| BuildError::IoError { path: temp_path.clone(), source: e })?;
-        f.flush()
-            .map_err(|e| BuildError::IoError { path: temp_path.clone(), source: e })?;
+        f.flush().map_err(|e| BuildError::IoError { path: temp_path.clone(), source: e })?;
     }
 
     // Atomic rename
@@ -170,8 +169,8 @@ fn validate_and_copy_override(src: &Path, dest: &Path) -> BuildResult<()> {
     }
 
     // Verify it's an ELF binary (basic sanity check)
-    let mut f = File::open(src)
-        .map_err(|e| BuildError::IoError { path: src.to_path_buf(), source: e })?;
+    let mut f =
+        File::open(src).map_err(|e| BuildError::IoError { path: src.to_path_buf(), source: e })?;
     let mut magic = [0u8; 4];
     use std::io::Read;
     f.read_exact(&mut magic)
@@ -186,8 +185,7 @@ fn validate_and_copy_override(src: &Path, dest: &Path) -> BuildResult<()> {
     }
 
     // Copy to destination
-    fs::copy(src, dest)
-        .map_err(|e| BuildError::IoError { path: dest.to_path_buf(), source: e })?;
+    fs::copy(src, dest).map_err(|e| BuildError::IoError { path: dest.to_path_buf(), source: e })?;
 
     debug!("Override kestrel copied successfully");
 

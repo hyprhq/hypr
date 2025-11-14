@@ -307,7 +307,8 @@ impl VmmAdapter for CloudHypervisorAdapter {
         // Start virtiofsd daemons if virtio-fs mounts are present
         let virtiofsd_daemons = if !config.virtio_fs_mounts.is_empty() {
             info!("Starting {} virtiofsd daemons for build VM", config.virtio_fs_mounts.len());
-            let daemons = self.start_virtiofsd_daemons(&config.id, &config.virtio_fs_mounts).await?;
+            let daemons =
+                self.start_virtiofsd_daemons(&config.id, &config.virtio_fs_mounts).await?;
 
             // Store daemons for cleanup (vm_builder will need to call delete() later)
             {

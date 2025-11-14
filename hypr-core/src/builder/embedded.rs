@@ -88,7 +88,7 @@ mod tests {
         // Without KESTREL_BIN_PATH, should use embedded
         std::env::remove_var("KESTREL_BIN_PATH");
         match resolve_kestrel_source() {
-            KestrelSource::Embedded => {},
+            KestrelSource::Embedded => {}
             _ => panic!("Expected Embedded source"),
         }
 
@@ -105,7 +105,7 @@ mod tests {
         match resolve_kestrel_source() {
             KestrelSource::Override(path) => {
                 assert_eq!(path.to_str().unwrap(), "/custom/path/kestrel");
-            },
+            }
             _ => panic!("Expected Override source"),
         }
         std::env::remove_var("KESTREL_BIN_PATH");

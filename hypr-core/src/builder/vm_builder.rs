@@ -131,8 +131,8 @@ impl VmBuilder {
             self.spawn_builder_vm(context_dir, output_layer.parent().unwrap(), base_rootfs).await?;
 
         // Spawn background task to stream stdout and parse [HYPR-RESULT] markers
-        let stdout = child.stdout.take().ok_or_else(|| {
-            HyprError::BuildFailed { reason: "Failed to capture VM stdout".to_string() }
+        let stdout = child.stdout.take().ok_or_else(|| HyprError::BuildFailed {
+            reason: "Failed to capture VM stdout".to_string(),
         })?;
 
         let exit_code_result = Arc::new(Mutex::new(None));
@@ -276,15 +276,11 @@ impl VmBuilder {
                 HyprError::BuildFailed { reason: format!("Failed to spawn builder VM: {}", e) }
             })?;
 
-        let pid = child.id().ok_or_else(|| {
-            HyprError::BuildFailed { reason: "Failed to get VM process PID".to_string() }
+        let pid = child.id().ok_or_else(|| HyprError::BuildFailed {
+            reason: "Failed to get VM process PID".to_string(),
         })?;
 
-        let handle = VmHandle {
-            id: vm_id.clone(),
-            pid: Some(pid),
-            socket_path: None,
-        };
+        let handle = VmHandle { id: vm_id.clone(), pid: Some(pid), socket_path: None };
 
         info!("Builder VM spawned: pid={}", pid);
 

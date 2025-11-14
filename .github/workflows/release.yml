@@ -13,6 +13,7 @@ env:
 
 jobs:
   # Build Rust binaries for all platforms
+  # NOTE: Kestrel is now embedded at compile-time via build.rs
   build-rust:
     name: Build Rust (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
@@ -64,7 +65,15 @@ jobs:
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install protobuf
+          brew install protobuf zig
+
+      - name: Install Zig (Linux - for cross-compiling kestrel)
+        if: runner.os == 'Linux'
+        run: |
+          wget https://ziglang.org/download/0.11.0/zig-linux-x86_64-0.11.0.tar.xz
+          tar -xf zig-linux-x86_64-0.11.0.tar.xz
+          sudo mv zig-linux-x86_64-0.11.0 /usr/local/zig
+          echo "/usr/local/zig" >> $GITHUB_PATH
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -84,7 +93,7 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-build-target-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build Rust workspace
+      - name: Build Rust workspace (kestrel embedded automatically via build.rs)
         run: |
           cargo build --release --target ${{ matrix.target }}
 
@@ -113,64 +122,10 @@ jobs:
           name: rust-binaries-${{ matrix.platform }}-${{ matrix.arch }}
           path: dist/*
 
-  # Build kestrel (C) for Linux only
-  build-kestrel:
-    name: Build kestrel (${{ matrix.arch }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          # Linux x86_64
-          - os: ubuntu-latest
-            arch: amd64
-
-          # Linux aarch64 (native arm64 runner!)
-          - os: ubuntu-24.04-arm
-            arch: arm64
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Build kestrel
-        run: |
-          cd guest
-
-          # Compile kestrel.c statically (native compilation)
-          gcc -static -O2 -Wall -Wextra \
-            -o kestrel-linux-${{ matrix.arch }} \
-            kestrel.c
-
-          # Strip debug symbols
-          strip kestrel-linux-${{ matrix.arch }}
-
-          # Verify it's a static binary
-          file kestrel-linux-${{ matrix.arch }}
-          ldd kestrel-linux-${{ matrix.arch }} || echo "Static binary (no dynamic deps)"
-
-      - name: Prepare kestrel binary
-        run: |
-          mkdir -p dist
-          cp guest/kestrel-linux-${{ matrix.arch }} dist/
-          chmod +x dist/kestrel-linux-${{ matrix.arch }}
-
-          # Generate checksum
-          cd dist
-          shasum -a 256 kestrel-linux-${{ matrix.arch }} > kestrel-linux-${{ matrix.arch }}.sha256
-
-          # Show binary info
-          ls -lh kestrel-linux-${{ matrix.arch }}
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: kestrel-linux-${{ matrix.arch }}
-          path: dist/*
-
   # Create GitHub Release
   create-release:
     name: Create GitHub Release
-    needs: [build-rust, build-kestrel]
+    needs: [build-rust]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -195,11 +150,11 @@ jobs:
           echo "Release contents:"
           ls -lh release/
 
-          # Verify we have all 10 binaries + checksums
+          # Verify we have 8 binaries + checksums
           echo ""
           echo "Binary count:"
           ls -1 release/ | grep -v ".sha256" | wc -l
-          echo "Expected: 10 binaries (2 Rust × 4 platforms + 2 kestrel × 1 platform × 2 arches)"
+          echo "Expected: 8 binaries (hypr + hyprd × 4 platforms)"
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
@@ -214,12 +169,12 @@ jobs:
 
             ### Binaries Included
 
-            **Rust Binaries (hypr CLI + hyprd daemon):**
+            **HYPR CLI + Daemon (with embedded kestrel):**
             - Linux: `hypr-linux-amd64`, `hypr-linux-arm64`, `hyprd-linux-amd64`, `hyprd-linux-arm64`
             - macOS: `hypr-darwin-amd64`, `hypr-darwin-arm64`, `hyprd-darwin-amd64`, `hyprd-darwin-arm64`
 
-            **Kestrel (Guest Agent):**
-            - Linux: `kestrel-linux-amd64`, `kestrel-linux-arm64`
+            **Note:** Kestrel (guest agent) is now embedded in the binaries at compile-time.
+            No separate kestrel download required!
 
             ### Installation
 
@@ -235,6 +190,14 @@ jobs:
             curl -fsSL https://github.com/hyprhq/hypr/releases/download/${{ inputs.version }}/hypr-darwin-arm64 -o hypr
             chmod +x hypr
             sudo mv hypr /usr/local/bin/
+            ```
+
+            ### Custom Kestrel (Advanced)
+
+            If you need a custom kestrel binary for development or testing:
+            ```bash
+            export KESTREL_BIN_PATH=/path/to/custom/kestrel
+            hypr build -t myapp .
             ```
 
             ### Verification
@@ -265,10 +228,6 @@ jobs:
             release/hyprd-darwin-amd64.sha256
             release/hyprd-darwin-arm64
             release/hyprd-darwin-arm64.sha256
-            release/kestrel-linux-amd64
-            release/kestrel-linux-amd64.sha256
-            release/kestrel-linux-arm64
-            release/kestrel-linux-arm64.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

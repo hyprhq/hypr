@@ -26,10 +26,7 @@ fn main() {
     }
 
     // Compile for both architectures
-    let targets = [
-        ("x86_64-linux-musl", "amd64"),
-        ("aarch64-linux-musl", "arm64"),
-    ];
+    let targets = [("x86_64-linux-musl", "amd64"), ("aarch64-linux-musl", "arm64")];
 
     for (zig_target, arch_name) in targets {
         compile_kestrel(&kestrel_src, &embedded_dir, zig_target, arch_name);
