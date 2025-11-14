@@ -86,11 +86,7 @@ impl HyprService for HyprServiceImpl {
         let vm = self.state.get_vm(&req.id).await.map_err(|e| Status::not_found(e.to_string()))?;
 
         // Create handle for adapter
-        let handle = hypr_core::VmHandle {
-            id: vm.id.clone(),
-            pid: vm.pid,
-            socket_path: None,
-        };
+        let handle = hypr_core::VmHandle { id: vm.id.clone(), pid: vm.pid, socket_path: None };
 
         // Start via adapter
         self.adapter.start(&handle).await.map_err(|e| Status::internal(e.to_string()))?;
@@ -123,11 +119,7 @@ impl HyprService for HyprServiceImpl {
         let vm = self.state.get_vm(&req.id).await.map_err(|e| Status::not_found(e.to_string()))?;
 
         // Create handle for adapter
-        let handle = hypr_core::VmHandle {
-            id: vm.id.clone(),
-            pid: vm.pid,
-            socket_path: None,
-        };
+        let handle = hypr_core::VmHandle { id: vm.id.clone(), pid: vm.pid, socket_path: None };
 
         // Stop via adapter
         self.adapter.stop(&handle, timeout).await.map_err(|e| Status::internal(e.to_string()))?;
@@ -166,11 +158,7 @@ impl HyprService for HyprServiceImpl {
         }
 
         // Create handle for adapter
-        let handle = hypr_core::VmHandle {
-            id: vm.id.clone(),
-            pid: vm.pid,
-            socket_path: None,
-        };
+        let handle = hypr_core::VmHandle { id: vm.id.clone(), pid: vm.pid, socket_path: None };
 
         // Delete via adapter
         self.adapter.delete(&handle).await.map_err(|e| Status::internal(e.to_string()))?;

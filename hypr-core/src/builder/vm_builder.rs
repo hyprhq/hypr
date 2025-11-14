@@ -240,13 +240,12 @@ impl VmBuilder {
 
         // Create .hypr/commands directory if it doesn't exist
         let commands_dir = context_dir.join(".hypr/commands");
-        tokio::fs::create_dir_all(&commands_dir).await.map_err(|e| {
-            HyprError::BuildFailed { reason: format!("Failed to create commands directory: {}", e) }
+        tokio::fs::create_dir_all(&commands_dir).await.map_err(|e| HyprError::BuildFailed {
+            reason: format!("Failed to create commands directory: {}", e),
         })?;
 
         // Generate command file (sequential numbering)
-        static COMMAND_COUNTER: std::sync::atomic::AtomicU32 =
-            std::sync::atomic::AtomicU32::new(0);
+        static COMMAND_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let cmd_num = COMMAND_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let cmd_file = commands_dir.join(format!("{:03}.cmd", cmd_num));
 
@@ -261,8 +260,8 @@ impl VmBuilder {
         };
 
         // Write command file
-        tokio::fs::write(&cmd_file, command_text).await.map_err(|e| {
-            HyprError::BuildFailed { reason: format!("Failed to write command file: {}", e) }
+        tokio::fs::write(&cmd_file, command_text).await.map_err(|e| HyprError::BuildFailed {
+            reason: format!("Failed to write command file: {}", e),
         })?;
 
         debug!("Command file written: {}", cmd_file.display());

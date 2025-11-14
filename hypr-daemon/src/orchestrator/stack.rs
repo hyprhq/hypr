@@ -270,8 +270,7 @@ impl StackOrchestrator {
 
             // Get VM from state
             if let Ok(vm) = self.state.get_vm(&service.vm_id).await {
-                let handle =
-                    VmHandle { id: vm.id.clone(), pid: vm.pid, socket_path: None };
+                let handle = VmHandle { id: vm.id.clone(), pid: vm.pid, socket_path: None };
 
                 // Stop VM (30 second timeout)
                 let timeout = Duration::from_secs(30);

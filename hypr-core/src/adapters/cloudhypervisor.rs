@@ -378,11 +378,7 @@ impl VmmAdapter for CloudHypervisorAdapter {
         info!(pid = pid, duration_ms = start.elapsed().as_millis(), "VM created successfully");
 
         // Store the API socket path for VM control
-        Ok(VmHandle {
-            id: config.id.clone(),
-            pid: Some(pid),
-            socket_path: Some(api_socket),
-        })
+        Ok(VmHandle { id: config.id.clone(), pid: Some(pid), socket_path: Some(api_socket) })
     }
 
     #[instrument(skip(self), fields(vm_id = %handle.id))]
