@@ -1,56 +1,64 @@
-//! Embedded kestrel binaries for hermetic builds.
+//! Embedded initramfs for hermetic builds.
 //!
-//! These binaries are embedded at compile-time using include_bytes! and are
-//! extracted atomically at runtime when building initramfs.
+//! Complete initramfs.cpio archives are embedded at compile-time using include_bytes!
+//! and extracted atomically at runtime when spawning builder VMs.
+//!
+//! Each initramfs contains:
+//! - kestrel binary (PID 1 init)
+//! - busybox-static (utilities)
+//! - Basic directory structure
 //!
 //! This ensures:
-//! - Zero network dependencies
-//! - Deterministic builds
+//! - Zero network dependencies at runtime
+//! - Deterministic builds (locked versions)
 //! - Version lockstep with HYPR binary
 //! - Offline capability
+//! - Fast initramfs creation (~1ms to write bytes to disk)
 
-/// Embedded kestrel binary for Linux amd64 (x86_64)
-pub const KESTREL_LINUX_AMD64: &[u8] = include_bytes!("../../embedded/kestrel-linux-amd64");
+/// Embedded initramfs for Linux amd64 (x86_64)
+pub const INITRAMFS_LINUX_AMD64: &[u8] =
+    include_bytes!("../../embedded/initramfs-linux-amd64.cpio");
 
-/// Embedded kestrel binary for Linux arm64 (aarch64)
-pub const KESTREL_LINUX_ARM64: &[u8] = include_bytes!("../../embedded/kestrel-linux-arm64");
+/// Embedded initramfs for Linux arm64 (aarch64)
+pub const INITRAMFS_LINUX_ARM64: &[u8] =
+    include_bytes!("../../embedded/initramfs-linux-arm64.cpio");
 
-/// Source of kestrel binary (embedded or override)
+/// Source of initramfs (embedded or override)
 #[derive(Debug, Clone)]
-pub enum KestrelSource {
-    /// Use embedded binary (default, deterministic)
+pub enum InitramfsSource {
+    /// Use embedded initramfs.cpio (default, deterministic)
     Embedded,
     /// Use override path (developer/integrator intent)
     Override(std::path::PathBuf),
 }
 
-/// Resolve which kestrel source to use.
+/// Resolve which initramfs source to use.
 ///
 /// Priority:
-/// 1. KESTREL_BIN_PATH environment variable (explicit override)
-/// 2. Embedded binary (default, always present)
+/// 1. INITRAMFS_PATH environment variable (explicit override)
+/// 2. Embedded initramfs.cpio (default, always present)
 ///
 /// Note: This is NOT a fallback chain. If override is set but invalid,
 /// we fail fast rather than silently falling back.
-pub fn resolve_kestrel_source() -> KestrelSource {
-    if let Ok(path) = std::env::var("KESTREL_BIN_PATH") {
-        return KestrelSource::Override(std::path::PathBuf::from(path));
+pub fn resolve_initramfs_source() -> InitramfsSource {
+    if let Ok(path) = std::env::var("INITRAMFS_PATH") {
+        return InitramfsSource::Override(std::path::PathBuf::from(path));
     }
 
-    KestrelSource::Embedded
+    InitramfsSource::Embedded
 }
 
-/// Get the embedded kestrel binary for the specified architecture.
+/// Get the embedded initramfs for the specified architecture.
 ///
 /// # Arguments
 /// * `arch` - "amd64" or "arm64"
 ///
 /// # Returns
-/// Byte slice of the embedded kestrel binary
-pub fn get_embedded_kestrel(arch: &str) -> Option<&'static [u8]> {
+/// Byte slice of the embedded initramfs.cpio
+pub fn get_embedded_initramfs(arch: &str) -> Option<&'static [u8]> {
     match arch {
-        "amd64" => Some(KESTREL_LINUX_AMD64),
-        "arm64" => Some(KESTREL_LINUX_ARM64),
+        "amd64" => Some(INITRAMFS_LINUX_AMD64),
+        "arm64" => Some(INITRAMFS_LINUX_ARM64),
         _ => None,
     }
 }
@@ -60,54 +68,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_embedded_kestrel_amd64_exists() {
-        assert!(!KESTREL_LINUX_AMD64.is_empty());
-        // Verify ELF magic number (7F 45 4C 46)
-        assert_eq!(&KESTREL_LINUX_AMD64[0..4], &[0x7F, 0x45, 0x4C, 0x46]);
+    fn test_embedded_initramfs_amd64_exists() {
+        assert!(!INITRAMFS_LINUX_AMD64.is_empty());
+        // Verify cpio magic number (070701 = newc format ASCII)
+        // First 6 bytes should be "070701"
+        assert_eq!(&INITRAMFS_LINUX_AMD64[0..6], b"070701");
     }
 
     #[test]
-    fn test_embedded_kestrel_arm64_exists() {
-        assert!(!KESTREL_LINUX_ARM64.is_empty());
-        // Verify ELF magic number
-        assert_eq!(&KESTREL_LINUX_ARM64[0..4], &[0x7F, 0x45, 0x4C, 0x46]);
+    fn test_embedded_initramfs_arm64_exists() {
+        assert!(!INITRAMFS_LINUX_ARM64.is_empty());
+        // Verify cpio magic number
+        assert_eq!(&INITRAMFS_LINUX_ARM64[0..6], b"070701");
     }
 
     #[test]
-    fn test_get_embedded_kestrel() {
-        assert!(get_embedded_kestrel("amd64").is_some());
-        assert!(get_embedded_kestrel("arm64").is_some());
-        assert!(get_embedded_kestrel("invalid").is_none());
+    fn test_get_embedded_initramfs() {
+        assert!(get_embedded_initramfs("amd64").is_some());
+        assert!(get_embedded_initramfs("arm64").is_some());
+        assert!(get_embedded_initramfs("invalid").is_none());
     }
 
     #[test]
-    fn test_resolve_kestrel_source_default() {
+    fn test_resolve_initramfs_source_default() {
         // Save current value
-        let original = std::env::var("KESTREL_BIN_PATH").ok();
+        let original = std::env::var("INITRAMFS_PATH").ok();
 
-        // Without KESTREL_BIN_PATH, should use embedded
-        std::env::remove_var("KESTREL_BIN_PATH");
-        match resolve_kestrel_source() {
-            KestrelSource::Embedded => {}
+        // Without INITRAMFS_PATH, should use embedded
+        std::env::remove_var("INITRAMFS_PATH");
+        match resolve_initramfs_source() {
+            InitramfsSource::Embedded => {}
             _ => panic!("Expected Embedded source"),
         }
 
         // Restore original value
         if let Some(val) = original {
-            std::env::set_var("KESTREL_BIN_PATH", val);
+            std::env::set_var("INITRAMFS_PATH", val);
         }
     }
 
     #[test]
-    fn test_resolve_kestrel_source_override() {
-        // With KESTREL_BIN_PATH, should use override
-        std::env::set_var("KESTREL_BIN_PATH", "/custom/path/kestrel");
-        match resolve_kestrel_source() {
-            KestrelSource::Override(path) => {
-                assert_eq!(path.to_str().unwrap(), "/custom/path/kestrel");
+    fn test_resolve_initramfs_source_override() {
+        // With INITRAMFS_PATH, should use override
+        std::env::set_var("INITRAMFS_PATH", "/custom/path/initramfs.cpio");
+        match resolve_initramfs_source() {
+            InitramfsSource::Override(path) => {
+                assert_eq!(path.to_str().unwrap(), "/custom/path/initramfs.cpio");
             }
             _ => panic!("Expected Override source"),
         }
-        std::env::remove_var("KESTREL_BIN_PATH");
+        std::env::remove_var("INITRAMFS_PATH");
     }
 }

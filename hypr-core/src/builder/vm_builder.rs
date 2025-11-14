@@ -1,10 +1,11 @@
 //! VM-based builder for secure, isolated image builds.
 //!
-//! Builds occur inside ephemeral Alpine Linux VMs with:
-//! - No network interface (HTTP traffic proxied via vsock to host)
+//! Builds occur inside ephemeral Linux VMs with:
+//! - NO network interface (hermetic builds, no external access)
 //! - Build context shared via virtio-fs
-//! - Commands sent via vsock to builder-agent.c
-//! - Layer tarballs extracted via virtio-fs
+//! - Commands sent via filesystem IPC (virtio-fs command files)
+//! - Results received via stdout markers ([HYPR-RESULT])
+//! - Layer tarballs written to virtio-fs shared mount
 
 use crate::adapters::VmmAdapter;
 use crate::error::{HyprError, Result};
@@ -22,19 +23,24 @@ use tracing::{debug, error, info, instrument, warn};
 /// Each build spawns a fresh VM (<100ms cold start), executes build steps,
 /// extracts the resulting layer, and terminates the VM.
 ///
-/// # Architecture
+/// # Architecture (Canonical Spec - Filesystem-based IPC)
 ///
 /// ```text
 /// Host:
-///   - BuilderHttpProxy on localhost:41010 (proxies to internet)
-///   - VmBuilder spawns minimal Linux VM with initramfs + virtio-fs mounts
-///   - OCI base images pulled and shared via virtio-fs
+///   - VmBuilder spawns ephemeral Linux VM with initramfs + virtio-fs mounts
+///   - Writes command files to /context/.hypr/commands/NNN.cmd
+///   - Streams VM stdout for live output + [HYPR-RESULT] markers
+///   - NO network setup (builds are hermetic)
 ///
-/// Guest (minimal initramfs):
-///   - kestrel.c (PID 1, mode=build) listens on vsock port 41011
-///   - Mounts base image rootfs from virtio-fs, pivots root
-///   - Build commands execute in base image context (chroot)
-///   - Layers written to /shared (virtio-fs) → host extracts
+/// Guest (minimal initramfs - kestrel in BUILD mode):
+///   - Mounts virtio-fs: context → /context, shared → /shared, base → /base
+///   - Creates overlayfs (base + tmpfs upper), chroots into it
+///   - Watches /context/.hypr/commands/ for command files
+///   - Executes commands, prints [HYPR-RESULT]\nexit=N\n[HYPR-RESULT-END]
+///   - Deletes command file to signal completion
+///   - Layers written to /shared (virtio-fs) → host reads
+///
+/// NO vsock. NO network. Only virtio-fs + stdout.
 /// ```
 pub struct VmBuilder {
     /// VMM adapter for spawning VMs
@@ -45,9 +51,6 @@ pub struct VmBuilder {
 
     /// Work directory for build contexts and layer extraction (reserved for future use)
     _work_dir: PathBuf,
-
-    /// Whether HTTP proxy is running
-    proxy_running: bool,
 
     /// Cached initramfs path (generated once, reused across builds)
     initramfs_cache: Option<PathBuf>,
@@ -68,13 +71,7 @@ impl VmBuilder {
         kernel_path: PathBuf,
         work_dir: PathBuf,
     ) -> Self {
-        Self {
-            adapter,
-            kernel_path,
-            _work_dir: work_dir,
-            proxy_running: false,
-            initramfs_cache: None,
-        }
+        Self { adapter, kernel_path, _work_dir: work_dir, initramfs_cache: None }
     }
 
     /// Get or create the initramfs for builder VMs.
@@ -119,12 +116,8 @@ impl VmBuilder {
         info!("Executing build step: {}", step.step_type());
         let start = Instant::now();
 
-        // TODO: HTTP proxy for VM builder network access
-        // For testing: temporarily disabled until proxy is implemented
-        // The builder VM will fail on RUN commands that need network
-        if !self.proxy_running {
-            warn!("HTTP proxy not running - network operations in VM will fail");
-        }
+        // NOTE: Build VMs have NO network by design (hermetic builds)
+        // All dependencies must be provided via base images or build context
 
         // Spawn builder VM with stdout capture
         let (vm, mut child) =
