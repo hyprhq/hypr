@@ -70,9 +70,16 @@ jobs:
       - name: Install Zig (Linux - for cross-compiling kestrel)
         if: runner.os == 'Linux'
         run: |
-          wget https://ziglang.org/download/0.11.0/zig-linux-x86_64-0.11.0.tar.xz
-          tar -xf zig-linux-x86_64-0.11.0.tar.xz
-          sudo mv zig-linux-x86_64-0.11.0 /usr/local/zig
+          # Detect host architecture and download appropriate Zig
+          if [ "$(uname -m)" == "aarch64" ]; then
+            ZIG_ARCH="aarch64"
+          else
+            ZIG_ARCH="x86_64"
+          fi
+
+          wget https://ziglang.org/download/0.11.0/zig-linux-${ZIG_ARCH}-0.11.0.tar.xz
+          tar -xf zig-linux-${ZIG_ARCH}-0.11.0.tar.xz
+          sudo mv zig-linux-${ZIG_ARCH}-0.11.0 /usr/local/zig
           # Verify zig is accessible
           /usr/local/zig/zig version
 

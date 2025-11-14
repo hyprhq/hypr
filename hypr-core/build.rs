@@ -115,11 +115,57 @@ fn build_initramfs(kestrel_src: &Path, embedded_dir: &Path, zig_target: &str, ar
     }
 }
 
+/// Find zig binary in common installation locations.
+fn find_zig_binary() -> Option<PathBuf> {
+    // Try PATH first
+    if let Ok(output) = Command::new("which").arg("zig").output() {
+        if output.status.success() {
+            if let Ok(path) = String::from_utf8(output.stdout) {
+                let path = path.trim();
+                if !path.is_empty() {
+                    return Some(PathBuf::from(path));
+                }
+            }
+        }
+    }
+
+    // Try common installation locations
+    let candidates = vec![
+        "/opt/homebrew/bin/zig",     // macOS Homebrew ARM64
+        "/usr/local/bin/zig",         // macOS Homebrew x86_64, Linux
+        "/usr/local/zig/zig",         // CI/CD custom installation
+        "/usr/bin/zig",               // System package manager
+    ];
+
+    for candidate in candidates {
+        let path = PathBuf::from(candidate);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
 /// Compile kestrel to a specific output path.
 fn compile_kestrel_to(src: &Path, output_path: &Path, zig_target: &str, arch_name: &str) -> bool {
     println!("cargo:warning=  Compiling kestrel for {}...", arch_name);
 
-    let status = Command::new("zig")
+    // Find zig binary
+    let zig_bin = match find_zig_binary() {
+        Some(path) => {
+            println!("cargo:warning=  Using zig: {}", path.display());
+            path
+        }
+        None => {
+            println!("cargo:warning=  zig not found in PATH or common locations");
+            println!("cargo:warning=  Searched: /opt/homebrew/bin/zig, /usr/local/bin/zig, /usr/local/zig/zig, /usr/bin/zig");
+            println!("cargo:warning=  Install zig: brew install zig (macOS) or see https://ziglang.org/download/");
+            return false;
+        }
+    };
+
+    let status = Command::new(&zig_bin)
         .args([
             "cc",
             "-target",
