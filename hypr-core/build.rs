@@ -3,9 +3,8 @@
 // This script cross-compiles kestrel.c into static binaries for both architectures
 // and places them in embedded/ for compile-time inclusion via include_bytes!
 
-use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
@@ -33,7 +32,7 @@ fn main() {
     }
 }
 
-fn compile_kestrel(src: &PathBuf, embedded_dir: &PathBuf, zig_target: &str, arch_name: &str) {
+fn compile_kestrel(src: &Path, embedded_dir: &Path, zig_target: &str, arch_name: &str) {
     let output_name = format!("kestrel-linux-{}", arch_name);
     let output_path = embedded_dir.join(&output_name);
 
