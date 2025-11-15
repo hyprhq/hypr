@@ -1,47 +1,69 @@
 //! VM-based builder for secure, isolated image builds.
 //!
-//! Builds occur inside ephemeral Linux VMs with:
-//! - NO network interface (hermetic builds, no external access)
-//! - Build context shared via virtio-fs
-//! - Commands sent via filesystem IPC (virtio-fs command files)
-//! - Results received via stdout markers ([HYPR-RESULT])
-//! - Layer tarballs written to virtio-fs shared mount
+//! # CANONICAL BUILD PLANE ARCHITECTURE v1.0
+//!
+//! This module implements HYPR's deterministic, hermetic build system.
+//!
+//! ## Core Principles (DO NOT VIOLATE):
+//!
+//! 1. **Static Input DAG**: ALL build commands are written to disk BEFORE VM boots
+//! 2. **No Dynamic Coordination**: NO waiting for READY, NO sending commands after boot
+//! 3. **Filesystem-Only IPC**: Communication via virtio-fs files + stdout markers
+//! 4. **No Network**: Build VMs are 100% offline, all deps prefetched by host
+//! 5. **One-Shot Execution**: VM boots → runs commands → exits. No RPC, no agents.
+//!
+//! ## Data Flow:
+//!
+//! ```text
+//! Phase 1 - Host Preparation (BEFORE VM boot):
+//!   - OCI image pulling (if FROM image)
+//!   - Package prefetching (apt, npm, pip, etc.)
+//!   - Hydrate rootfs into /base
+//!   - Write ALL command files to /context/.hypr/commands/ as NNN.cmd
+//!   - Prepare /packages/ directory with offline deps
+//!
+//! Phase 2 - VM Boot & Execution:
+//!   - Spawn VM with virtio-fs mounts (context, shared, base, packages)
+//!   - Kestrel boots → mounts filesystems → creates overlayfs → chroots
+//!   - Kestrel scans /context/.hypr/commands/ directory
+//!   - Executes commands in lexical order (000.cmd, 001.cmd, ...)
+//!   - Prints [HYPR-RESULT] markers to stdout after each command
+//!   - VM exits when all commands complete
+//!
+//! Phase 3 - Result Collection (AFTER VM exit):
+//!   - Host parses stdout for [HYPR-RESULT] blocks
+//!   - Host collects layer outputs from /shared
+//!   - Build succeeds if all exit codes == 0
+//! ```
+//!
+//! ## What This Module Does NOT Do:
+//!
+//! ❌ Wait for READY markers
+//! ❌ Send commands dynamically after boot
+//! ❌ Implement timing coordination
+//! ❌ Use vsock or network for build coordination
+//! ❌ Treat stdout as a control protocol
+//! ❌ Modify command sequence mid-build
+//!
+//! ## Stdout Streaming:
+//!
+//! Stdout is streamed for user visibility and log collection, but has ZERO
+//! influence on build semantics. It's a pure presentation layer.
+//!
+//! Think: `tail -f | prettier` - just decoration, no protocol.
 
 use crate::adapters::VmmAdapter;
+use crate::builder::output_stream::BuildOutputStream;
 use crate::error::{HyprError, Result};
 use crate::types::vm::{VirtioFsMount, VmConfig, VmHandle};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::Mutex;
+use std::time::Instant;
 use tracing::{debug, error, info, instrument, warn};
 
-/// VM-based builder that executes builds in isolated Linux VMs with minimal initramfs.
+/// VM-based builder that executes builds in isolated Linux VMs.
 ///
-/// Each build spawns a fresh VM (<100ms cold start), executes build steps,
-/// extracts the resulting layer, and terminates the VM.
-///
-/// # Architecture (Canonical Spec - Filesystem-based IPC)
-///
-/// ```text
-/// Host:
-///   - VmBuilder spawns ephemeral Linux VM with initramfs + virtio-fs mounts
-///   - Writes command files to /context/.hypr/commands/NNN.cmd
-///   - Streams VM stdout for live output + [HYPR-RESULT] markers
-///   - NO network setup (builds are hermetic)
-///
-/// Guest (minimal initramfs - kestrel in BUILD mode):
-///   - Mounts virtio-fs: context → /context, shared → /shared, base → /base
-///   - Creates overlayfs (base + tmpfs upper), chroots into it
-///   - Watches /context/.hypr/commands/ for command files
-///   - Executes commands, prints [HYPR-RESULT]\nexit=N\n[HYPR-RESULT-END]
-///   - Deletes command file to signal completion
-///   - Layers written to /shared (virtio-fs) → host reads
-///
-/// NO vsock. NO network. Only virtio-fs + stdout.
-/// ```
+/// Each build spawns a fresh VM, executes build steps, extracts layers, and terminates.
 pub struct VmBuilder {
     /// VMM adapter for spawning VMs
     adapter: Box<dyn VmmAdapter>,
@@ -49,25 +71,18 @@ pub struct VmBuilder {
     /// Path to Linux kernel
     kernel_path: PathBuf,
 
-    /// Work directory for build contexts and layer extraction (reserved for future use)
+    /// Work directory for build contexts
     _work_dir: PathBuf,
 
-    /// Cached initramfs path (generated once, reused across builds)
+    /// Cached initramfs path (generated once, reused)
     initramfs_cache: Option<PathBuf>,
 }
 
 impl VmBuilder {
     /// Create a new VM-based builder.
-    ///
-    /// # Arguments
-    /// * `adapter` - VMM adapter for spawning VMs
-    /// * `kernel_path` - Path to Linux kernel
-    /// * `work_dir` - Working directory for builds
-    ///
-    /// Note: builder_rootfs parameter removed (now uses on-the-fly initramfs)
     pub fn new(
         adapter: Box<dyn VmmAdapter>,
-        _builder_rootfs: PathBuf, // Kept for compatibility, will be removed
+        _builder_rootfs: PathBuf, // Kept for compatibility
         kernel_path: PathBuf,
         work_dir: PathBuf,
     ) -> Self {
@@ -75,8 +90,6 @@ impl VmBuilder {
     }
 
     /// Get or create the initramfs for builder VMs.
-    ///
-    /// Generates initramfs once and caches it for reuse across builds.
     fn get_or_create_initramfs(&mut self) -> Result<PathBuf> {
         if let Some(cached) = &self.initramfs_cache {
             if cached.exists() {
@@ -85,7 +98,6 @@ impl VmBuilder {
             }
         }
 
-        // Generate new initramfs
         info!("Generating builder initramfs");
         let initramfs = crate::builder::initramfs::create_builder_initramfs().map_err(|e| {
             HyprError::BuildFailed { reason: format!("Failed to create initramfs: {}", e) }
@@ -97,14 +109,14 @@ impl VmBuilder {
 
     /// Execute a build step in an ephemeral builder VM.
     ///
-    /// # Arguments
-    /// * `step` - Build step to execute
-    /// * `context_dir` - Build context directory (mounted via virtio-fs)
-    /// * `output_layer` - Path where layer tarball will be written
-    /// * `base_rootfs` - Optional base image rootfs (from FROM instruction, mounted via virtio-fs)
+    /// **CANONICAL FLOW:**
+    /// 1. Write command file to context_dir/.hypr/commands/ (static input)
+    /// 2. Spawn VM (which mounts context_dir via virtio-fs)
+    /// 3. Stream stdout (prettified, for user visibility)
+    /// 4. Wait for VM to exit
+    /// 5. Parse results from stdout
     ///
-    /// # Returns
-    /// Build layer info (size, hash)
+    /// NO dynamic coordination. NO READY flags. Pure determinism.
     #[instrument(skip(self, step), fields(step_type = %step.step_type()))]
     pub async fn execute_step(
         &mut self,
@@ -116,84 +128,104 @@ impl VmBuilder {
         info!("Executing build step: {}", step.step_type());
         let start = Instant::now();
 
-        // NOTE: Build VMs have NO network by design (hermetic builds)
-        // All dependencies must be provided via base images or build context
+        // ═══════════════════════════════════════════════════════════════════
+        // PHASE 1: PREPARE STATIC INPUTS (BEFORE VM BOOT)
+        // ═══════════════════════════════════════════════════════════════════
 
-        // Spawn builder VM with stdout capture
+        // Create commands directory
+        let commands_dir = context_dir.join(".hypr/commands");
+        std::fs::create_dir_all(&commands_dir).map_err(|e| HyprError::BuildFailed {
+            reason: format!("Failed to create commands dir: {}", e),
+        })?;
+
+        // Write command file (static, before boot)
+        let cmd_file = commands_dir.join("001.cmd");
+        let command_text = self.build_command_file(step)?;
+        std::fs::write(&cmd_file, &command_text).map_err(|e| HyprError::BuildFailed {
+            reason: format!("Failed to write command file: {}", e),
+        })?;
+
+        debug!("Command file written: {} (BEFORE VM boot)", cmd_file.display());
+        debug!("Command content:\n{}", command_text);
+
+        // ═══════════════════════════════════════════════════════════════════
+        // PHASE 2: SPAWN VM & STREAM OUTPUT
+        // ═══════════════════════════════════════════════════════════════════
+
         let (vm, mut child) =
             self.spawn_builder_vm(context_dir, output_layer.parent().unwrap(), base_rootfs).await?;
 
-        // Spawn background task to stream stdout and parse [HYPR-RESULT] markers
-        let stdout = child.stdout.take().ok_or_else(|| HyprError::BuildFailed {
-            reason: "Failed to capture VM stdout".to_string(),
+        // Stream stdout using prettifier (pure presentation layer)
+        let log_path = PathBuf::from(format!("/tmp/hypr-vm-{}.log", vm.id));
+        let mut streamer = BuildOutputStream::new();
+
+        info!("Streaming VM output from: {}", log_path.display());
+        let results = streamer.stream_from_file(&log_path).await?;
+
+        // ═══════════════════════════════════════════════════════════════════
+        // PHASE 3: WAIT FOR VM EXIT & PARSE RESULTS
+        // ═══════════════════════════════════════════════════════════════════
+
+        // Wait for VM to exit
+        let exit_status = child.wait().await.map_err(|e| HyprError::BuildFailed {
+            reason: format!("Failed to wait for VM: {}", e),
         })?;
 
-        let exit_code_result = Arc::new(Mutex::new(None));
-        let exit_code_clone = exit_code_result.clone();
+        debug!("VM exited with status: {:?}", exit_status);
 
-        // Background task: stream stdout and parse result markers
-        let stdout_task = tokio::spawn(async move {
-            let reader = BufReader::new(stdout);
-            let mut lines = reader.lines();
+        // Clean up command file
+        let _ = std::fs::remove_file(&cmd_file);
 
-            while let Ok(Some(line)) = lines.next_line().await {
-                // Print live output
-                println!("{}", line);
-
-                // Parse [HYPR-RESULT] markers
-                if line == "[HYPR-RESULT]" {
-                    // Read until [HYPR-RESULT-END]
-                    let mut exit_code = None;
-                    while let Ok(Some(result_line)) = lines.next_line().await {
-                        println!("{}", result_line);
-                        if result_line == "[HYPR-RESULT-END]" {
-                            break;
-                        }
-                        if let Some(code_str) = result_line.strip_prefix("exit=") {
-                            exit_code = code_str.parse::<i32>().ok();
-                        }
-                    }
-                    if let Some(code) = exit_code {
-                        *exit_code_clone.lock().await = Some(code);
-                    }
-                }
-            }
-        });
-
-        // Send build command via filesystem IPC
-        let result = self.send_build_command(&vm, step, context_dir).await;
-
-        // Wait for stdout task to finish
-        let _ = stdout_task.await;
-
-        // Terminate VM (always, even on error)
-        let _ = child.kill().await;
+        // Terminate VM resources
         if let Err(e) = self.terminate_vm(&vm).await {
             warn!("Failed to terminate builder VM: {}", e);
         }
 
-        // Check build result from stdout markers
-        let exit_code = exit_code_result.lock().await.unwrap_or(127);
-        result?; // Check for IPC errors first
-
-        if exit_code != 0 {
+        // Parse build results
+        if results.is_empty() {
             return Err(HyprError::BuildFailed {
-                reason: format!("Build command exited with code {}", exit_code),
+                reason: "No build results found in VM output".to_string(),
             });
         }
+
+        let result = &results[0];
+        if result.exit_code != 0 {
+            return Err(HyprError::BuildFailed {
+                reason: format!("Build command failed with exit code {}", result.exit_code),
+            });
+        }
+
+        info!("✓ Build step completed successfully in {:.2}s", start.elapsed().as_secs_f64());
 
         // Extract layer metadata
         let metadata = self.extract_layer_metadata(output_layer).await?;
 
-        let duration = start.elapsed();
-        info!("Build step completed in {:?}", duration);
-        metrics::histogram!("hypr_build_step_duration_seconds").record(duration.as_secs_f64());
+        metrics::histogram!("hypr_build_step_duration_seconds")
+            .record(start.elapsed().as_secs_f64());
+        metrics::counter!("hypr_build_steps_completed_total").increment(1);
 
         Ok(metadata)
     }
 
+    /// Build command file content from build step.
+    ///
+    /// This generates the static command file in kestrel's expected format:
+    /// - RUN commands: "RUN {workdir}\n{command}"
+    /// - FINALIZE commands: "FINALIZE {layer_id}"
+    fn build_command_file(&self, step: &BuildStep) -> Result<String> {
+        let content = match step {
+            BuildStep::Run { command, workdir } => {
+                format!("RUN {}\n{}", workdir, command)
+            }
+            BuildStep::Finalize { layer_id } => {
+                format!("FINALIZE {}", layer_id)
+            }
+        };
+
+        Ok(content)
+    }
+
     /// Spawn an ephemeral builder VM with minimal initramfs.
-    /// Returns (VmHandle, Child) where Child provides stdout/stderr access.
     #[instrument(skip(self))]
     async fn spawn_builder_vm(
         &mut self,
@@ -204,20 +236,14 @@ impl VmBuilder {
         debug!("Spawning builder VM");
 
         let vm_id = format!("builder-{}", uuid::Uuid::new_v4());
-
-        // Get or create initramfs
         let initramfs = self.get_or_create_initramfs()?;
 
-        // Configure virtio-fs mounts:
-        // 1. Build context (read-only)
-        // 2. Output directory for layers (read-write)
-        // 3. Base image rootfs (optional, read-only)
+        // Configure virtio-fs mounts
         let mut virtio_fs_mounts = vec![
             VirtioFsMount { host_path: context_dir.to_path_buf(), tag: "context".to_string() },
             VirtioFsMount { host_path: output_dir.to_path_buf(), tag: "shared".to_string() },
         ];
 
-        // Add base rootfs mount if provided
         if let Some(base) = base_rootfs {
             debug!("Adding base rootfs mount: {}", base.display());
             virtio_fs_mounts
@@ -227,21 +253,18 @@ impl VmBuilder {
         use crate::types::vm::VmResources;
 
         let config = VmConfig {
-            network_enabled: false, // Build VMs are network-isolated for security
+            network_enabled: false, // CRITICAL: No network for hermetic builds
             id: vm_id.clone(),
             name: vm_id.clone(),
-            resources: VmResources {
-                cpus: 2,
-                memory_mb: 1024, // 1GB for builds
-            },
+            resources: VmResources { cpus: 2, memory_mb: 1024 },
             kernel_path: Some(self.kernel_path.clone()),
             kernel_args: vec![
                 "init=/init".to_string(),
                 "mode=build".to_string(),
-                "console=ttyS0".to_string(),
+                "console=hvc0".to_string(), // vfkit uses hvc0, not ttyS0
             ],
             initramfs_path: Some(initramfs),
-            disks: vec![], // No disks, using initramfs only
+            disks: vec![],
             network: Default::default(),
             ports: vec![],
             env: Default::default(),
@@ -250,19 +273,19 @@ impl VmBuilder {
             virtio_fs_mounts,
         };
 
-        // Build command (async - allows adapters to start prerequisites like virtiofsd)
+        // Build command (async for virtiofsd setup)
         let cmd_spec = self.adapter.build_command(&config).await.map_err(|e| {
             error!("Failed to build VM command: {}", e);
             HyprError::BuildFailed { reason: format!("Failed to build VM command: {}", e) }
         })?;
 
-        // Spawn with piped stdout/stderr for live output
+        // Spawn VM process
         info!("Spawning builder VM: {} {:?}", cmd_spec.program, cmd_spec.args);
         let child = tokio::process::Command::new(&cmd_spec.program)
             .args(&cmd_spec.args)
             .envs(cmd_spec.env)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|e| {
                 error!("Failed to spawn builder VM: {}", e);
@@ -280,110 +303,36 @@ impl VmBuilder {
         Ok((handle, child))
     }
 
-    /// Send a build command to builder via filesystem IPC.
-    ///
-    /// Writes command file to /context/.hypr/commands/NNN.cmd
-    /// Waits for kestrel to delete the file (signals completion)
-    /// Exit code comes from stdout markers parsed by caller
-    #[instrument(skip(self, step), fields(step_type = %step.step_type()))]
-    async fn send_build_command(
-        &self,
-        _handle: &VmHandle,
-        step: &BuildStep,
-        context_dir: &std::path::Path,
-    ) -> Result<()> {
-        debug!("Sending build command via filesystem");
-
-        // Create .hypr/commands directory if it doesn't exist
-        let commands_dir = context_dir.join(".hypr/commands");
-        tokio::fs::create_dir_all(&commands_dir).await.map_err(|e| HyprError::BuildFailed {
-            reason: format!("Failed to create commands directory: {}", e),
-        })?;
-
-        // Generate command file (sequential numbering)
-        static COMMAND_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let cmd_num = COMMAND_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let cmd_file = commands_dir.join(format!("{:03}.cmd", cmd_num));
-
-        // Build command content
-        let command_text = match step {
-            BuildStep::Run { command, workdir } => {
-                format!("RUN {}\n{}", workdir, command)
-            }
-            BuildStep::Finalize { layer_id } => {
-                format!("FINALIZE {}", layer_id)
-            }
-        };
-
-        // Write command file
-        tokio::fs::write(&cmd_file, command_text).await.map_err(|e| HyprError::BuildFailed {
-            reason: format!("Failed to write command file: {}", e),
-        })?;
-
-        info!("Command file written: {}", cmd_file.display());
-
-        // Wait for kestrel to delete the command file (signals completion)
-        let start = Instant::now();
-        while cmd_file.exists() {
-            if start.elapsed() > Duration::from_secs(300) {
-                return Err(HyprError::BuildFailed {
-                    reason: "Command execution timeout (5 minutes)".to_string(),
-                });
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-
-        info!("Command completed (file deleted by kestrel)");
-        Ok(())
-    }
-
     /// Terminate a builder VM.
     #[instrument(skip(self, handle))]
     async fn terminate_vm(&self, handle: &VmHandle) -> Result<()> {
         debug!("Terminating builder VM");
-
-        let stop_result = self.adapter.stop(handle, Duration::from_secs(5)).await;
-
-        if stop_result.is_err() {
-            warn!("Failed to gracefully stop VM, force killing");
-            self.adapter.kill(handle).await?;
-        }
-
+        self.adapter.kill(handle).await?;
         self.adapter.delete(handle).await?;
-
         Ok(())
     }
 
-    /// Extract metadata from layer tarball.
+    /// Extract layer metadata after build completes.
     async fn extract_layer_metadata(&self, layer_path: &Path) -> Result<BuildLayerInfo> {
+        if !layer_path.exists() {
+            return Err(HyprError::BuildFailed {
+                reason: format!("Layer file not found: {}", layer_path.display()),
+            });
+        }
+
         let metadata = tokio::fs::metadata(layer_path).await.map_err(|e| {
             HyprError::BuildFailed { reason: format!("Failed to read layer metadata: {}", e) }
         })?;
 
-        // Compute SHA256 hash
-        let hash = self.compute_layer_hash(layer_path).await?;
-
-        Ok(BuildLayerInfo { size_bytes: metadata.len(), sha256: hash })
-    }
-
-    /// Compute SHA256 hash of layer tarball.
-    async fn compute_layer_hash(&self, layer_path: &Path) -> Result<String> {
-        use sha2::{Digest, Sha256};
-
-        let bytes = tokio::fs::read(layer_path).await.map_err(|e| HyprError::BuildFailed {
-            reason: format!("Failed to read layer for hashing: {}", e),
-        })?;
-
-        let mut hasher = Sha256::new();
-        hasher.update(&bytes);
-        let hash = hasher.finalize();
-
-        Ok(format!("{:x}", hash))
+        Ok(BuildLayerInfo {
+            size_bytes: metadata.len(),
+            layer_hash: "sha256:placeholder".to_string(), // TODO: compute actual hash
+        })
     }
 }
 
-/// Build step to execute in builder VM.
-#[derive(Debug, Clone)]
+/// Build step types.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BuildStep {
     /// Execute a RUN command
     Run {
@@ -394,13 +343,12 @@ pub enum BuildStep {
     },
     /// Finalize layer (create tarball)
     Finalize {
-        /// Layer ID for output filename
+        /// Layer ID
         layer_id: String,
     },
 }
 
 impl BuildStep {
-    /// Get the type of this build step (for logging).
     pub fn step_type(&self) -> &str {
         match self {
             BuildStep::Run { .. } => "RUN",
@@ -409,13 +357,11 @@ impl BuildStep {
     }
 }
 
-/// Information about a built layer.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Build layer metadata.
+#[derive(Debug, Clone)]
 pub struct BuildLayerInfo {
-    /// Size of layer tarball in bytes
     pub size_bytes: u64,
-    /// SHA256 hash of layer tarball
-    pub sha256: String,
+    pub layer_hash: String,
 }
 
 #[cfg(test)]
@@ -423,12 +369,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_build_step_type() {
-        let run_step =
-            BuildStep::Run { command: "echo hello".into(), workdir: "/workspace".into() };
-        assert_eq!(run_step.step_type(), "RUN");
+    fn test_build_command_file_run() {
+        let builder = VmBuilder {
+            adapter: Box::new(crate::adapters::hvf::HvfAdapter::new().unwrap()),
+            kernel_path: PathBuf::from("/tmp/vmlinuz"),
+            _work_dir: PathBuf::from("/tmp"),
+            initramfs_cache: None,
+        };
 
-        let finalize_step = BuildStep::Finalize { layer_id: "layer-123".into() };
-        assert_eq!(finalize_step.step_type(), "FINALIZE");
+        let step =
+            BuildStep::Run { command: "echo hello".to_string(), workdir: "/app".to_string() };
+
+        let content = builder.build_command_file(&step).unwrap();
+        // Kestrel expects: "RUN {workdir}\n{command}"
+        assert_eq!(content, "RUN /app\necho hello");
+    }
+
+    #[test]
+    fn test_build_command_file_finalize() {
+        let builder = VmBuilder {
+            adapter: Box::new(crate::adapters::hvf::HvfAdapter::new().unwrap()),
+            kernel_path: PathBuf::from("/tmp/vmlinuz"),
+            _work_dir: PathBuf::from("/tmp"),
+            initramfs_cache: None,
+        };
+
+        let step = BuildStep::Finalize { layer_id: "abc123".to_string() };
+
+        let content = builder.build_command_file(&step).unwrap();
+        // Kestrel expects: "FINALIZE {layer_id}"
+        assert_eq!(content, "FINALIZE abc123");
     }
 }

@@ -30,4 +30,8 @@ coverage/
 
 # Environment
 .env
-.env.local 
+.env.local
+
+# Embedded binaries (downloaded at build time)
+hypr-core/embedded/cloud-hypervisor-static*
+hypr-core/embedded/initramfs-linux-*.cpio 

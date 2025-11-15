@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
+    // ALWAYS rebuild initramfs - no caching, no conditionals
+    // The embedded binary must be fresh every build
+    println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=../guest/kestrel.c");
 
     let kestrel_src = PathBuf::from("../guest/kestrel.c");
@@ -28,12 +31,25 @@ fn main() {
         return;
     }
 
-    // Build initramfs for both architectures
-    let targets = [("x86_64-linux-musl", "amd64"), ("aarch64-linux-musl", "arm64")];
+    // Download cloud-hypervisor binary (only for target architecture)
+    download_cloud_hypervisor(&embedded_dir);
 
-    for (zig_target, arch_name) in targets {
-        build_initramfs(&kestrel_src, &embedded_dir, zig_target, arch_name);
-    }
+    // Build initramfs ONLY for target architecture (host can only virtualize its own arch)
+    let target_arch =
+        std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "x86_64".to_string());
+
+    let (zig_target, arch_name) = if target_arch == "x86_64" {
+        ("x86_64-linux-musl", "amd64")
+    } else if target_arch == "aarch64" {
+        ("aarch64-linux-musl", "arm64")
+    } else {
+        println!("cargo:warning=Unsupported architecture: {}", target_arch);
+        println!("cargo:warning=Skipping initramfs build");
+        return;
+    };
+
+    println!("cargo:warning=Building initramfs for {} (host arch: {})", arch_name, target_arch);
+    build_initramfs(&kestrel_src, &embedded_dir, zig_target, arch_name);
 }
 
 /// Build complete initramfs for a specific architecture.
@@ -47,16 +63,10 @@ fn build_initramfs(kestrel_src: &Path, embedded_dir: &Path, zig_target: &str, ar
     let initramfs_name = format!("initramfs-linux-{}.cpio", arch_name);
     let initramfs_path = embedded_dir.join(&initramfs_name);
 
-    // If initramfs already exists (pre-built), skip
+    // Always rebuild if kestrel.c changed (cargo:rerun-if-changed ensures this)
+    // Remove old initramfs to force rebuild
     if initramfs_path.exists() {
-        if let Ok(metadata) = fs::metadata(&initramfs_path) {
-            println!(
-                "cargo:warning={} already exists ({} KB), skipping build",
-                initramfs_name,
-                metadata.len() / 1024
-            );
-            return;
-        }
+        let _ = fs::remove_file(&initramfs_path);
     }
 
     println!("cargo:warning=Building {} for {}", initramfs_name, arch_name);
@@ -131,10 +141,10 @@ fn find_zig_binary() -> Option<PathBuf> {
 
     // Try common installation locations
     let candidates = vec![
-        "/opt/homebrew/bin/zig",     // macOS Homebrew ARM64
-        "/usr/local/bin/zig",         // macOS Homebrew x86_64, Linux
-        "/usr/local/zig/zig",         // CI/CD custom installation
-        "/usr/bin/zig",               // System package manager
+        "/opt/homebrew/bin/zig", // macOS Homebrew ARM64
+        "/usr/local/bin/zig",    // macOS Homebrew x86_64, Linux
+        "/usr/local/zig/zig",    // CI/CD custom installation
+        "/usr/bin/zig",          // System package manager
     ];
 
     for candidate in candidates {
@@ -324,6 +334,86 @@ fn create_cpio_archive(source_dir: &Path, output_path: &Path) -> bool {
         Err(e) => {
             println!("cargo:warning=  Failed to run cpio: {}", e);
             false
+        }
+    }
+}
+
+/// Download cloud-hypervisor binary for the target architecture.
+///
+/// Downloads from GitHub releases (latest stable) to embedded/ directory.
+/// Only downloads the binary matching the target architecture to minimize binary size.
+fn download_cloud_hypervisor(embedded_dir: &Path) {
+    println!("cargo:warning=Downloading cloud-hypervisor binary...");
+
+    // Determine target architecture from environment
+    let target_arch =
+        std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "x86_64".to_string());
+
+    let binary_name = if target_arch == "x86_64" {
+        "cloud-hypervisor-static"
+    } else if target_arch == "aarch64" {
+        "cloud-hypervisor-static-aarch64"
+    } else {
+        println!("cargo:warning=  Unsupported architecture: {}", target_arch);
+        return;
+    };
+
+    let dest_path = embedded_dir.join(binary_name);
+
+    // Skip if already downloaded
+    if dest_path.exists() {
+        println!("cargo:warning=  {} already exists, skipping download", binary_name);
+        return;
+    }
+
+    let url = format!(
+        "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/latest/download/{}",
+        binary_name
+    );
+
+    println!("cargo:warning=  Downloading {} for {}...", binary_name, target_arch);
+
+    // Download using curl or wget
+    let download_status = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "curl -fsSL {} -o {} || wget -q -O {} {}",
+            url,
+            dest_path.display(),
+            dest_path.display(),
+            url
+        ))
+        .status();
+
+    match download_status {
+        Ok(status) if status.success() => {
+            // Make executable
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(metadata) = fs::metadata(&dest_path) {
+                    let mut permissions = metadata.permissions();
+                    permissions.set_mode(0o755);
+                    let _ = fs::set_permissions(&dest_path, permissions);
+                }
+            }
+
+            // Get file size
+            if let Ok(metadata) = fs::metadata(&dest_path) {
+                let size_mb = metadata.len() as f64 / 1024.0 / 1024.0;
+                println!(
+                    "cargo:warning=  {} downloaded successfully ({:.2} MB)",
+                    binary_name, size_mb
+                );
+            }
+        }
+        Ok(_) => {
+            println!("cargo:warning=  Failed to download {} (non-zero exit)", binary_name);
+            println!("cargo:warning=  URL: {}", url);
+        }
+        Err(e) => {
+            println!("cargo:warning=  Failed to download {}: {}", binary_name, e);
+            println!("cargo:warning=  Make sure curl or wget is installed");
         }
     }
 }

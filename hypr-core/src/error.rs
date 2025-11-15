@@ -44,6 +44,10 @@ pub enum HyprError {
     #[error("Compression failed: {reason}")]
     CompressionFailed { reason: String },
 
+    // Platform errors
+    #[error("Unsupported architecture: {arch}")]
+    UnsupportedArchitecture { arch: String },
+
     // Compose errors
     #[error("Invalid compose file at {path:?}: {reason}")]
     InvalidCompose { path: PathBuf, line: Option<usize>, message: String, reason: String },

@@ -5,6 +5,7 @@
 pub mod adapters;
 pub mod builder;
 pub mod compose;
+pub mod embedded;
 pub mod error;
 pub mod network;
 pub mod observability;

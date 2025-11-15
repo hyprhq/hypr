@@ -15,13 +15,15 @@
 //! - Offline capability
 //! - Fast initramfs creation (~1ms to write bytes to disk)
 
-/// Embedded initramfs for Linux amd64 (x86_64)
-pub const INITRAMFS_LINUX_AMD64: &[u8] =
-    include_bytes!("../../embedded/initramfs-linux-amd64.cpio");
+/// Embedded initramfs (architecture-specific at compile time)
+///
+/// Only the initramfs matching the host architecture is embedded.
+/// Host can only virtualize VMs of its own architecture.
+#[cfg(target_arch = "x86_64")]
+pub const INITRAMFS_LINUX: &[u8] = include_bytes!("../../embedded/initramfs-linux-amd64.cpio");
 
-/// Embedded initramfs for Linux arm64 (aarch64)
-pub const INITRAMFS_LINUX_ARM64: &[u8] =
-    include_bytes!("../../embedded/initramfs-linux-arm64.cpio");
+#[cfg(target_arch = "aarch64")]
+pub const INITRAMFS_LINUX: &[u8] = include_bytes!("../../embedded/initramfs-linux-arm64.cpio");
 
 /// Source of initramfs (embedded or override)
 #[derive(Debug, Clone)]
@@ -48,19 +50,13 @@ pub fn resolve_initramfs_source() -> InitramfsSource {
     InitramfsSource::Embedded
 }
 
-/// Get the embedded initramfs for the specified architecture.
+/// Get the embedded initramfs.
 ///
-/// # Arguments
-/// * `arch` - "amd64" or "arm64"
-///
-/// # Returns
-/// Byte slice of the embedded initramfs.cpio
-pub fn get_embedded_initramfs(arch: &str) -> Option<&'static [u8]> {
-    match arch {
-        "amd64" => Some(INITRAMFS_LINUX_AMD64),
-        "arm64" => Some(INITRAMFS_LINUX_ARM64),
-        _ => None,
-    }
+/// Returns the embedded initramfs for the current architecture.
+/// The architecture check is done at compile time via #[cfg].
+pub fn get_embedded_initramfs(_arch: &str) -> Option<&'static [u8]> {
+    // Only one initramfs is embedded (matching host architecture)
+    Some(INITRAMFS_LINUX)
 }
 
 #[cfg(test)]
@@ -68,25 +64,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_embedded_initramfs_amd64_exists() {
-        assert!(!INITRAMFS_LINUX_AMD64.is_empty());
+    fn test_embedded_initramfs_exists() {
+        assert!(!INITRAMFS_LINUX.is_empty());
         // Verify cpio magic number (070701 = newc format ASCII)
         // First 6 bytes should be "070701"
-        assert_eq!(&INITRAMFS_LINUX_AMD64[0..6], b"070701");
-    }
-
-    #[test]
-    fn test_embedded_initramfs_arm64_exists() {
-        assert!(!INITRAMFS_LINUX_ARM64.is_empty());
-        // Verify cpio magic number
-        assert_eq!(&INITRAMFS_LINUX_ARM64[0..6], b"070701");
+        assert_eq!(&INITRAMFS_LINUX[0..6], b"070701");
     }
 
     #[test]
     fn test_get_embedded_initramfs() {
-        assert!(get_embedded_initramfs("amd64").is_some());
-        assert!(get_embedded_initramfs("arm64").is_some());
-        assert!(get_embedded_initramfs("invalid").is_none());
+        // Only one initramfs is embedded (matching host architecture)
+        assert!(get_embedded_initramfs("any").is_some());
     }
 
     #[test]

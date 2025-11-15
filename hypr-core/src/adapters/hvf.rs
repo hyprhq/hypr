@@ -129,10 +129,13 @@ impl HvfAdapter {
         }
 
         // Serial console (build VM stdout/stderr visible on host)
+        // vfkit doesn't support logFilePath=stdio, so we use a temp file
+        let log_path = format!("/tmp/hypr-vm-{}.log", config.id);
         args.push("--device".to_string());
-        args.push("virtio-serial,logFilePath=stdio".to_string());
+        args.push(format!("virtio-serial,logFilePath={}", log_path));
 
         debug!("Built vfkit args: {:?}", args);
+        debug!("VM console log: {}", log_path);
         Ok(args)
     }
 

@@ -16,6 +16,7 @@ async-trait = { workspace = true }
 # Utilities
 uuid = { workspace = true }
 dirs = "5.0"
+colored = "2.1"
 
 # Serialization
 serde = { workspace = true }

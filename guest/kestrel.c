@@ -268,6 +268,7 @@ static void mount_essentials_build(void) {
     mkdir("/newroot/sys", 0755);
     mkdir("/newroot/dev", 0755);
     mkdir("/newroot/tmp", 0777);
+    mkdir("/newroot/context", 0755);  // CRITICAL: bind mount build context
     mkdir("/newroot/shared", 0755);
 
     if (mount("proc", "/newroot/proc", "proc", 0, NULL)) {
@@ -281,6 +282,9 @@ static void mount_essentials_build(void) {
     }
     if (mount("/tmp", "/newroot/tmp", NULL, MS_BIND, NULL)) {
         FATAL("Failed to mount /newroot/tmp: %s", strerror(errno));
+    }
+    if (mount("/context", "/newroot/context", NULL, MS_BIND, NULL)) {
+        FATAL("Failed to mount /newroot/context: %s", strerror(errno));
     }
     if (mount("/shared", "/newroot/shared", NULL, MS_BIND, NULL)) {
         FATAL("Failed to mount /newroot/shared: %s", strerror(errno));
@@ -397,6 +401,22 @@ static int execute_shell_command(const char *cmd, const char *workdir) {
 
     if (pid == 0) {
         // Child: execute command
+        // Create workdir if it doesn't exist (mkdir -p behavior)
+        char *dir_copy = strdup(workdir);
+        if (dir_copy) {
+            char *p = dir_copy;
+            while (*p) {
+                if (*p == '/' && p != dir_copy) {
+                    *p = '\0';
+                    mkdir(dir_copy, 0755);
+                    *p = '/';
+                }
+                p++;
+            }
+            mkdir(dir_copy, 0755);
+            free(dir_copy);
+        }
+
         if (chdir(workdir) < 0) {
             fprintf(stderr, "chdir(%s) failed: %s\n", workdir, strerror(errno));
             exit(127);

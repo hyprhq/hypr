@@ -83,77 +83,18 @@ jobs:
           # Verify zig is accessible
           /usr/local/zig/zig version
 
-      - name: Pre-build initramfs archives (before cargo build)
+      - name: Note about embedded binaries
         run: |
-          # Ensure embedded directory exists
-          mkdir -p hypr-core/embedded
-
-          # Select zig binary based on platform
-          if [ "$RUNNER_OS" == "macOS" ]; then
-            ZIG_BIN="zig"
-          else
-            ZIG_BIN="/usr/local/zig/zig"
-          fi
-
-          # Function to build complete initramfs for an architecture
-          build_initramfs() {
-            ARCH=$1
-            ZIG_TARGET=$2
-
-            echo "Building initramfs for linux-${ARCH}..."
-
-            # Create temp directory
-            TEMP_DIR=$(mktemp -d)
-
-            # Step 1: Compile kestrel
-            echo "  Compiling kestrel..."
-            $ZIG_BIN cc -target $ZIG_TARGET -static -Os -s \
-              -o $TEMP_DIR/init \
-              guest/kestrel.c
-            chmod +x $TEMP_DIR/init
-
-            # Step 2: Download busybox
-            echo "  Downloading busybox..."
-            mkdir -p $TEMP_DIR/bin
-            if [ "$ARCH" == "amd64" ]; then
-              DEB_URL="https://ftp.debian.org/debian/pool/main/b/busybox/busybox-static_1.37.0-7_amd64.deb"
-            else
-              DEB_URL="https://ftp.debian.org/debian/pool/main/b/busybox/busybox-static_1.37.0-7_arm64.deb"
-            fi
-
-            curl -fsSL $DEB_URL -o $TEMP_DIR/busybox.deb
-            cd $TEMP_DIR && ar x busybox.deb data.tar.xz
-            tar -xf data.tar.xz ./usr/bin/busybox
-            mv usr/bin/busybox bin/busybox
-            chmod +x bin/busybox
-            rm -rf busybox.deb data.tar.xz usr
-
-            # Step 3: Move busybox to root (ultra-minimal structure)
-            # No directories needed - kestrel creates them at boot!
-            mv bin/busybox busybox
-            rmdir bin
-
-            # Step 4: Create cpio archive
-            echo "  Creating cpio archive..."
-            find . -print0 | cpio -0 -o -H newc > ${GITHUB_WORKSPACE}/hypr-core/embedded/initramfs-linux-${ARCH}.cpio
-
-            # Cleanup
-            cd $GITHUB_WORKSPACE
-            rm -rf $TEMP_DIR
-
-            echo "  ✓ initramfs-linux-${ARCH}.cpio created ($(stat -f%z hypr-core/embedded/initramfs-linux-${ARCH}.cpio 2>/dev/null || stat -c%s hypr-core/embedded/initramfs-linux-${ARCH}.cpio) bytes)"
-          }
-
-          # Build for both architectures
-          build_initramfs "amd64" "x86_64-linux-musl"
-          build_initramfs "arm64" "aarch64-linux-musl"
-
-          # Verify archives exist and are valid cpio
+          echo "ℹ️  Initramfs and cloud-hypervisor are built automatically by build.rs"
+          echo "   Architecture: ${{ matrix.arch }}"
+          echo "   build.rs will:"
+          echo "   1. Download cloud-hypervisor-static for ${{ matrix.arch }}"
+          echo "   2. Compile kestrel for ${{ matrix.arch }}"
+          echo "   3. Download busybox for ${{ matrix.arch }}"
+          echo "   4. Create initramfs-linux-${{ matrix.arch }}.cpio"
+          echo "   5. Embed everything into the Rust binary"
           echo ""
-          echo "Verifying initramfs archives:"
-          ls -lh hypr-core/embedded/
-          head -c 6 hypr-core/embedded/initramfs-linux-amd64.cpio | od -c
-          head -c 6 hypr-core/embedded/initramfs-linux-arm64.cpio | od -c
+          echo "   No pre-build step needed! 🚀"
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -249,12 +190,15 @@ jobs:
 
             ### Binaries Included
 
-            **HYPR CLI + Daemon (with embedded initramfs):**
+            **HYPR CLI + Daemon (with embedded hypervisor + initramfs):**
             - Linux: `hypr-linux-amd64`, `hypr-linux-arm64`, `hyprd-linux-amd64`, `hyprd-linux-arm64`
             - macOS: `hypr-darwin-amd64`, `hypr-darwin-arm64`, `hyprd-darwin-amd64`, `hyprd-darwin-arm64`
 
-            **Note:** Complete initramfs (kestrel + busybox) is now embedded in the binaries at compile-time.
-            Zero network dependencies at runtime!
+            **What's Embedded:**
+            - ✅ Cloud Hypervisor (architecture-specific, ~3-4.5MB)
+            - ✅ Complete initramfs with kestrel + busybox (~2MB)
+            - ✅ Zero external dependencies
+            - ✅ Zero network dependencies at runtime
 
             ### Installation
 
