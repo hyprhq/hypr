@@ -1115,7 +1115,7 @@ impl LinuxVmBuilder {
             vm_builder,
             work_dir,
             env: HashMap::new(),
-            workdir: "/workspace".to_string(),
+            workdir: "/context".to_string(), // Build context is mounted at /context via virtio-fs
             config: ImageConfig {
                 entrypoint: None,
                 cmd: None,
@@ -1472,7 +1472,7 @@ impl MacOsVmBuilder {
             vm_builder,
             work_dir,
             env: HashMap::new(),
-            workdir: "/workspace".to_string(),
+            workdir: "/context".to_string(), // Build context is mounted at /context via virtio-fs
             config: ImageConfig {
                 entrypoint: None,
                 cmd: None,

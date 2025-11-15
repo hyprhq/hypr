@@ -39,13 +39,19 @@ pub async fn build(
         anyhow::bail!("Build context not found: {}", context_path);
     }
 
+    // Canonicalize to get absolute path (so "." becomes "/full/path/to/current/dir")
+    let context_dir_abs = context_dir
+        .canonicalize()
+        .with_context(|| format!("Failed to resolve build context path: {}", context_path))?;
+
     let dockerfile_path = context_dir.join(dockerfile);
     if !dockerfile_path.exists() {
         anyhow::bail!("Dockerfile not found: {}", dockerfile_path.display());
     }
 
     // Parse tag (use directory name if not provided)
-    let default_name = context_dir.file_name().and_then(|n| n.to_str()).unwrap_or("image");
+    // Extract directory name from absolute path (e.g., "/path/to/frontend" -> "frontend")
+    let default_name = context_dir_abs.file_name().and_then(|n| n.to_str()).unwrap_or("image");
     let (image_name, image_tag) = parse_tag(tag, default_name)?;
 
     println!(
@@ -317,5 +323,21 @@ mod tests {
     #[test]
     fn test_format_duration_minutes() {
         assert_eq!(format_duration(125.0), "2m5s");
+    }
+
+    #[test]
+    fn test_parse_tag_uses_default_name() {
+        // When no tag provided, should use default name with "latest" tag
+        let (name, tag) = parse_tag(None, "frontend").unwrap();
+        assert_eq!(name, "frontend");
+        assert_eq!(tag, "latest");
+    }
+
+    #[test]
+    fn test_parse_tag_ignores_default_when_tag_provided() {
+        // When tag is provided, default name should be ignored
+        let (name, tag) = parse_tag(Some("myapp:v1.0"), "ignored").unwrap();
+        assert_eq!(name, "myapp");
+        assert_eq!(tag, "v1.0");
     }
 }

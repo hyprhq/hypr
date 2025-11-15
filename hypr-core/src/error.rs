@@ -147,6 +147,9 @@ pub enum HyprError {
     #[error("Feature not implemented: {feature}")]
     NotImplemented { feature: String },
 
+    #[error("Unsupported operation: {operation}. {reason}")]
+    UnsupportedOperation { operation: String, reason: String },
+
     // Generic errors
     #[error("Internal error: {0}")]
     Internal(String),

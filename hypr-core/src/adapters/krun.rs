@@ -69,6 +69,16 @@ impl Default for KrunAdapter {
 
 #[async_trait]
 impl VmmAdapter for KrunAdapter {
+    async fn build_command(&self, _config: &VmConfig) -> Result<crate::adapters::CommandSpec> {
+        // KrunAdapter doesn't support builder VMs yet (libkrun-efi is primarily for runtime)
+        // Fallback to HVF adapter for builds on macOS
+        Err(HyprError::UnsupportedOperation {
+            operation: "build_command (KrunAdapter)".to_string(),
+            reason: "libkrun-efi doesn't support builder VMs. Use HVF adapter for builds."
+                .to_string(),
+        })
+    }
+
     #[instrument(skip(self))]
     async fn create(&self, _config: &VmConfig) -> Result<VmHandle> {
         info!("Creating VM with libkrun-efi (stub)");

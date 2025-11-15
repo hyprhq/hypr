@@ -80,6 +80,8 @@ jobs:
           wget https://ziglang.org/download/0.11.0/zig-linux-${ZIG_ARCH}-0.11.0.tar.xz
           tar -xf zig-linux-${ZIG_ARCH}-0.11.0.tar.xz
           sudo mv zig-linux-${ZIG_ARCH}-0.11.0 /usr/local/zig
+          # Add to PATH
+          echo "/usr/local/zig" >> $GITHUB_PATH
           # Verify zig is accessible
           /usr/local/zig/zig version
 
