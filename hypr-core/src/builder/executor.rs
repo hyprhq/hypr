@@ -1311,6 +1311,36 @@ impl BuildExecutor for LinuxVmBuilder {
                     }
                     None
                 }
+                Instruction::Copy { sources, destination, .. } => {
+                    // COPY in VM builder: copy from /context to workdir
+                    info!("Executing COPY: {:?} -> {}", sources, destination);
+
+                    // Build copy command
+                    // Sources are relative to build context (/context)
+                    // Destination is relative to current workdir
+                    let dest_path = if destination.starts_with('/') {
+                        destination.clone()
+                    } else {
+                        format!("{}/{}", self.workdir.trim_end_matches('/'), destination)
+                    };
+
+                    // Build shell command with proper globbing support
+                    // Use 'for' loop to handle globs and missing files gracefully
+                    let mut copy_script = format!("mkdir -p {}\n", dest_path);
+
+                    for source in sources {
+                        // Use shell glob expansion with 'for' loop
+                        // This handles both literal files and glob patterns
+                        copy_script.push_str(&format!(
+                            "for f in /context/{}; do [ -e \"$f\" ] && cp -r \"$f\" {}/; done\n",
+                            source, dest_path
+                        ));
+                    }
+
+                    info!("COPY script:\n{}", copy_script);
+                    let layer = self.execute_run(&copy_script)?;
+                    Some(layer)
+                }
                 _ => {
                     warn!("Unsupported instruction (skipping): {:?}", node.instruction);
                     None
@@ -1667,6 +1697,36 @@ impl BuildExecutor for MacOsVmBuilder {
                         }
                     }
                     None
+                }
+                Instruction::Copy { sources, destination, .. } => {
+                    // COPY in VM builder: copy from /context to workdir
+                    info!("Executing COPY: {:?} -> {}", sources, destination);
+
+                    // Build copy command
+                    // Sources are relative to build context (/context)
+                    // Destination is relative to current workdir
+                    let dest_path = if destination.starts_with('/') {
+                        destination.clone()
+                    } else {
+                        format!("{}/{}", self.workdir.trim_end_matches('/'), destination)
+                    };
+
+                    // Build shell command with proper globbing support
+                    // Use 'for' loop to handle globs and missing files gracefully
+                    let mut copy_script = format!("mkdir -p {}\n", dest_path);
+
+                    for source in sources {
+                        // Use shell glob expansion with 'for' loop
+                        // This handles both literal files and glob patterns
+                        copy_script.push_str(&format!(
+                            "for f in /context/{}; do [ -e \"$f\" ] && cp -r \"$f\" {}/; done\n",
+                            source, dest_path
+                        ));
+                    }
+
+                    info!("COPY script:\n{}", copy_script);
+                    let layer = self.execute_run(&copy_script)?;
+                    Some(layer)
                 }
                 _ => {
                     warn!("Unsupported instruction (skipping): {:?}", node.instruction);

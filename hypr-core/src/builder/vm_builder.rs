@@ -370,8 +370,16 @@ mod tests {
 
     #[test]
     fn test_build_command_file_run() {
+        #[cfg(target_os = "macos")]
+        let adapter: Box<dyn crate::adapters::VmmAdapter> =
+            Box::new(crate::adapters::hvf::HvfAdapter::new().unwrap());
+
+        #[cfg(target_os = "linux")]
+        let adapter: Box<dyn crate::adapters::VmmAdapter> =
+            Box::new(crate::adapters::cloudhypervisor::CloudHypervisorAdapter::new().unwrap());
+
         let builder = VmBuilder {
-            adapter: Box::new(crate::adapters::hvf::HvfAdapter::new().unwrap()),
+            adapter,
             kernel_path: PathBuf::from("/tmp/vmlinuz"),
             _work_dir: PathBuf::from("/tmp"),
             initramfs_cache: None,
@@ -387,8 +395,16 @@ mod tests {
 
     #[test]
     fn test_build_command_file_finalize() {
+        #[cfg(target_os = "macos")]
+        let adapter: Box<dyn crate::adapters::VmmAdapter> =
+            Box::new(crate::adapters::hvf::HvfAdapter::new().unwrap());
+
+        #[cfg(target_os = "linux")]
+        let adapter: Box<dyn crate::adapters::VmmAdapter> =
+            Box::new(crate::adapters::cloudhypervisor::CloudHypervisorAdapter::new().unwrap());
+
         let builder = VmBuilder {
-            adapter: Box::new(crate::adapters::hvf::HvfAdapter::new().unwrap()),
+            adapter,
             kernel_path: PathBuf::from("/tmp/vmlinuz"),
             _work_dir: PathBuf::from("/tmp"),
             initramfs_cache: None,

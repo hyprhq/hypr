@@ -13,7 +13,7 @@ use hypr_core::{
     error::{HyprError, Result},
     types::{
         network::NetworkConfig,
-        vm::{DiskConfig, GpuConfig, VmConfig, VmHandle, VmResources, VmStatus},
+        vm::{CommandSpec, DiskConfig, GpuConfig, VmConfig, VmHandle, VmResources, VmStatus},
         Vm,
     },
     StateManager,
@@ -44,13 +44,17 @@ impl MockAdapter {
 
 #[async_trait::async_trait]
 impl VmmAdapter for MockAdapter {
+    async fn build_command(&self, _config: &VmConfig) -> Result<CommandSpec> {
+        // Mock: Return dummy command spec
+        Ok(CommandSpec { program: "true".to_string(), args: vec![], env: vec![] })
+    }
+
     async fn create(&self, config: &VmConfig) -> Result<VmHandle> {
         // Mock: Return handle without actually spawning VM
         Ok(VmHandle {
             id: config.id.clone(),
             pid: Some(12345),
             socket_path: Some(PathBuf::from("/tmp/mock.sock")),
-            child: None,
         })
     }
 
