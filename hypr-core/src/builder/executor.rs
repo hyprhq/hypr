@@ -1133,49 +1133,6 @@ impl LinuxVmBuilder {
             base_rootfs: None,
         })
     }
-
-    /// Execute a RUN instruction in a builder VM.
-    fn execute_run(&mut self, command: &str) -> BuildResult<PathBuf> {
-        use crate::builder::BuildStep;
-
-        let layer_id = format!("layer-{}", uuid::Uuid::new_v4());
-        let output_dir = self.work_dir.join("layers");
-        std::fs::create_dir_all(&output_dir)
-            .map_err(|e| BuildError::IoError { path: output_dir.clone(), source: e })?;
-
-        let output_layer = output_dir.join(format!("{}.tar", layer_id));
-        let context_dir = self.work_dir.join("context");
-
-        // Create context directory for virtio-fs mount
-        std::fs::create_dir_all(&context_dir)
-            .map_err(|e| BuildError::IoError { path: context_dir.clone(), source: e })?;
-
-        let step = BuildStep::Run { command: command.to_string(), workdir: self.workdir.clone() };
-
-        // Verify base rootfs exists before building
-        if self.base_rootfs.is_none() {
-            return Err(BuildError::InstructionFailed {
-                instruction: format!("RUN {}", command),
-                details: "No base image available. RUN instruction requires FROM first.".into(),
-            });
-        }
-
-        // Execute in VM with base rootfs
-        // Use block_in_place to avoid nested runtime issues when called from async context
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                self.vm_builder
-                    .execute_step(&step, &context_dir, &output_layer, self.base_rootfs.as_deref())
-                    .await
-            })
-        })
-        .map_err(|e| BuildError::InstructionFailed {
-            instruction: format!("RUN {}", command),
-            details: e.to_string(),
-        })?;
-
-        Ok(output_layer)
-    }
 }
 
 #[cfg(target_os = "linux")]
