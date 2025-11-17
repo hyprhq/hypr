@@ -415,8 +415,9 @@ impl VmBuilder {
         };
 
         // Wait for streaming to complete (should finish shortly after VM exits)
-        let _results = stream_task.await
-            .map_err(|e| HyprError::BuildFailed { reason: format!("Stream task failed: {}", e) })??;
+        let _results = stream_task.await.map_err(|e| HyprError::BuildFailed {
+            reason: format!("Stream task failed: {}", e),
+        })??;
 
         // Check if layer tarball was created
         if !layer_path.exists() {
