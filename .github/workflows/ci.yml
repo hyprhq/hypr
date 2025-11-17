@@ -31,6 +31,18 @@ jobs:
             sudo apt-get install -y protobuf-compiler libelf-dev zlib1g-dev
           fi
 
+      - name: Install zig
+        run: |
+          if [ "$RUNNER_OS" == "macOS" ]; then
+            brew install zig
+          elif [ "$RUNNER_OS" == "Linux" ]; then
+            wget -q https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz
+            tar -xf zig-linux-x86_64-0.13.0.tar.xz
+            sudo mv zig-linux-x86_64-0.13.0 /usr/local/zig
+            sudo ln -s /usr/local/zig/zig /usr/local/bin/zig
+            zig version
+          fi
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:

@@ -77,9 +77,9 @@ jobs:
             ZIG_ARCH="x86_64"
           fi
 
-          wget https://ziglang.org/download/0.11.0/zig-linux-${ZIG_ARCH}-0.11.0.tar.xz
-          tar -xf zig-linux-${ZIG_ARCH}-0.11.0.tar.xz
-          sudo mv zig-linux-${ZIG_ARCH}-0.11.0 /usr/local/zig
+          wget -q https://ziglang.org/download/0.13.0/zig-linux-${ZIG_ARCH}-0.13.0.tar.xz
+          tar -xf zig-linux-${ZIG_ARCH}-0.13.0.tar.xz
+          sudo mv zig-linux-${ZIG_ARCH}-0.13.0 /usr/local/zig
 
           # Create symlink so 'which zig' works and build.rs can find it
           sudo ln -sf /usr/local/zig/zig /usr/local/bin/zig
