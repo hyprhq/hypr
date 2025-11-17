@@ -11,7 +11,10 @@ use crate::builder::parser::Instruction;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info};
+
+#[cfg(target_os = "linux")]
+use tracing::instrument;
 
 #[cfg(target_os = "linux")]
 use crate::builder::graph::BuildNode;
