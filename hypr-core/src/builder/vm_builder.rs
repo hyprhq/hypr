@@ -380,16 +380,43 @@ impl VmBuilder {
         // Boot VM ONCE
         let (vm, mut child) = self.spawn_builder_vm(context_dir, output_dir, base_rootfs).await?;
 
-        // Wait for VM to finish FIRST (so log file is complete)
+        // Stream logs in real-time WHILE VM runs
         let log_path = PathBuf::from(format!("/tmp/hypr-vm-{}.log", vm.id));
-        child
-            .wait()
-            .await
-            .map_err(|e| HyprError::BuildFailed { reason: format!("VM wait failed: {}", e) })?;
 
-        // Then stream the complete log
-        let mut streamer = BuildOutputStream::new();
-        let _results = streamer.stream_from_file(&log_path).await?;
+        // Run streaming and VM concurrently
+        let stream_task = tokio::spawn({
+            let log_path = log_path.clone();
+            async move {
+                let mut s = BuildOutputStream::new();
+                s.stream_from_file(&log_path).await
+            }
+        });
+
+        // Wait for VM to finish OR handle Ctrl+C
+        let _vm_result = tokio::select! {
+            result = child.wait() => {
+                result.map_err(|e| HyprError::BuildFailed { reason: format!("VM wait failed: {}", e) })?
+            }
+            _ = tokio::signal::ctrl_c() => {
+                // User pressed Ctrl+C - kill the VM and clean up
+                info!("Received SIGINT, shutting down build VM");
+                let _ = child.start_kill();
+                let _ = child.wait().await; // Wait for it to die
+
+                // Clean up any adapter-managed resources (e.g., virtiofsd on Linux)
+                if let Err(e) = self.adapter.delete(&vm).await {
+                    warn!("Failed to clean up VM resources: {}", e);
+                }
+
+                return Err(HyprError::BuildFailed {
+                    reason: "Build cancelled by user".to_string()
+                });
+            }
+        };
+
+        // Wait for streaming to complete (should finish shortly after VM exits)
+        let _results = stream_task.await
+            .map_err(|e| HyprError::BuildFailed { reason: format!("Stream task failed: {}", e) })??;
 
         // Check if layer tarball was created
         if !layer_path.exists() {

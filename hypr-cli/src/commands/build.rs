@@ -8,7 +8,6 @@ use hypr_core::builder::parser::parse_dockerfile;
 use hypr_core::builder::{create_builder, BuildContext, BuildGraph, CacheManager};
 use hypr_core::state::StateManager;
 use hypr_core::types::Image;
-use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -113,32 +112,13 @@ pub async fn build(
 
     // Execute build
     println!("{} Executing build", "[4/4]".bold().blue());
-
-    let pb = ProgressBar::new(execution_order.len() as u64);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}")
-            .unwrap()
-            .progress_chars("=>-"),
-    );
+    println!();
 
     let mut builder = create_builder().with_context(|| "Failed to create builder")?;
 
-    // Note: Currently the executor is a stub, so we simulate progress
-    for (i, node_id) in execution_order.iter().enumerate() {
-        let node = graph.get_node(*node_id).unwrap();
-        pb.set_message(format!("Step {}: {:?}", i + 1, node.instruction));
-        pb.inc(1);
-
-        // Simulate some work (remove this when executor is implemented)
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-    }
-
-    // Execute the actual build
+    // Execute the actual build (streaming happens inside execute)
     let output =
         builder.execute(&graph, &context, &mut cache).await.with_context(|| "Build failed")?;
-
-    pb.finish_with_message("Build complete");
 
     // Print results
     let duration = start_time.elapsed();
