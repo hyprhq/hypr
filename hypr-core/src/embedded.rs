@@ -113,10 +113,7 @@ mod tests {
 
     #[test]
     fn test_cloud_hypervisor_embedded() {
-        // Verify binary is embedded for current architecture
-        assert!(!CLOUD_HYPERVISOR_BINARY.is_empty());
-
-        // Should be a multi-megabyte binary
+        // Verify binary is embedded and is a multi-megabyte binary
         assert!(CLOUD_HYPERVISOR_BINARY.len() > 1_000_000);
     }
 

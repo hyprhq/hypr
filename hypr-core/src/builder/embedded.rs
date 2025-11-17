@@ -65,7 +65,6 @@ mod tests {
 
     #[test]
     fn test_embedded_initramfs_exists() {
-        assert!(!INITRAMFS_LINUX.is_empty());
         // Verify cpio magic number (070701 = newc format ASCII)
         // First 6 bytes should be "070701"
         assert_eq!(&INITRAMFS_LINUX[0..6], b"070701");
