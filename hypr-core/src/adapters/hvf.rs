@@ -94,11 +94,9 @@ impl HvfAdapter {
         let initrd = config.initramfs_path.as_ref().unwrap_or(&self.initrd_path);
         args.push(initrd.to_string_lossy().to_string());
 
-        // Kernel command line
-        if !config.kernel_args.is_empty() {
-            args.push("--kernel-cmdline".to_string());
-            args.push(config.kernel_args.join(" "));
-        }
+        // Kernel command line (REQUIRED by vfkit when using --kernel/--initrd, even if empty)
+        args.push("--kernel-cmdline".to_string());
+        args.push(config.kernel_args.join(" "));
 
         // Disks
         for disk in &config.disks {

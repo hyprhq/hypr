@@ -11,7 +11,7 @@ use crate::builder::parser::Instruction;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use tracing::{debug, info};
+use tracing::{debug, info, instrument};
 
 #[cfg(target_os = "linux")]
 use crate::builder::graph::BuildNode;
@@ -1182,7 +1182,7 @@ impl BuildExecutor for LinuxVmBuilder {
         &mut self,
         graph: &BuildGraph,
         context: &BuildContext,
-        cache: &mut CacheManager,
+        _cache: &mut CacheManager,
     ) -> BuildResult<BuildOutput> {
         info!("Starting Linux VM-based build with cloud-hypervisor");
 
