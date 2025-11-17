@@ -297,6 +297,17 @@ impl StateManager {
         Ok(())
     }
 
+    pub async fn delete_image_by_name_tag(&self, name: &str, tag: &str) -> Result<()> {
+        sqlx::query("DELETE FROM images WHERE name = ? AND tag = ?")
+            .bind(name)
+            .bind(tag)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
     fn row_to_image(&self, row: sqlx::sqlite::SqliteRow) -> Result<Image> {
         let manifest_json: String = row.get("manifest");
         let manifest = serde_json::from_str(&manifest_json).map_err(|e| {

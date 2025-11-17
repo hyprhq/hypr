@@ -279,13 +279,20 @@ impl VmBuilder {
             HyprError::BuildFailed { reason: format!("Failed to build VM command: {}", e) }
         })?;
 
-        // Spawn VM process
+        // Create log file for VM stdout/stderr
+        let log_path = PathBuf::from(format!("/tmp/hypr-vm-{}.log", vm_id));
+        let log_file = std::fs::File::create(&log_path).map_err(|e| HyprError::BuildFailed {
+            reason: format!("Failed to create log file: {}", e),
+        })?;
+
+        // Spawn VM process with stdout/stderr redirected to log file
         info!("Spawning builder VM: {} {:?}", cmd_spec.program, cmd_spec.args);
+        info!("VM output will be logged to: {}", log_path.display());
         let child = tokio::process::Command::new(&cmd_spec.program)
             .args(&cmd_spec.args)
             .envs(cmd_spec.env)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stdout(log_file.try_clone().unwrap())
+            .stderr(log_file)
             .spawn()
             .map_err(|e| {
                 error!("Failed to spawn builder VM: {}", e);
@@ -328,6 +335,79 @@ impl VmBuilder {
             size_bytes: metadata.len(),
             layer_hash: "sha256:placeholder".to_string(), // TODO: compute actual hash
         })
+    }
+
+    /// Execute ALL build steps in a SINGLE VM (the correct way).
+    pub async fn execute_all_steps(
+        &mut self,
+        steps: Vec<BuildStep>,
+        context_dir: &Path,
+        output_dir: &Path,
+        base_rootfs: Option<&Path>,
+    ) -> Result<Vec<BuildLayerInfo>> {
+        info!("Executing {} steps in one VM", steps.len());
+
+        // Generate layer ID
+        let layer_id = uuid::Uuid::new_v4().to_string();
+        let layer_path = output_dir.join(format!("layer-{}.tar", layer_id));
+
+        // Write ALL command files first (including FINALIZE at the end)
+        let commands_dir = context_dir.join(".hypr/commands");
+        std::fs::create_dir_all(&commands_dir).map_err(|e| HyprError::BuildFailed {
+            reason: format!("Failed to create commands dir: {}", e),
+        })?;
+
+        let mut cmd_num = 1;
+        for step in steps.iter() {
+            let cmd_file = commands_dir.join(format!("{:03}.cmd", cmd_num));
+            let command_text = self.build_command_file(step)?;
+            std::fs::write(&cmd_file, &command_text).map_err(|e| HyprError::BuildFailed {
+                reason: format!("Failed to write command file: {}", e),
+            })?;
+            cmd_num += 1;
+        }
+
+        // Add FINALIZE step to create tarball of all changes
+        let finalize_step = BuildStep::Finalize { layer_id: layer_id.clone() };
+        let finalize_file = commands_dir.join(format!("{:03}.cmd", cmd_num));
+        let finalize_cmd = self.build_command_file(&finalize_step)?;
+        std::fs::write(&finalize_file, &finalize_cmd).map_err(|e| HyprError::BuildFailed {
+            reason: format!("Failed to write finalize command: {}", e),
+        })?;
+
+        info!("Written {} build commands + 1 FINALIZE command", steps.len());
+
+        // Boot VM ONCE
+        let (vm, mut child) = self.spawn_builder_vm(context_dir, output_dir, base_rootfs).await?;
+
+        // Wait for VM to finish FIRST (so log file is complete)
+        let log_path = PathBuf::from(format!("/tmp/hypr-vm-{}.log", vm.id));
+        child
+            .wait()
+            .await
+            .map_err(|e| HyprError::BuildFailed { reason: format!("VM wait failed: {}", e) })?;
+
+        // Then stream the complete log
+        let mut streamer = BuildOutputStream::new();
+        let _results = streamer.stream_from_file(&log_path).await?;
+
+        // Check if layer tarball was created
+        if !layer_path.exists() {
+            return Err(HyprError::BuildFailed {
+                reason: format!("Layer tarball not created at {}", layer_path.display()),
+            });
+        }
+
+        let metadata = tokio::fs::metadata(&layer_path).await.map_err(|e| {
+            HyprError::BuildFailed { reason: format!("Failed to read layer metadata: {}", e) }
+        })?;
+
+        info!("Layer extracted: {} ({} bytes)", layer_path.display(), metadata.len());
+
+        Ok(vec![BuildLayerInfo {
+            size_bytes: metadata.len(),
+            layer_hash: format!("sha256:{}", layer_id),
+        }])
     }
 }
 

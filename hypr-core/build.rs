@@ -85,14 +85,15 @@ fn build_initramfs(kestrel_src: &Path, embedded_dir: &Path, zig_target: &str, ar
     // Step 1: Compile kestrel
     let kestrel_path = temp_dir.join("init");
     if !compile_kestrel_to(kestrel_src, &kestrel_path, zig_target, arch_name) {
-        println!("cargo:warning=Failed to compile kestrel for {}", arch_name);
-        return;
+        panic!(
+            "Failed to compile kestrel for {}. Install zig: brew install zig (macOS) or see https://ziglang.org/download/",
+            arch_name
+        );
     }
 
     // Step 2: Download busybox
     if !download_busybox(&temp_dir, arch_name) {
-        println!("cargo:warning=Failed to download busybox for {}", arch_name);
-        return;
+        panic!("Failed to download busybox for {}", arch_name);
     }
 
     // Step 3: No directory structure needed!

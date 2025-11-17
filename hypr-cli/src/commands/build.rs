@@ -235,6 +235,11 @@ pub async fn build(
         created_at: SystemTime::now(),
     };
 
+    // Try to delete existing image with same name:tag first (Docker overwrites by default)
+    if state.delete_image_by_name_tag(&image_name, &image_tag).await.is_err() {
+        // Image didn't exist, that's fine
+    }
+
     state.insert_image(&image).await.with_context(|| "Failed to register image in database")?;
 
     println!("  Registered image: {}:{}", image_name.green(), image_tag.cyan());

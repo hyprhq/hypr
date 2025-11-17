@@ -11,7 +11,7 @@ use crate::builder::parser::Instruction;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info};
 
 #[cfg(target_os = "linux")]
 use crate::builder::graph::BuildNode;
@@ -1115,7 +1115,7 @@ impl LinuxVmBuilder {
             vm_builder,
             work_dir,
             env: HashMap::new(),
-            workdir: "/context".to_string(), // Build context is mounted at /context via virtio-fs
+            workdir: "/".to_string(), // Start at root, WORKDIR instruction will change this
             config: ImageConfig {
                 entrypoint: None,
                 cmd: None,
@@ -1186,121 +1186,120 @@ impl BuildExecutor for LinuxVmBuilder {
     ) -> BuildResult<BuildOutput> {
         info!("Starting Linux VM-based build with cloud-hypervisor");
 
-        let mut final_layers: Vec<PathBuf> = Vec::new();
-
-        // Execute each node in topological order
+        // PHASE 1: Pull base image (FROM instruction)
         for node in &graph.nodes {
-            debug!("Executing node: {:?}", node.instruction);
+            if let Instruction::From { image, .. } = &node.instruction {
+                use crate::builder::parser::ImageRef;
 
-            // Check cache first
-            if !context.no_cache {
-                match cache.lookup(&node.cache_key)? {
-                    crate::builder::cache::CacheLookupResult::Hit { layer_path, metadata: _ } => {
-                        info!("Cache hit for: {:?}", node.instruction);
-                        final_layers.push(layer_path);
-                        continue;
+                match image {
+                    ImageRef::Scratch => {
+                        info!("FROM scratch: using minimal rootfs");
+                        // Create minimal directory structure
+                        let scratch_dir = self.work_dir.join("rootfs-scratch");
+                        std::fs::create_dir_all(&scratch_dir)?;
+                        std::fs::create_dir_all(scratch_dir.join("tmp"))?;
+                        std::fs::create_dir_all(scratch_dir.join("etc"))?;
+                        std::fs::create_dir_all(scratch_dir.join("proc"))?;
+                        std::fs::create_dir_all(scratch_dir.join("sys"))?;
+                        std::fs::create_dir_all(scratch_dir.join("dev"))?;
+                        self.base_rootfs = Some(scratch_dir);
                     }
-                    crate::builder::cache::CacheLookupResult::Miss => {}
+                    ImageRef::Stage(_) => {
+                        return Err(BuildError::InstructionFailed {
+                            instruction: "FROM".to_string(),
+                            details: "Multi-stage builds not yet supported".into(),
+                        });
+                    }
+                    ImageRef::Image { name, tag, digest } => {
+                        // Construct full image reference
+                        let image_str = if let Some(digest) = digest {
+                            format!("{}@{}", name, digest)
+                        } else {
+                            format!("{}:{}", name, tag.as_deref().unwrap_or("latest"))
+                        };
+
+                        info!("FROM {}: pulling base image from registry", image_str);
+
+                        // Create directory for base image
+                        let base_dir = self.work_dir.join("rootfs-base");
+                        std::fs::create_dir_all(&base_dir)?;
+
+                        // Pull and extract image
+                        self.oci_client.pull_image(&image_str, &base_dir).await?;
+
+                        info!("Base image extracted to {}", base_dir.display());
+                        self.base_rootfs = Some(base_dir);
+                    }
                 }
+                break; // Only one FROM
             }
+        }
 
-            // Execute instruction
-            let layer_path_opt = match &node.instruction {
-                Instruction::From { image, .. } => {
-                    use crate::builder::parser::ImageRef;
-
-                    match image {
-                        ImageRef::Scratch => {
-                            info!("FROM scratch: using minimal rootfs");
-                            // Create minimal directory structure
-                            let scratch_dir = self.work_dir.join("rootfs-scratch");
-                            std::fs::create_dir_all(&scratch_dir)?;
-                            std::fs::create_dir_all(scratch_dir.join("tmp"))?;
-                            std::fs::create_dir_all(scratch_dir.join("etc"))?;
-                            std::fs::create_dir_all(scratch_dir.join("proc"))?;
-                            std::fs::create_dir_all(scratch_dir.join("sys"))?;
-                            std::fs::create_dir_all(scratch_dir.join("dev"))?;
-                            self.base_rootfs = Some(scratch_dir);
-                        }
-                        ImageRef::Stage(_) => {
-                            return Err(BuildError::InstructionFailed {
-                                instruction: "FROM".to_string(),
-                                details: "Multi-stage builds not yet supported".into(),
-                            });
-                        }
-                        ImageRef::Image { name, tag, digest } => {
-                            // Construct full image reference
-                            let image_str = if let Some(digest) = digest {
-                                format!("{}@{}", name, digest)
-                            } else {
-                                format!("{}:{}", name, tag.as_deref().unwrap_or("latest"))
-                            };
-
-                            info!("FROM {}: pulling base image from registry", image_str);
-
-                            // Create directory for base image
-                            let base_dir = self.work_dir.join("rootfs-base");
-                            std::fs::create_dir_all(&base_dir)?;
-
-                            // Pull and extract image
-                            self.oci_client.pull_image(&image_str, &base_dir).await?;
-
-                            info!("Base image extracted to {}", base_dir.display());
-                            self.base_rootfs = Some(base_dir);
-                        }
-                    }
-
-                    // FROM doesn't create a layer itself
-                    None
-                }
+        // PHASE 2: Collect all RUN/COPY/WORKDIR/ENV instructions
+        let mut build_steps = Vec::new();
+        for node in &graph.nodes {
+            match &node.instruction {
                 Instruction::Run { command } => {
-                    let command_str = match command {
-                        crate::builder::parser::RunCommand::Shell(cmd) => cmd.clone(),
-                        crate::builder::parser::RunCommand::Exec(args) => {
-                            // Convert exec form to shell form for builder VM
-                            args.join(" ")
-                        }
+                    let cmd_str = match command {
+                        crate::builder::parser::RunCommand::Shell(c) => c.clone(),
+                        crate::builder::parser::RunCommand::Exec(args) => args.join(" "),
                     };
-                    info!("Executing RUN: {}", command_str);
-                    let layer = self.execute_run(&command_str)?;
-
-                    // Cache insertion would go here (needs layer bytes, not path)
-                    // For now, we skip caching in VM builder
-
-                    Some(layer)
+                    build_steps.push(crate::builder::BuildStep::Run {
+                        command: cmd_str,
+                        workdir: self.workdir.clone(),
+                    });
                 }
-                Instruction::Env { vars } => {
-                    // Update environment
-                    for (key, value) in vars {
-                        self.env.insert(key.clone(), value.clone());
-                        self.config.env.insert(key.clone(), value.clone());
-                    }
-                    None
+                Instruction::Copy { sources, destination, .. } => {
+                    // Normalize destination path
+                    let dest_path = if destination.starts_with('/') {
+                        destination.clone()
+                    } else if destination == "." || destination == "./" {
+                        self.workdir.clone()
+                    } else {
+                        // Remove leading "./" if present
+                        let clean_dest = destination.strip_prefix("./").unwrap_or(destination);
+                        format!("{}/{}", self.workdir.trim_end_matches('/'), clean_dest)
+                    };
+
+                    // Create destination and copy files (cd to /context first so globs expand)
+                    let source_list = sources.join(" ");
+                    let copy_cmd = format!(
+                        "mkdir -p {} && cd /context && cp -r {} {}/ 2>/dev/null || true",
+                        dest_path, source_list, dest_path
+                    );
+
+                    build_steps.push(crate::builder::BuildStep::Run {
+                        command: copy_cmd,
+                        workdir: self.workdir.clone(),
+                    });
                 }
                 Instruction::Workdir { path } => {
                     self.workdir = path.clone();
                     self.config.workdir = Some(path.clone());
-                    None
+                }
+                Instruction::Env { vars } => {
+                    for (k, v) in vars {
+                        self.env.insert(k.clone(), v.clone());
+                        self.config.env.insert(k.clone(), v.clone());
+                    }
                 }
                 Instruction::Cmd { command } => {
                     let cmd_vec = match command {
-                        crate::builder::parser::RunCommand::Shell(cmd) => {
-                            vec!["/bin/sh".to_string(), "-c".to_string(), cmd.clone()]
+                        crate::builder::parser::RunCommand::Shell(c) => {
+                            vec!["/bin/sh".to_string(), "-c".to_string(), c.clone()]
                         }
                         crate::builder::parser::RunCommand::Exec(args) => args.clone(),
                     };
                     self.config.cmd = Some(cmd_vec);
-                    None
                 }
                 Instruction::Entrypoint { command } => {
                     let entry_vec = match command {
-                        crate::builder::parser::RunCommand::Shell(cmd) => {
-                            vec!["/bin/sh".to_string(), "-c".to_string(), cmd.clone()]
+                        crate::builder::parser::RunCommand::Shell(c) => {
+                            vec!["/bin/sh".to_string(), "-c".to_string(), c.clone()]
                         }
                         crate::builder::parser::RunCommand::Exec(args) => args.clone(),
                     };
                     self.config.entrypoint = Some(entry_vec);
-                    None
                 }
                 Instruction::Expose { ports } => {
                     for port_spec in ports {
@@ -1309,56 +1308,101 @@ impl BuildExecutor for LinuxVmBuilder {
                             self.config.exposed_ports.push(port_str);
                         }
                     }
-                    None
                 }
-                Instruction::Copy { sources, destination, .. } => {
-                    // COPY in VM builder: copy from /context to workdir
-                    info!("Executing COPY: {:?} -> {}", sources, destination);
-
-                    // Build copy command
-                    // Sources are relative to build context (/context)
-                    // Destination is relative to current workdir
-                    let dest_path = if destination.starts_with('/') {
-                        destination.clone()
-                    } else {
-                        format!("{}/{}", self.workdir.trim_end_matches('/'), destination)
-                    };
-
-                    // Build shell command with proper globbing support
-                    // Use 'for' loop to handle globs and missing files gracefully
-                    let mut copy_script = format!("mkdir -p {}\n", dest_path);
-
-                    for source in sources {
-                        // Use shell glob expansion with 'for' loop
-                        // This handles both literal files and glob patterns
-                        copy_script.push_str(&format!(
-                            "for f in /context/{}; do [ -e \"$f\" ] && cp -r \"$f\" {}/; done\n",
-                            source, dest_path
-                        ));
-                    }
-
-                    info!("COPY script:\n{}", copy_script);
-                    let layer = self.execute_run(&copy_script)?;
-                    Some(layer)
-                }
-                _ => {
-                    warn!("Unsupported instruction (skipping): {:?}", node.instruction);
-                    None
-                }
-            };
-
-            if let Some(layer_path) = layer_path_opt {
-                final_layers.push(layer_path);
+                _ => {} // Skip other instructions
             }
         }
 
-        // Merge layers into final rootfs
-        info!("Merging {} layers into final rootfs", final_layers.len());
+        // PHASE 3: Execute ALL build steps in ONE VM
+        let mut final_layers: Vec<PathBuf> = Vec::new();
+        if !build_steps.is_empty() {
+            info!("Executing {} build steps in one VM", build_steps.len());
+            let output_dir = self.work_dir.join("layers");
+            std::fs::create_dir_all(&output_dir)?;
+            let context_dir = self.work_dir.join("context");
+            std::fs::create_dir_all(&context_dir)?;
+
+            // Copy build context files into context_dir so they're available in the VM
+            info!(
+                "Copying build context from {} to {}",
+                context.context_path.display(),
+                context_dir.display()
+            );
+            let status = std::process::Command::new("rsync")
+                .args([
+                    "-a",
+                    &format!("{}/", context.context_path.to_str().unwrap()),
+                    context_dir.to_str().unwrap(),
+                ])
+                .status()
+                .map_err(|e| BuildError::IoError {
+                    path: context.context_path.clone(),
+                    source: e,
+                })?;
+            if !status.success() {
+                return Err(BuildError::InstructionFailed {
+                    instruction: "Copy build context".to_string(),
+                    details: "Failed to copy build context files".into(),
+                });
+            }
+
+            let _layer_infos = self
+                .vm_builder
+                .execute_all_steps(
+                    build_steps,
+                    &context_dir,
+                    &output_dir,
+                    self.base_rootfs.as_deref(),
+                )
+                .await
+                .map_err(|e| BuildError::InstructionFailed {
+                    instruction: "VM build execution".to_string(),
+                    details: e.to_string(),
+                })?;
+
+            // Find the layer tarballs in output_dir
+            for entry in std::fs::read_dir(&output_dir)
+                .map_err(|e| BuildError::IoError { path: output_dir.clone(), source: e })?
+            {
+                let entry = entry
+                    .map_err(|e| BuildError::IoError { path: output_dir.clone(), source: e })?;
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("tar") {
+                    final_layers.push(path);
+                }
+            }
+
+            info!("Found {} layer tarball(s)", final_layers.len());
+        }
+
+        // PHASE 4: Create final rootfs + squashfs
         let final_rootfs = self.work_dir.join("rootfs");
         std::fs::create_dir_all(&final_rootfs)
             .map_err(|e| BuildError::IoError { path: final_rootfs.clone(), source: e })?;
 
-        // Extract all layer tarballs
+        // First, copy base image rootfs if it exists
+        if let Some(base_path) = &self.base_rootfs {
+            info!("Copying base image from {}", base_path.display());
+            // Use rsync for cross-platform compatibility
+            let status = std::process::Command::new("rsync")
+                .args([
+                    "-a",
+                    &format!("{}/", base_path.to_str().unwrap()),
+                    final_rootfs.to_str().unwrap(),
+                ])
+                .status()
+                .map_err(|e| BuildError::IoError { path: base_path.clone(), source: e })?;
+
+            if !status.success() {
+                return Err(BuildError::InstructionFailed {
+                    instruction: "Copy base rootfs".to_string(),
+                    details: "Failed to copy base image files".into(),
+                });
+            }
+        }
+
+        // Then extract layer tarballs on top
+        info!("Extracting {} layer(s) into final rootfs", final_layers.len());
         for layer in &final_layers {
             debug!("Extracting layer: {}", layer.display());
             let status = std::process::Command::new("tar")
@@ -1502,7 +1546,7 @@ impl MacOsVmBuilder {
             vm_builder,
             work_dir,
             env: HashMap::new(),
-            workdir: "/context".to_string(), // Build context is mounted at /context via virtio-fs
+            workdir: "/".to_string(), // Start at root, WORKDIR instruction will change this
             config: ImageConfig {
                 entrypoint: None,
                 cmd: None,
@@ -1517,49 +1561,6 @@ impl MacOsVmBuilder {
             base_rootfs: None,
         })
     }
-
-    /// Execute a RUN instruction in a builder VM.
-    fn execute_run(&mut self, command: &str) -> BuildResult<PathBuf> {
-        use crate::builder::BuildStep;
-
-        let layer_id = format!("layer-{}", uuid::Uuid::new_v4());
-        let output_dir = self.work_dir.join("layers");
-        std::fs::create_dir_all(&output_dir)
-            .map_err(|e| BuildError::IoError { path: output_dir.clone(), source: e })?;
-
-        let output_layer = output_dir.join(format!("{}.tar", layer_id));
-        let context_dir = self.work_dir.join("context");
-
-        // Create context directory for virtio-fs mount
-        std::fs::create_dir_all(&context_dir)
-            .map_err(|e| BuildError::IoError { path: context_dir.clone(), source: e })?;
-
-        let step = BuildStep::Run { command: command.to_string(), workdir: self.workdir.clone() };
-
-        // Verify base rootfs exists before building
-        if self.base_rootfs.is_none() {
-            return Err(BuildError::InstructionFailed {
-                instruction: format!("RUN {}", command),
-                details: "No base image available. RUN instruction requires FROM first.".into(),
-            });
-        }
-
-        // Execute in VM with base rootfs
-        // Use block_in_place to avoid nested runtime issues when called from async context
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                self.vm_builder
-                    .execute_step(&step, &context_dir, &output_layer, self.base_rootfs.as_deref())
-                    .await
-            })
-        })
-        .map_err(|e| BuildError::InstructionFailed {
-            instruction: format!("RUN {}", command),
-            details: e.to_string(),
-        })?;
-
-        Ok(output_layer)
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1569,125 +1570,123 @@ impl BuildExecutor for MacOsVmBuilder {
         &mut self,
         graph: &BuildGraph,
         context: &BuildContext,
-        cache: &mut CacheManager,
+        _cache: &mut CacheManager,
     ) -> BuildResult<BuildOutput> {
-        info!("Starting macOS VM-based build");
-
-        let mut final_layers: Vec<PathBuf> = Vec::new();
-
-        // Execute each node in topological order
+        // TODO: Apply same batch execution fix as Linux
+        // PHASE 1: Pull base image (FROM instruction)
         for node in &graph.nodes {
-            debug!("Executing node: {:?}", node.instruction);
+            if let Instruction::From { image, .. } = &node.instruction {
+                use crate::builder::parser::ImageRef;
 
-            // Check cache first
-            if !context.no_cache {
-                match cache.lookup(&node.cache_key)? {
-                    crate::builder::cache::CacheLookupResult::Hit { layer_path, metadata: _ } => {
-                        info!("Cache hit for: {:?}", node.instruction);
-                        final_layers.push(layer_path);
-                        continue;
+                match image {
+                    ImageRef::Scratch => {
+                        info!("FROM scratch: using minimal rootfs");
+                        // Create minimal directory structure
+                        let scratch_dir = self.work_dir.join("rootfs-scratch");
+                        std::fs::create_dir_all(&scratch_dir)?;
+                        std::fs::create_dir_all(scratch_dir.join("tmp"))?;
+                        std::fs::create_dir_all(scratch_dir.join("etc"))?;
+                        std::fs::create_dir_all(scratch_dir.join("proc"))?;
+                        std::fs::create_dir_all(scratch_dir.join("sys"))?;
+                        std::fs::create_dir_all(scratch_dir.join("dev"))?;
+                        self.base_rootfs = Some(scratch_dir);
                     }
-                    crate::builder::cache::CacheLookupResult::Miss => {}
+                    ImageRef::Stage(_) => {
+                        return Err(BuildError::InstructionFailed {
+                            instruction: "FROM".to_string(),
+                            details: "Multi-stage builds not yet supported".into(),
+                        });
+                    }
+                    ImageRef::Image { name, tag, digest } => {
+                        // Construct full image reference
+                        let image_str = if let Some(digest) = digest {
+                            format!("{}@{}", name, digest)
+                        } else {
+                            format!("{}:{}", name, tag.as_deref().unwrap_or("latest"))
+                        };
+
+                        info!("FROM {}: pulling base image from registry", image_str);
+
+                        // Create directory for base image
+                        let base_dir = self.work_dir.join("rootfs-base");
+                        std::fs::create_dir_all(&base_dir)?;
+
+                        // Pull and extract image
+                        self.oci_client.pull_image(&image_str, &base_dir).await?;
+
+                        info!("Base image extracted to {}", base_dir.display());
+                        self.base_rootfs = Some(base_dir);
+                    }
                 }
+                break; // Only one FROM
             }
+        }
 
-            // Execute instruction
-            let layer_path_opt = match &node.instruction {
-                Instruction::From { image, .. } => {
-                    use crate::builder::parser::ImageRef;
-
-                    match image {
-                        ImageRef::Scratch => {
-                            info!("FROM scratch: using minimal rootfs");
-                            // Create minimal directory structure
-                            let scratch_dir = self.work_dir.join("rootfs-scratch");
-                            std::fs::create_dir_all(&scratch_dir)?;
-                            std::fs::create_dir_all(scratch_dir.join("tmp"))?;
-                            std::fs::create_dir_all(scratch_dir.join("etc"))?;
-                            std::fs::create_dir_all(scratch_dir.join("proc"))?;
-                            std::fs::create_dir_all(scratch_dir.join("sys"))?;
-                            std::fs::create_dir_all(scratch_dir.join("dev"))?;
-                            self.base_rootfs = Some(scratch_dir);
-                        }
-                        ImageRef::Stage(_) => {
-                            return Err(BuildError::InstructionFailed {
-                                instruction: "FROM".to_string(),
-                                details: "Multi-stage builds not yet supported".into(),
-                            });
-                        }
-                        ImageRef::Image { name, tag, digest } => {
-                            // Construct full image reference
-                            let image_str = if let Some(digest) = digest {
-                                format!("{}@{}", name, digest)
-                            } else {
-                                format!("{}:{}", name, tag.as_deref().unwrap_or("latest"))
-                            };
-
-                            info!("FROM {}: pulling base image from registry", image_str);
-
-                            // Create directory for base image
-                            let base_dir = self.work_dir.join("rootfs-base");
-                            std::fs::create_dir_all(&base_dir)?;
-
-                            // Pull and extract image
-                            self.oci_client.pull_image(&image_str, &base_dir).await?;
-
-                            info!("Base image extracted to {}", base_dir.display());
-                            self.base_rootfs = Some(base_dir);
-                        }
-                    }
-
-                    // FROM doesn't create a layer itself
-                    None
-                }
+        // PHASE 2: Collect all RUN/COPY/WORKDIR/ENV instructions
+        let mut build_steps = Vec::new();
+        for node in &graph.nodes {
+            match &node.instruction {
                 Instruction::Run { command } => {
-                    let command_str = match command {
-                        crate::builder::parser::RunCommand::Shell(cmd) => cmd.clone(),
-                        crate::builder::parser::RunCommand::Exec(args) => {
-                            // Convert exec form to shell form for builder VM
-                            args.join(" ")
-                        }
+                    let cmd_str = match command {
+                        crate::builder::parser::RunCommand::Shell(c) => c.clone(),
+                        crate::builder::parser::RunCommand::Exec(args) => args.join(" "),
                     };
-                    info!("Executing RUN: {}", command_str);
-                    let layer = self.execute_run(&command_str)?;
-
-                    // Cache insertion would go here (needs layer bytes, not path)
-                    // For now, we skip caching in VM builder
-
-                    Some(layer)
+                    build_steps.push(crate::builder::BuildStep::Run {
+                        command: cmd_str,
+                        workdir: self.workdir.clone(),
+                    });
                 }
-                Instruction::Env { vars } => {
-                    // Update environment
-                    for (key, value) in vars {
-                        self.env.insert(key.clone(), value.clone());
-                        self.config.env.insert(key.clone(), value.clone());
-                    }
-                    None
+                Instruction::Copy { sources, destination, .. } => {
+                    // Normalize destination path
+                    let dest_path = if destination.starts_with('/') {
+                        destination.clone()
+                    } else if destination == "." || destination == "./" {
+                        self.workdir.clone()
+                    } else {
+                        // Remove leading "./" if present
+                        let clean_dest = destination.strip_prefix("./").unwrap_or(destination);
+                        format!("{}/{}", self.workdir.trim_end_matches('/'), clean_dest)
+                    };
+
+                    // Create destination and copy files (cd to /context first so globs expand)
+                    let source_list = sources.join(" ");
+                    let copy_cmd = format!(
+                        "mkdir -p {} && cd /context && cp -r {} {}/ 2>/dev/null || true",
+                        dest_path, source_list, dest_path
+                    );
+
+                    build_steps.push(crate::builder::BuildStep::Run {
+                        command: copy_cmd,
+                        workdir: self.workdir.clone(),
+                    });
                 }
                 Instruction::Workdir { path } => {
                     self.workdir = path.clone();
                     self.config.workdir = Some(path.clone());
-                    None
+                }
+                Instruction::Env { vars } => {
+                    for (k, v) in vars {
+                        self.env.insert(k.clone(), v.clone());
+                        self.config.env.insert(k.clone(), v.clone());
+                    }
                 }
                 Instruction::Cmd { command } => {
                     let cmd_vec = match command {
-                        crate::builder::parser::RunCommand::Shell(cmd) => {
-                            vec!["/bin/sh".to_string(), "-c".to_string(), cmd.clone()]
+                        crate::builder::parser::RunCommand::Shell(c) => {
+                            vec!["/bin/sh".to_string(), "-c".to_string(), c.clone()]
                         }
                         crate::builder::parser::RunCommand::Exec(args) => args.clone(),
                     };
                     self.config.cmd = Some(cmd_vec);
-                    None
                 }
                 Instruction::Entrypoint { command } => {
                     let entry_vec = match command {
-                        crate::builder::parser::RunCommand::Shell(cmd) => {
-                            vec!["/bin/sh".to_string(), "-c".to_string(), cmd.clone()]
+                        crate::builder::parser::RunCommand::Shell(c) => {
+                            vec!["/bin/sh".to_string(), "-c".to_string(), c.clone()]
                         }
                         crate::builder::parser::RunCommand::Exec(args) => args.clone(),
                     };
                     self.config.entrypoint = Some(entry_vec);
-                    None
                 }
                 Instruction::Expose { ports } => {
                     for port_spec in ports {
@@ -1696,56 +1695,101 @@ impl BuildExecutor for MacOsVmBuilder {
                             self.config.exposed_ports.push(port_str);
                         }
                     }
-                    None
                 }
-                Instruction::Copy { sources, destination, .. } => {
-                    // COPY in VM builder: copy from /context to workdir
-                    info!("Executing COPY: {:?} -> {}", sources, destination);
-
-                    // Build copy command
-                    // Sources are relative to build context (/context)
-                    // Destination is relative to current workdir
-                    let dest_path = if destination.starts_with('/') {
-                        destination.clone()
-                    } else {
-                        format!("{}/{}", self.workdir.trim_end_matches('/'), destination)
-                    };
-
-                    // Build shell command with proper globbing support
-                    // Use 'for' loop to handle globs and missing files gracefully
-                    let mut copy_script = format!("mkdir -p {}\n", dest_path);
-
-                    for source in sources {
-                        // Use shell glob expansion with 'for' loop
-                        // This handles both literal files and glob patterns
-                        copy_script.push_str(&format!(
-                            "for f in /context/{}; do [ -e \"$f\" ] && cp -r \"$f\" {}/; done\n",
-                            source, dest_path
-                        ));
-                    }
-
-                    info!("COPY script:\n{}", copy_script);
-                    let layer = self.execute_run(&copy_script)?;
-                    Some(layer)
-                }
-                _ => {
-                    warn!("Unsupported instruction (skipping): {:?}", node.instruction);
-                    None
-                }
-            };
-
-            if let Some(layer_path) = layer_path_opt {
-                final_layers.push(layer_path);
+                _ => {} // Skip other instructions
             }
         }
 
-        // Merge layers into final rootfs
-        info!("Merging {} layers into final rootfs", final_layers.len());
+        // PHASE 3: Execute ALL build steps in ONE VM
+        let mut final_layers: Vec<PathBuf> = Vec::new();
+        if !build_steps.is_empty() {
+            info!("Executing {} build steps in one VM", build_steps.len());
+            let output_dir = self.work_dir.join("layers");
+            std::fs::create_dir_all(&output_dir)?;
+            let context_dir = self.work_dir.join("context");
+            std::fs::create_dir_all(&context_dir)?;
+
+            // Copy build context files into context_dir so they're available in the VM
+            info!(
+                "Copying build context from {} to {}",
+                context.context_path.display(),
+                context_dir.display()
+            );
+            let status = std::process::Command::new("rsync")
+                .args([
+                    "-a",
+                    &format!("{}/", context.context_path.to_str().unwrap()),
+                    context_dir.to_str().unwrap(),
+                ])
+                .status()
+                .map_err(|e| BuildError::IoError {
+                    path: context.context_path.clone(),
+                    source: e,
+                })?;
+            if !status.success() {
+                return Err(BuildError::InstructionFailed {
+                    instruction: "Copy build context".to_string(),
+                    details: "Failed to copy build context files".into(),
+                });
+            }
+
+            let _layer_infos = self
+                .vm_builder
+                .execute_all_steps(
+                    build_steps,
+                    &context_dir,
+                    &output_dir,
+                    self.base_rootfs.as_deref(),
+                )
+                .await
+                .map_err(|e| BuildError::InstructionFailed {
+                    instruction: "VM build execution".to_string(),
+                    details: e.to_string(),
+                })?;
+
+            // Find the layer tarballs in output_dir
+            for entry in std::fs::read_dir(&output_dir)
+                .map_err(|e| BuildError::IoError { path: output_dir.clone(), source: e })?
+            {
+                let entry = entry
+                    .map_err(|e| BuildError::IoError { path: output_dir.clone(), source: e })?;
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("tar") {
+                    final_layers.push(path);
+                }
+            }
+
+            info!("Found {} layer tarball(s)", final_layers.len());
+        }
+
+        // PHASE 4: Create final rootfs + squashfs
         let final_rootfs = self.work_dir.join("rootfs");
         std::fs::create_dir_all(&final_rootfs)
             .map_err(|e| BuildError::IoError { path: final_rootfs.clone(), source: e })?;
 
-        // Extract all layer tarballs
+        // First, copy base image rootfs if it exists
+        if let Some(base_path) = &self.base_rootfs {
+            info!("Copying base image from {}", base_path.display());
+            // Use rsync for cross-platform compatibility
+            let status = std::process::Command::new("rsync")
+                .args([
+                    "-a",
+                    &format!("{}/", base_path.to_str().unwrap()),
+                    final_rootfs.to_str().unwrap(),
+                ])
+                .status()
+                .map_err(|e| BuildError::IoError { path: base_path.clone(), source: e })?;
+
+            if !status.success() {
+                return Err(BuildError::InstructionFailed {
+                    instruction: "Copy base rootfs".to_string(),
+                    details: "Failed to copy base image files".into(),
+                });
+            }
+        }
+
+        // Then extract layer tarballs on top
+        info!("Extracting {} layer(s) into final rootfs", final_layers.len());
         for layer in &final_layers {
             debug!("Extracting layer: {}", layer.display());
             let status = std::process::Command::new("tar")
@@ -1812,7 +1856,7 @@ impl BuildExecutor for MacOsVmBuilder {
     }
 }
 
-#[instrument]
+/// Creates a platform-specific build executor.
 pub fn create_builder() -> BuildResult<Box<dyn BuildExecutor>> {
     #[cfg(target_os = "linux")]
     {

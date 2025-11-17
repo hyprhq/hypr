@@ -42,6 +42,7 @@
 #include <sys/mount.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
+#include <sys/reboot.h>
 #include <dirent.h>
 
 // ===== MAKEDEV (self-contained) =====
@@ -448,16 +449,15 @@ static int execute_shell_command(const char *cmd, const char *workdir) {
 static int create_tarball(const char *layer_id) {
     // Create tarball of /overlay/upper (the changes made during this build step)
     char output_tar[512];
-    snprintf(output_tar, sizeof(output_tar), "/shared/layers/%s.tar", layer_id);
+    snprintf(output_tar, sizeof(output_tar), "/shared/layer-%s.tar", layer_id);
 
-    // Ensure layers directory exists
-    mkdir("/shared/layers", 0755);
-
-    // Create tarball
+    // Create tarball of entire rootfs (we're already chrooted into the overlayfs)
+    // The rootfs contains base + all changes, we'll let the host handle deduplication
     char cmd[2048];
     snprintf(cmd, sizeof(cmd),
-        "tar -C /overlay/upper -cf %s . 2>/dev/null",
-        output_tar);
+        "cd / && tar -czf %s --exclude=shared --exclude=context --exclude=base --exclude=proc --exclude=sys --exclude=dev . 2>/dev/null || "
+        "tar -cf %s --exclude=shared --exclude=context --exclude=base --exclude=proc --exclude=sys --exclude=dev . 2>/dev/null",
+        output_tar, output_tar);
 
     int ret = system(cmd);
     if (ret == 0) {
@@ -561,6 +561,11 @@ static void handle_command_file(const char *cmd_path) {
         fflush(stdout);
 
         free(layer_id);
+
+        // FINALIZE is the last command - shutdown VM after 1 second (let logs flush)
+        sync();
+        sleep(1);
+        reboot(RB_POWER_OFF);
     }
     else {
         printf("[HYPR-RESULT]\nexit=127\nerror=Unknown command type\n[HYPR-RESULT-END]\n");
