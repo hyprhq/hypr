@@ -170,7 +170,12 @@ pub async fn build(
     println!("  Moved rootfs to {}", permanent_rootfs.display().to_string().yellow());
 
     // Register image in database
-    let state_db_path = PathBuf::from("/var/lib/hypr/hypr.db");
+    let state_db_path = if cfg!(target_os = "linux") {
+        PathBuf::from("/var/lib/hypr/hypr.db")
+    } else {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(format!("{}/.hypr/hypr.db", home))
+    };
     let state = StateManager::new(state_db_path.to_str().unwrap())
         .await
         .with_context(|| "Failed to connect to state database")?;

@@ -7,6 +7,7 @@ use tracing::{error, info};
 
 #[allow(unused_imports)]
 mod api;
+mod network_manager;
 mod orchestrator;
 mod proto_convert;
 
@@ -50,10 +51,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     health_checker.register_subsystem("adapter".to_string()).await;
+
+    // Initialize network manager
+    info!("Initializing network manager");
+    let network_mgr = match network_manager::NetworkManager::new(_state.clone()).await {
+        Ok(mgr) => {
+            info!("Network manager initialized successfully");
+            Arc::new(mgr)
+        }
+        Err(e) => {
+            error!("Failed to create network manager: {}", e);
+            return Err(format!("Network manager initialization failed: {}", e).into());
+        }
+    };
+    health_checker.register_subsystem("networking".to_string()).await;
+
     info!("HYPR daemon ready");
 
     // Start gRPC API server
-    let api_handle = tokio::spawn(api::start_api_server(_state.clone(), _adapter.clone()));
+    let api_handle = tokio::spawn(api::start_api_server(
+        _state.clone(),
+        _adapter.clone(),
+        network_mgr.clone(),
+    ));
 
     // Wait for shutdown signal
     tokio::signal::ctrl_c().await?;

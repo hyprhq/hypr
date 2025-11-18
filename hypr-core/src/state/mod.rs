@@ -34,6 +34,11 @@ impl StateManager {
         Self::new(":memory:").await
     }
 
+    /// Get a reference to the underlying SQLite pool.
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     /// Create a new StateManager with a database at the specified path.
     #[instrument(skip(db_path))]
     pub async fn new(db_path: impl AsRef<Path>) -> Result<Self> {
@@ -129,10 +134,11 @@ impl StateManager {
         Ok(())
     }
 
-    /// Get a VM by ID.
+    /// Get a VM by ID (supports partial ID matching like Docker).
     #[instrument(skip(self), fields(vm_id = %id))]
     pub async fn get_vm(&self, id: &str) -> Result<Vm> {
-        let row = sqlx::query("SELECT * FROM vms WHERE id = ?")
+        // Try exact match first
+        if let Some(row) = sqlx::query("SELECT * FROM vms WHERE id = ?")
             .bind(id)
             .fetch_optional(&self.pool)
             .await
@@ -140,9 +146,29 @@ impl StateManager {
                 metrics::counter!("hypr_db_errors_total", "operation" => "get_vm").increment(1);
                 HyprError::DatabaseError(e.to_string())
             })?
-            .ok_or_else(|| HyprError::VmNotFound { vm_id: id.to_string() })?;
+        {
+            return self.row_to_vm(row);
+        }
 
-        self.row_to_vm(row)
+        // Try prefix match (like Docker)
+        let pattern = format!("{}%", id);
+        let rows = sqlx::query("SELECT * FROM vms WHERE id LIKE ?")
+            .bind(&pattern)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
+
+        match rows.len() {
+            0 => Err(HyprError::VmNotFound { vm_id: id.to_string() }),
+            1 => self.row_to_vm(rows.into_iter().next().unwrap()),
+            _ => Err(HyprError::InvalidConfig {
+                reason: format!(
+                    "Ambiguous VM ID '{}': matches {} VMs. Please use a longer prefix.",
+                    id,
+                    rows.len()
+                ),
+            }),
+        }
     }
 
     /// List all VMs.
@@ -295,6 +321,22 @@ impl StateManager {
             .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
 
         Ok(())
+    }
+
+    /// Get an image by name and tag.
+    #[instrument(skip(self), fields(name = %name, tag = %tag))]
+    pub async fn get_image_by_name_tag(&self, name: &str, tag: &str) -> Result<Image> {
+        let row = sqlx::query("SELECT * FROM images WHERE name = ? AND tag = ?")
+            .bind(name)
+            .bind(tag)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| HyprError::DatabaseError(e.to_string()))?
+            .ok_or_else(|| HyprError::ImageNotFound {
+                image: format!("{}:{}", name, tag),
+            })?;
+
+        self.row_to_image(row)
     }
 
     pub async fn delete_image_by_name_tag(&self, name: &str, tag: &str) -> Result<()> {

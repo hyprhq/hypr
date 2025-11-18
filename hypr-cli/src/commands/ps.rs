@@ -14,6 +14,8 @@ struct VmRow {
     image: String,
     #[tabled(rename = "STATUS")]
     status: String,
+    #[tabled(rename = "PORTS")]
+    ports: String,
     #[tabled(rename = "IP")]
     ip: String,
     #[tabled(rename = "CPUS")]
@@ -35,14 +37,29 @@ pub async fn ps() -> Result<()> {
 
     let rows: Vec<VmRow> = vms
         .into_iter()
-        .map(|vm| VmRow {
-            id: vm.id[..8].to_string(),
-            name: vm.name,
-            image: vm.image_id,
-            status: vm.status.to_string(),
-            ip: vm.ip_address.unwrap_or_else(|| "-".to_string()),
-            cpus: vm.config.resources.cpus,
-            memory: format!("{}M", vm.config.resources.memory_mb),
+        .map(|vm| {
+            // Format ports like Docker: "8080:80, 443:443"
+            let ports_str = if vm.config.ports.is_empty() {
+                "-".to_string()
+            } else {
+                vm.config
+                    .ports
+                    .iter()
+                    .map(|p| format!("{}:{}", p.host_port, p.vm_port))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+
+            VmRow {
+                id: vm.id[..8].to_string(),
+                name: vm.name,
+                image: vm.image_id,
+                status: vm.status.to_string(),
+                ports: ports_str,
+                ip: vm.ip_address.unwrap_or_else(|| "-".to_string()),
+                cpus: vm.config.resources.cpus,
+                memory: format!("{}M", vm.config.resources.memory_mb),
+            }
         })
         .collect();
 

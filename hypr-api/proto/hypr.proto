@@ -19,6 +19,7 @@ service HyprService {
 
   // Image operations
   rpc ListImages(ListImagesRequest) returns (ListImagesResponse);
+  rpc GetImage(GetImageRequest) returns (GetImageResponse);
   rpc DeleteImage(DeleteImageRequest) returns (DeleteImageResponse);
 
   // Stack operations
@@ -155,6 +156,7 @@ message HealthCheckConfig {
 message CreateVMRequest {
   string name = 1;
   VMConfig config = 2;
+  string image = 3; // Image name:tag (e.g., "nginx:latest")
 }
 
 message CreateVMResponse {
@@ -211,6 +213,15 @@ message ListImagesRequest {
 
 message ListImagesResponse {
   repeated Image images = 1;
+}
+
+message GetImageRequest {
+  string name = 1; // Image name (e.g., "ts-frontend")
+  string tag = 2;  // Image tag (e.g., "latest")
+}
+
+message GetImageResponse {
+  Image image = 1;
 }
 
 message DeleteImageRequest {

@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "hyprd"
+path = "src/main.rs"
+
 [dependencies]
 hypr-core = { path = "../hypr-core" }
 hypr-api = { path = "../hypr-api" }

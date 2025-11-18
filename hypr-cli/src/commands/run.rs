@@ -5,7 +5,6 @@ use anyhow::Result;
 use hypr_core::types::network::{NetworkConfig, Protocol};
 use hypr_core::types::vm::{DiskConfig, DiskFormat};
 use hypr_core::{VmConfig, VmResources};
-use std::path::PathBuf;
 
 /// Run a VM from an image
 pub async fn run(
@@ -18,9 +17,44 @@ pub async fn run(
 ) -> Result<()> {
     let mut client = HyprClient::connect().await?;
 
+    // Parse image name and tag (e.g., "nginx:latest" or "nginx")
+    let (image_name, image_tag) = if let Some((name, tag)) = image.split_once(':') {
+        (name, tag)
+    } else {
+        (image, "latest")
+    };
+
+    // Resolve image to get actual rootfs path
+    let image_info = client
+        .get_image(image_name, image_tag)
+        .await
+        .map_err(|e| anyhow::anyhow!("Image not found: {}:{} - {}", image_name, image_tag, e))?;
+
     // Generate VM ID and name
     let vm_id = format!("vm-{}", uuid::Uuid::new_v4());
     let vm_name = name.unwrap_or_else(|| format!("vm-{}", &vm_id[3..11]));
+
+    // Combine user-specified ports with EXPOSE ports from image
+    let mut port_mappings = ports
+        .into_iter()
+        .map(|(host, guest)| hypr_core::PortMapping {
+            host_port: host,
+            vm_port: guest,
+            protocol: Protocol::Tcp,
+        })
+        .collect::<Vec<_>>();
+
+    // Auto-map EXPOSE ports if no ports were manually specified
+    if port_mappings.is_empty() {
+        for exposed_port in &image_info.manifest.exposed_ports {
+            port_mappings.push(hypr_core::PortMapping {
+                host_port: *exposed_port,
+                vm_port: *exposed_port,
+                protocol: Protocol::Tcp,
+            });
+            println!("Auto-mapping port {} (from EXPOSE)", exposed_port);
+        }
+    }
 
     // Build VM config
     let config = VmConfig {
@@ -32,22 +66,15 @@ pub async fn run(
         kernel_args: vec![],
         initramfs_path: None, // Only used for build VMs
         disks: vec![
-            // Root disk (image rootfs)
+            // Root disk (use actual image rootfs path from database)
             DiskConfig {
-                path: PathBuf::from(format!("/var/lib/hypr/images/{}/rootfs.squashfs", image)),
+                path: image_info.rootfs_path.clone(),
                 readonly: true,
                 format: DiskFormat::Squashfs,
             },
         ],
         network: NetworkConfig::default(),
-        ports: ports
-            .into_iter()
-            .map(|(host, guest)| hypr_core::PortMapping {
-                host_port: host,
-                vm_port: guest,
-                protocol: Protocol::Tcp,
-            })
-            .collect(),
+        ports: port_mappings,
         env: env.into_iter().collect(),
         volumes: vec![],
         gpu: None,
@@ -55,7 +82,8 @@ pub async fn run(
     };
 
     println!("Creating VM '{}'...", vm_name);
-    let vm = client.create_vm(config).await?;
+    let image_ref = format!("{}:{}", image_name, image_tag);
+    let vm = client.create_vm(config, image_ref).await?;
     println!("VM created: {}", vm.id);
 
     println!("Starting VM...");

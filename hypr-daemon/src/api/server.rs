@@ -1,5 +1,6 @@
 //! gRPC server implementation
 
+use crate::network_manager::NetworkManager;
 use crate::orchestrator::StackOrchestrator;
 use hypr_api::hypr::v1::hypr_service_server::{HyprService, HyprServiceServer};
 use hypr_api::hypr::v1::*;
@@ -20,13 +21,18 @@ use tracing::{info, instrument};
 pub struct HyprServiceImpl {
     state: Arc<StateManager>,
     adapter: Arc<dyn VmmAdapter>,
+    network_mgr: Arc<NetworkManager>,
     orchestrator: Arc<StackOrchestrator>,
 }
 
 impl HyprServiceImpl {
-    pub fn new(state: Arc<StateManager>, adapter: Arc<dyn VmmAdapter>) -> Self {
+    pub fn new(
+        state: Arc<StateManager>,
+        adapter: Arc<dyn VmmAdapter>,
+        network_mgr: Arc<NetworkManager>,
+    ) -> Self {
         let orchestrator = Arc::new(StackOrchestrator::new(state.clone(), adapter.clone()));
-        Self { state, adapter, orchestrator }
+        Self { state, adapter, network_mgr, orchestrator }
     }
 }
 
@@ -43,21 +49,81 @@ impl HyprService for HyprServiceImpl {
 
         // Convert proto → domain types
         let config = req.config.ok_or_else(|| Status::invalid_argument("config required"))?;
-        let vm_config: VmConfig =
+        let mut vm_config: VmConfig =
             config.try_into().map_err(|e: HyprError| Status::invalid_argument(e.to_string()))?;
+
+        // 1. Allocate IP for VM
+        let vm_ip = self
+            .network_mgr
+            .allocate_ip(&vm_config.id)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to allocate IP: {}", e)))?;
+
+        info!("Allocated IP {} for VM {}", vm_ip, vm_config.id);
+
+        // Store IP in config for adapter
+        vm_config.network.ip_address = Some(vm_ip);
 
         // Create VM via adapter
         let handle =
             self.adapter.create(&vm_config).await.map_err(|e| Status::internal(e.to_string()))?;
 
+        // 2. Setup port forwarding for each exposed port
+        for port_cfg in &vm_config.ports {
+            if let Err(e) = self
+                .network_mgr
+                .add_port_forward(
+                    port_cfg.host_port,
+                    vm_ip,
+                    port_cfg.vm_port,
+                    port_cfg.protocol,
+                    vm_config.id.clone(),
+                )
+                .await
+            {
+                // Cleanup: release IP and delete VM
+                let _ = self.network_mgr.release_ip(&vm_config.id).await;
+                let _ = self.adapter.delete(&handle).await;
+
+                return Err(Status::internal(format!("Failed to setup port forwarding: {}", e)));
+            }
+
+            info!(
+                "Port forwarding: localhost:{} -> {}:{} ({})",
+                port_cfg.host_port, vm_ip, port_cfg.vm_port, port_cfg.protocol
+            );
+        }
+
+        // 3. Register service in DNS (use VM name or ID)
+        let service_name = if !vm_config.name.is_empty() {
+            vm_config.name.clone()
+        } else {
+            vm_config.id.clone()
+        };
+
+        let ports_for_dns: Vec<_> = vm_config
+            .ports
+            .iter()
+            .map(|p| (p.vm_port, p.protocol))
+            .collect();
+
+        if let Err(e) = self
+            .network_mgr
+            .register_service(&service_name, vm_ip, ports_for_dns)
+            .await
+        {
+            // Non-fatal: log but don't fail VM creation
+            info!("Warning: Failed to register service in DNS: {}", e);
+        }
+
         // Create VM state
         let vm = Vm {
             id: vm_config.id.clone(),
             name: vm_config.name.clone(),
-            image_id: "temp".to_string(), // Placeholder: image tracking will be integrated in Phase 3
+            image_id: req.image,
             status: VmStatus::Creating,
             config: vm_config,
-            ip_address: None,
+            ip_address: Some(vm_ip.to_string()),
             pid: handle.pid,
             created_at: SystemTime::now(),
             started_at: None,
@@ -157,6 +223,22 @@ impl HyprService for HyprServiceImpl {
             ));
         }
 
+        // 1. Remove port forwarding
+        if let Err(e) = self.network_mgr.remove_vm_port_forwards(&vm.id).await {
+            info!("Warning: Failed to remove port forwards: {}", e);
+        }
+
+        // 2. Unregister from DNS
+        let service_name = if !vm.name.is_empty() { &vm.name } else { &vm.id };
+        if let Err(e) = self.network_mgr.unregister_service(service_name).await {
+            info!("Warning: Failed to unregister service: {}", e);
+        }
+
+        // 3. Release IP (use VM ID, not IP address)
+        if let Err(e) = self.network_mgr.release_ip(&vm.id).await {
+            info!("Warning: Failed to release IP: {}", e);
+        }
+
         // Create handle for adapter
         let handle = hypr_core::VmHandle { id: vm.id.clone(), pid: vm.pid, socket_path: None };
 
@@ -178,7 +260,28 @@ impl HyprService for HyprServiceImpl {
     ) -> std::result::Result<Response<ListVmsResponse>, Status> {
         info!("gRPC: ListVMs");
 
-        let vms = self.state.list_vms().await.map_err(|e| Status::internal(e.to_string()))?;
+        let mut vms = self.state.list_vms().await.map_err(|e| Status::internal(e.to_string()))?;
+
+        // Update VM status by checking if process is still running
+        for vm in &mut vms {
+            if vm.status == hypr_core::VmStatus::Running {
+                if let Some(pid) = vm.pid {
+                    // Check if process exists
+                    let running = std::process::Command::new("ps")
+                        .arg("-p")
+                        .arg(pid.to_string())
+                        .output()
+                        .map(|output| output.status.success())
+                        .unwrap_or(false);
+
+                    if !running {
+                        vm.status = hypr_core::VmStatus::Stopped;
+                        // Update in database
+                        let _ = self.state.update_vm_status(&vm.id, hypr_core::VmStatus::Stopped).await;
+                    }
+                }
+            }
+        }
 
         let response = ListVmsResponse { vms: vms.into_iter().map(|vm| vm.into()).collect() };
 
@@ -212,6 +315,26 @@ impl HyprService for HyprServiceImpl {
 
         let response =
             ListImagesResponse { images: images.into_iter().map(|img| img.into()).collect() };
+
+        Ok(Response::new(response))
+    }
+
+    #[instrument(skip(self), fields(name = %request.get_ref().name, tag = %request.get_ref().tag))]
+    async fn get_image(
+        &self,
+        request: Request<GetImageRequest>,
+    ) -> std::result::Result<Response<GetImageResponse>, Status> {
+        info!("gRPC: GetImage");
+
+        let req = request.into_inner();
+
+        let image = self
+            .state
+            .get_image_by_name_tag(&req.name, &req.tag)
+            .await
+            .map_err(|e| Status::not_found(e.to_string()))?;
+
+        let response = GetImageResponse { image: Some(image.into()) };
 
         Ok(Response::new(response))
     }
@@ -349,10 +472,11 @@ impl HyprService for HyprServiceImpl {
 
 /// Start the gRPC API server on Unix socket
 #[allow(dead_code)]
-#[instrument(skip(state, adapter))]
+#[instrument(skip(state, adapter, network_mgr))]
 pub async fn start_api_server(
     state: Arc<StateManager>,
     adapter: Arc<dyn VmmAdapter>,
+    network_mgr: Arc<NetworkManager>,
 ) -> Result<()> {
     let socket_path = "/tmp/hypr.sock";
 
@@ -368,7 +492,7 @@ pub async fn start_api_server(
     let uds_stream = UnixListenerStream::new(uds);
 
     // Create service
-    let service = HyprServiceImpl::new(state, adapter);
+    let service = HyprServiceImpl::new(state, adapter, network_mgr);
 
     info!("gRPC server listening on {}", socket_path);
 

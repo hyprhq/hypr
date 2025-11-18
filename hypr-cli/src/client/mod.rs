@@ -30,10 +30,11 @@ impl HyprClient {
     }
 
     /// Create a new VM
-    pub async fn create_vm(&mut self, config: VmConfig) -> Result<Vm> {
+    pub async fn create_vm(&mut self, config: VmConfig, image: String) -> Result<Vm> {
         let request = tonic::Request::new(CreateVmRequest {
             name: config.name.clone(),
             config: Some(config.into()),
+            image,
         });
 
         let response = self.client.create_vm(request).await?;
@@ -94,6 +95,22 @@ impl HyprClient {
         let vm = response.into_inner().vm.ok_or_else(|| anyhow::anyhow!("No VM in response"))?;
 
         Ok(vm.try_into()?)
+    }
+
+    /// Get an image by name and tag
+    pub async fn get_image(&mut self, name: &str, tag: &str) -> Result<hypr_core::Image> {
+        let request = tonic::Request::new(GetImageRequest {
+            name: name.to_string(),
+            tag: tag.to_string(),
+        });
+
+        let response = self.client.get_image(request).await?;
+        let image = response
+            .into_inner()
+            .image
+            .ok_or_else(|| anyhow::anyhow!("No image in response"))?;
+
+        Ok(image.try_into()?)
     }
 
     /// Delete an image
