@@ -95,22 +95,13 @@ impl HyprService for HyprServiceImpl {
         }
 
         // 3. Register service in DNS (use VM name or ID)
-        let service_name = if !vm_config.name.is_empty() {
-            vm_config.name.clone()
-        } else {
-            vm_config.id.clone()
-        };
+        let service_name =
+            if !vm_config.name.is_empty() { vm_config.name.clone() } else { vm_config.id.clone() };
 
-        let ports_for_dns: Vec<_> = vm_config
-            .ports
-            .iter()
-            .map(|p| (p.vm_port, p.protocol))
-            .collect();
+        let ports_for_dns: Vec<_> =
+            vm_config.ports.iter().map(|p| (p.vm_port, p.protocol)).collect();
 
-        if let Err(e) = self
-            .network_mgr
-            .register_service(&service_name, vm_ip, ports_for_dns)
-            .await
+        if let Err(e) = self.network_mgr.register_service(&service_name, vm_ip, ports_for_dns).await
         {
             // Non-fatal: log but don't fail VM creation
             info!("Warning: Failed to register service in DNS: {}", e);
@@ -277,7 +268,8 @@ impl HyprService for HyprServiceImpl {
                     if !running {
                         vm.status = hypr_core::VmStatus::Stopped;
                         // Update in database
-                        let _ = self.state.update_vm_status(&vm.id, hypr_core::VmStatus::Stopped).await;
+                        let _ =
+                            self.state.update_vm_status(&vm.id, hypr_core::VmStatus::Stopped).await;
                     }
                 }
             }

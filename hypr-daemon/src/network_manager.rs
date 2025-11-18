@@ -2,7 +2,9 @@
 //!
 //! Manages all networking concerns: IP allocation, port forwarding, DNS, and service registry.
 
-use hypr_core::network::{IpAllocator, PortForwarder, PortMapping, ProxyForwarder, ServiceRegistry};
+use hypr_core::network::{
+    IpAllocator, PortForwarder, PortMapping, ProxyForwarder, ServiceRegistry,
+};
 use hypr_core::types::network::Protocol;
 use hypr_core::{Result, StateManager};
 use std::collections::HashMap;
@@ -220,9 +222,7 @@ fn try_ebpf_forwarder() -> Result<EbpfForwarder> {
     // Attach to TC hooks (requires CAP_BPF or root)
     // Note: This is a sync function called from async context, but attach() is async
     // We use block_in_place to safely run async code in sync context
-    tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(forwarder.attach())
-    })?;
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(forwarder.attach()))?;
 
     Ok(forwarder)
 }
@@ -259,9 +259,8 @@ mod tests {
         let vm_ip = mgr.allocate_ip("test-vm").await.unwrap();
 
         // Add port forward
-        let result = mgr
-            .add_port_forward(18082, vm_ip, 80, Protocol::Tcp, "test-vm".to_string())
-            .await;
+        let result =
+            mgr.add_port_forward(18082, vm_ip, 80, Protocol::Tcp, "test-vm".to_string()).await;
         assert!(result.is_ok());
 
         // Remove port forward

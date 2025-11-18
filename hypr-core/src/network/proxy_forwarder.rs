@@ -79,7 +79,10 @@ impl ProxyForwarder {
                                 tokio::spawn(Self::relay_tcp(client_stream, vm_stream));
                             }
                             Err(e) => {
-                                warn!("TCP proxy: failed to connect to {}:{}: {}", vm_ip, vm_port, e);
+                                warn!(
+                                    "TCP proxy: failed to connect to {}:{}: {}",
+                                    vm_ip, vm_port, e
+                                );
                             }
                         }
                     }
@@ -238,7 +241,10 @@ impl BpfPortMap for ProxyForwarder {
                     let listen_addr = SocketAddr::from(([127, 0, 0, 1], host_port));
 
                     if let Ok(listener) = TcpListener::bind(listen_addr).await {
-                        info!("TCP proxy listening on localhost:{} -> {}:{}", host_port, vm_ip, vm_port);
+                        info!(
+                            "TCP proxy listening on localhost:{} -> {}:{}",
+                            host_port, vm_ip, vm_port
+                        );
 
                         loop {
                             match listener.accept().await {
@@ -250,10 +256,16 @@ impl BpfPortMap for ProxyForwarder {
                                     match TcpStream::connect(vm_addr).await {
                                         Ok(vm_stream) => {
                                             // Spawn bidirectional relay
-                                            tokio::spawn(Self::relay_tcp_static(client_stream, vm_stream));
+                                            tokio::spawn(Self::relay_tcp_static(
+                                                client_stream,
+                                                vm_stream,
+                                            ));
                                         }
                                         Err(e) => {
-                                            warn!("TCP proxy: failed to connect to {}:{}: {}", vm_ip, vm_port, e);
+                                            warn!(
+                                                "TCP proxy: failed to connect to {}:{}: {}",
+                                                vm_ip, vm_port, e
+                                            );
                                         }
                                     }
                                 }
@@ -270,7 +282,10 @@ impl BpfPortMap for ProxyForwarder {
                     let listen_addr = SocketAddr::from(([127, 0, 0, 1], host_port));
 
                     if let Ok(socket) = UdpSocket::bind(listen_addr).await {
-                        info!("UDP proxy listening on localhost:{} -> {}:{}", host_port, vm_ip, vm_port);
+                        info!(
+                            "UDP proxy listening on localhost:{} -> {}:{}",
+                            host_port, vm_ip, vm_port
+                        );
 
                         let mut buf = vec![0u8; 65536];
                         loop {
@@ -280,7 +295,10 @@ impl BpfPortMap for ProxyForwarder {
 
                                     let vm_addr = SocketAddr::from((vm_ip, vm_port));
                                     if let Err(e) = socket.send_to(&buf[..n], vm_addr).await {
-                                        warn!("UDP proxy: failed to forward to {}:{}: {}", vm_ip, vm_port, e);
+                                        warn!(
+                                            "UDP proxy: failed to forward to {}:{}: {}",
+                                            vm_ip, vm_port, e
+                                        );
                                     }
                                 }
                                 Err(e) => {
@@ -371,8 +389,7 @@ mod tests {
         let forwarder = ProxyForwarder::new();
 
         // Add mapping
-        let mapping =
-            PortMapping::new(18080, test_ip(), vm_port, Protocol::Tcp);
+        let mapping = PortMapping::new(18080, test_ip(), vm_port, Protocol::Tcp);
         forwarder.add_mapping(&mapping).unwrap();
 
         // Give proxy time to start

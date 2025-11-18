@@ -18,11 +18,8 @@ pub async fn run(
     let mut client = HyprClient::connect().await?;
 
     // Parse image name and tag (e.g., "nginx:latest" or "nginx")
-    let (image_name, image_tag) = if let Some((name, tag)) = image.split_once(':') {
-        (name, tag)
-    } else {
-        (image, "latest")
-    };
+    let (image_name, image_tag) =
+        if let Some((name, tag)) = image.split_once(':') { (name, tag) } else { (image, "latest") };
 
     // Resolve image to get actual rootfs path
     let image_info = client

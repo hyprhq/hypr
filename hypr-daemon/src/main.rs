@@ -69,11 +69,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("HYPR daemon ready");
 
     // Start gRPC API server
-    let api_handle = tokio::spawn(api::start_api_server(
-        _state.clone(),
-        _adapter.clone(),
-        network_mgr.clone(),
-    ));
+    let api_handle =
+        tokio::spawn(api::start_api_server(_state.clone(), _adapter.clone(), network_mgr.clone()));
 
     // Wait for shutdown signal
     tokio::signal::ctrl_c().await?;

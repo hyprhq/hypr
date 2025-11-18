@@ -332,9 +332,7 @@ impl StateManager {
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| HyprError::DatabaseError(e.to_string()))?
-            .ok_or_else(|| HyprError::ImageNotFound {
-                image: format!("{}:{}", name, tag),
-            })?;
+            .ok_or_else(|| HyprError::ImageNotFound { image: format!("{}:{}", name, tag) })?;
 
         self.row_to_image(row)
     }
