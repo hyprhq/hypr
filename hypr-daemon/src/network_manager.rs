@@ -231,36 +231,53 @@ fn try_ebpf_forwarder() -> Result<EbpfForwarder> {
 mod tests {
     use super::*;
 
+    async fn create_test_network_manager() -> (NetworkManager, String) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let id = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("hypr-test-{}", id));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let db_path = temp_dir.join("test.db");
+        let state = Arc::new(StateManager::new(db_path.to_str().unwrap()).await.unwrap());
+        let mgr = NetworkManager::new(state).await.unwrap();
+        (mgr, id.to_string())
+    }
+
     #[tokio::test]
     async fn test_network_manager_creation() {
-        let mgr = NetworkManager::new().unwrap();
-        assert!(mgr.ip_allocator.lock().await.available_count() > 0);
+        let (mgr, id) = create_test_network_manager().await;
+        // NetworkManager created successfully - that's the test
+        // Just verify we can allocate an IP
+        let vm_name = format!("test-vm-{}", id);
+        let ip = mgr.allocate_ip(&vm_name).await.unwrap();
+        assert!(!ip.is_unspecified());
+        mgr.release_ip(&vm_name).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_ip_allocation() {
-        let mgr = NetworkManager::new().unwrap();
+        let (mgr, id) = create_test_network_manager().await;
 
-        let ip1 = mgr.allocate_ip("vm-1").await.unwrap();
-        let ip2 = mgr.allocate_ip("vm-2").await.unwrap();
+        let ip1 = mgr.allocate_ip(&format!("vm-1-{}", id)).await.unwrap();
+        let ip2 = mgr.allocate_ip(&format!("vm-2-{}", id)).await.unwrap();
 
         // IPs should be different
         assert_ne!(ip1, ip2);
 
         // Release
-        mgr.release_ip(&ip1).await.unwrap();
-        mgr.release_ip(&ip2).await.unwrap();
+        mgr.release_ip(&format!("vm-1-{}", id)).await.unwrap();
+        mgr.release_ip(&format!("vm-2-{}", id)).await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_port_forwarding() {
-        let mgr = NetworkManager::new().unwrap();
+        let (mgr, id) = create_test_network_manager().await;
+        let vm_name = format!("test-vm-{}", id);
 
-        let vm_ip = mgr.allocate_ip("test-vm").await.unwrap();
+        let vm_ip = mgr.allocate_ip(&vm_name).await.unwrap();
 
         // Add port forward
         let result =
-            mgr.add_port_forward(18082, vm_ip, 80, Protocol::Tcp, "test-vm".to_string()).await;
+            mgr.add_port_forward(18082, vm_ip, 80, Protocol::Tcp, vm_name.clone()).await;
         assert!(result.is_ok());
 
         // Remove port forward
@@ -268,55 +285,58 @@ mod tests {
         assert!(result.is_ok());
 
         // Cleanup
-        mgr.release_ip(&vm_ip).await.unwrap();
+        mgr.release_ip(&vm_name).await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_service_registration() {
-        let mgr = NetworkManager::new().unwrap();
+        let (mgr, id) = create_test_network_manager().await;
+        let vm_name = format!("web-vm-{}", id);
 
-        let vm_ip = mgr.allocate_ip("web-vm").await.unwrap();
+        let vm_ip = mgr.allocate_ip(&vm_name).await.unwrap();
 
         // Register service
+        let svc_name = format!("web-{}", id);
         let result = mgr
-            .register_service("web", vm_ip, vec![(80, Protocol::Tcp), (443, Protocol::Tcp)])
+            .register_service(&svc_name, vm_ip, vec![(80, Protocol::Tcp), (443, Protocol::Tcp)])
             .await;
         assert!(result.is_ok());
 
         // Lookup service
-        let service = mgr.service_registry.lookup("web").await.unwrap();
-        assert_eq!(service.ip_address, vm_ip);
+        let service = mgr.service_registry.lookup(&svc_name).await.unwrap();
+        assert_eq!(service.ip, vm_ip);
         assert_eq!(service.ports.len(), 2);
 
         // Unregister
-        mgr.unregister_service("web").await.unwrap();
+        mgr.unregister_service(&svc_name).await.unwrap();
 
         // Should be gone
-        assert!(mgr.service_registry.lookup("web").await.is_none());
+        assert!(mgr.service_registry.lookup(&svc_name).await.is_none());
 
         // Cleanup
-        mgr.release_ip(&vm_ip).await.unwrap();
+        mgr.release_ip(&vm_name).await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_remove_vm_port_forwards() {
-        let mgr = NetworkManager::new().unwrap();
+        let (mgr, id) = create_test_network_manager().await;
+        let vm_name = format!("multi-port-vm-{}", id);
 
-        let vm_ip = mgr.allocate_ip("multi-port-vm").await.unwrap();
+        let vm_ip = mgr.allocate_ip(&vm_name).await.unwrap();
 
         // Add multiple port forwards
-        mgr.add_port_forward(18083, vm_ip, 80, Protocol::Tcp, "multi-port-vm".to_string())
+        mgr.add_port_forward(18083, vm_ip, 80, Protocol::Tcp, vm_name.clone())
             .await
             .unwrap();
 
-        mgr.add_port_forward(18084, vm_ip, 443, Protocol::Tcp, "multi-port-vm".to_string())
+        mgr.add_port_forward(18084, vm_ip, 443, Protocol::Tcp, vm_name.clone())
             .await
             .unwrap();
 
         // Remove all for VM
-        mgr.remove_vm_port_forwards("multi-port-vm").await.unwrap();
+        mgr.remove_vm_port_forwards(&vm_name).await.unwrap();
 
         // Cleanup
-        mgr.release_ip(&vm_ip).await.unwrap();
+        mgr.release_ip(&vm_name).await.unwrap();
     }
 }

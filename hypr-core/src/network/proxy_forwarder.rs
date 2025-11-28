@@ -221,7 +221,8 @@ impl BpfPortMap for ProxyForwarder {
         let key = Self::make_key(mapping.host_port, mapping.protocol);
 
         // Check if already exists
-        let tasks = self.tasks.blocking_lock();
+        // Use block_in_place to safely block within async runtime
+        let tasks = tokio::task::block_in_place(|| self.tasks.blocking_lock());
         if tasks.contains_key(&key) {
             return Err(HyprError::PortConflict { port: mapping.host_port });
         }
@@ -315,8 +316,11 @@ impl BpfPortMap for ProxyForwarder {
         // Store task
         let task = ProxyTask { handle };
 
-        let mut tasks = self.tasks.blocking_lock();
-        tasks.insert(key.clone(), task);
+        // Use block_in_place to safely block within async runtime
+        tokio::task::block_in_place(|| {
+            let mut tasks = self.tasks.blocking_lock();
+            tasks.insert(key.clone(), task);
+        });
 
         info!(
             "Added {} proxy: localhost:{} -> {}:{}",
@@ -331,18 +335,21 @@ impl BpfPortMap for ProxyForwarder {
     fn remove_mapping(&self, host_port: u16, protocol: Protocol) -> Result<()> {
         let key = Self::make_key(host_port, protocol);
 
-        let mut tasks = self.tasks.blocking_lock();
+        // Use block_in_place to safely block within async runtime
+        tokio::task::block_in_place(|| {
+            let mut tasks = self.tasks.blocking_lock();
 
-        if let Some(task) = tasks.remove(&key) {
-            // Abort the proxy task
-            task.handle.abort();
-            info!("Removed {} proxy on port {}", protocol, host_port);
-            Ok(())
-        } else {
-            Err(HyprError::InvalidConfig {
-                reason: format!("Port mapping not found: {}:{}", host_port, protocol),
-            })
-        }
+            if let Some(task) = tasks.remove(&key) {
+                // Abort the proxy task
+                task.handle.abort();
+                info!("Removed {} proxy on port {}", protocol, host_port);
+                Ok(())
+            } else {
+                Err(HyprError::InvalidConfig {
+                    reason: format!("Port mapping not found: {}:{}", host_port, protocol),
+                })
+            }
+        })
     }
 
     /// Proxy forwarder is always available (no special permissions required).
@@ -369,7 +376,7 @@ mod tests {
         assert!(forwarder.is_available());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_tcp_proxy_basic() {
         // Start a test "VM" server
         let vm_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -410,7 +417,7 @@ mod tests {
         forwarder.remove_mapping(18080, Protocol::Tcp).unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_add_mapping_conflict() {
         let forwarder = ProxyForwarder::new();
 
@@ -426,7 +433,7 @@ mod tests {
         forwarder.remove_mapping(18081, Protocol::Tcp).unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_remove_nonexistent() {
         let forwarder = ProxyForwarder::new();
 

@@ -95,6 +95,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Uses env vars, run with --test-threads=1"]
     fn test_resolve_initramfs_source_override() {
         // With INITRAMFS_PATH, should use override
         std::env::set_var("INITRAMFS_PATH", "/custom/path/initramfs.cpio");

@@ -4,7 +4,7 @@ use crate::error::{HyprError, Result};
 use sqlx::SqlitePool;
 use tracing::{info, instrument};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 #[instrument(skip(pool))]
 pub async fn run(pool: &SqlitePool) -> Result<()> {
@@ -43,6 +43,10 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
 
     if current_version < 2 {
         migrate_to_v2(pool).await?;
+    }
+
+    if current_version < 3 {
+        migrate_to_v3(pool).await?;
     }
 
     Ok(())
@@ -239,5 +243,46 @@ async fn migrate_to_v2(pool: &SqlitePool) -> Result<()> {
         .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
 
     info!("Migration to schema version 2 complete");
+    Ok(())
+}
+
+#[instrument(skip(pool))]
+async fn migrate_to_v3(pool: &SqlitePool) -> Result<()> {
+    info!("Running migration to schema version 3");
+
+    // Services table for service registry (Phase 2 networking)
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS services (
+            name TEXT PRIMARY KEY,
+            ip TEXT NOT NULL,
+            ports TEXT NOT NULL,
+            labels TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_services_ip ON services(ip)")
+        .execute(pool)
+        .await
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    // Update schema version
+    sqlx::query("DELETE FROM schema_version")
+        .execute(pool)
+        .await
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    sqlx::query("INSERT INTO schema_version (version) VALUES (?)")
+        .bind(3i64)
+        .execute(pool)
+        .await
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    info!("Migration to schema version 3 complete");
     Ok(())
 }

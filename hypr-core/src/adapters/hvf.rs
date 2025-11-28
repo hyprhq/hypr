@@ -9,10 +9,19 @@ use crate::types::network::NetworkConfig;
 use crate::types::vm::{CommandSpec, DiskConfig, GpuConfig, VmConfig, VmHandle};
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tracing::{debug, error, info, instrument, warn};
+
+// Embed kestrel initramfs directly in the binary (1.9MB)
+// This is built by hypr-core/build.rs during compilation
+// Works for both development and distributed binaries!
+static KESTREL_INITRAMFS: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/embedded/initramfs-linux-arm64.cpio"
+));
 
 /// HVF adapter using vfkit.
 pub struct HvfAdapter {
@@ -20,8 +29,6 @@ pub struct HvfAdapter {
     binary_path: PathBuf,
     /// Default kernel path
     kernel_path: PathBuf,
-    /// Path to empty initrd (required by vfkit)
-    initrd_path: PathBuf,
 }
 
 impl HvfAdapter {
@@ -29,12 +36,45 @@ impl HvfAdapter {
     pub fn new() -> Result<Self> {
         let binary_path = Self::find_binary()?;
         let kernel_path = PathBuf::from("/usr/local/lib/hypr/vmlinux");
-        let initrd_path = PathBuf::from("/usr/local/lib/hypr/empty-initrd.img");
 
-        // Create empty initrd if it doesn't exist
-        Self::ensure_empty_initrd(&initrd_path)?;
+        Ok(Self { binary_path, kernel_path })
+    }
 
-        Ok(Self { binary_path, kernel_path, initrd_path })
+    /// Write embedded initramfs to a temporary file and return its path.
+    ///
+    /// The initramfs is embedded in the binary at compile time, so this works
+    /// for both development and distributed binaries.
+    fn get_initramfs_path() -> Result<PathBuf> {
+        // Create temp file in /tmp
+        let temp_path = PathBuf::from("/tmp/hypr-kestrel-initramfs.cpio");
+
+        // Only write if it doesn't exist or is outdated
+        // (Check size to avoid rewriting on every VM)
+        let should_write = if temp_path.exists() {
+            let metadata = std::fs::metadata(&temp_path).map_err(|e| HyprError::IoError {
+                path: temp_path.clone(),
+                source: e,
+            })?;
+            metadata.len() != KESTREL_INITRAMFS.len() as u64
+        } else {
+            true
+        };
+
+        if should_write {
+            let mut file = std::fs::File::create(&temp_path).map_err(|e| HyprError::IoError {
+                path: temp_path.clone(),
+                source: e,
+            })?;
+
+            file.write_all(KESTREL_INITRAMFS).map_err(|e| HyprError::IoError {
+                path: temp_path.clone(),
+                source: e,
+            })?;
+
+            debug!("Wrote embedded kestrel initramfs to {}", temp_path.display());
+        }
+
+        Ok(temp_path)
     }
 
     /// Find vfkit binary in PATH.
@@ -52,23 +92,6 @@ impl HvfAdapter {
         }
 
         Err(HyprError::HypervisorNotFound { hypervisor: "vfkit".to_string() })
-    }
-
-    /// Ensure empty initrd file exists. vfkit requires an initrd even if empty.
-    fn ensure_empty_initrd(path: &PathBuf) -> Result<()> {
-        // Create parent directory if it doesn't exist
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| HyprError::IoError { path: parent.to_path_buf(), source: e })?;
-        }
-
-        // Create empty file if it doesn't exist
-        if !path.exists() {
-            std::fs::write(path, [])
-                .map_err(|e| HyprError::IoError { path: path.clone(), source: e })?;
-        }
-
-        Ok(())
     }
 
     /// Build vfkit command-line arguments.
@@ -89,10 +112,14 @@ impl HvfAdapter {
         args.push("--kernel".to_string());
         args.push(kernel.to_string_lossy().to_string());
 
-        // Initrd (use config if provided, otherwise use empty placeholder)
+        // Initrd (use config if provided, otherwise use embedded kestrel initramfs)
         args.push("--initrd".to_string());
-        let initrd = config.initramfs_path.as_ref().unwrap_or(&self.initrd_path);
-        args.push(initrd.to_string_lossy().to_string());
+        if let Some(custom_initrd) = &config.initramfs_path {
+            args.push(custom_initrd.to_string_lossy().to_string());
+        } else {
+            let initrd_path = Self::get_initramfs_path()?;
+            args.push(initrd_path.to_string_lossy().to_string());
+        }
 
         // Kernel command line (REQUIRED by vfkit when using --kernel/--initrd, even if empty)
         args.push("--kernel-cmdline".to_string());
@@ -126,14 +153,27 @@ impl HvfAdapter {
             args.push(format!("virtio-net,nat{}", mac));
         }
 
-        // Serial console (build VM stdout/stderr visible on host)
-        // vfkit doesn't support logFilePath=stdio, so we use a temp file
-        let log_path = format!("/tmp/hypr-vm-{}.log", config.id);
+        // Serial console
+        // For runtime VMs: use stdio (user needs to see output!)
+        // For build VMs: use temp file (output is parsed, not shown)
         args.push("--device".to_string());
-        args.push(format!("virtio-serial,logFilePath={}", log_path));
+        if config.id.starts_with("builder-") {
+            // Build VM: log to file (output is parsed by builder)
+            let log_path = format!("/tmp/hypr-vm-{}.log", config.id);
+            args.push(format!("virtio-serial,logFilePath={}", log_path));
+            debug!("Build VM console log: {}", log_path);
+        } else {
+            // Runtime VM: output to stdio (user sees VM boot + app logs)
+            args.push("virtio-serial,logFilePath=stdio".to_string());
+            debug!("Runtime VM console: stdio");
+        }
+
+        // RNG device (entropy source for VM)
+        // Eliminates getrandom() blocking on fresh VM boot
+        args.push("--device".to_string());
+        args.push("virtio-rng".to_string());
 
         debug!("Built vfkit args: {:?}", args);
-        debug!("VM console log: {}", log_path);
         Ok(args)
     }
 

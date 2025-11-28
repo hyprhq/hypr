@@ -263,6 +263,11 @@ impl CloudHypervisorAdapter {
         args.push("--console".to_string());
         args.push("off".to_string());
 
+        // RNG device (entropy source for VM)
+        // Eliminates getrandom() blocking on fresh VM boot
+        args.push("--rng".to_string());
+        args.push("src=/dev/urandom".to_string());
+
         debug!("Built CH args: {:?}", args);
         Ok(args)
     }
