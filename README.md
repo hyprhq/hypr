@@ -9,11 +9,6 @@
 3.  **True Docker Parity:** Volant required conversion tools (`volant-compose`). HYPR parses `Dockerfile` and `docker-compose.yml` natively. It is a drop-in replacement, not a migration project.
 
 ---
-
-### New README.md
-
-You can drop this file directly into your repo.
-
 ***
 
 # HYPR
