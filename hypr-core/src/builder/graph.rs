@@ -152,6 +152,94 @@ impl BuildGraph {
         }
         deps
     }
+
+    /// Analyzes stage-level dependencies for parallel execution.
+    /// Returns a map of stage_index -> list of stage indices it depends on.
+    pub fn get_stage_dependencies(&self) -> HashMap<usize, Vec<usize>> {
+        let mut stage_deps: HashMap<usize, HashSet<usize>> = HashMap::new();
+
+        // Initialize all stages
+        for node in &self.nodes {
+            stage_deps.entry(node.stage_index).or_default();
+        }
+
+        // Check each node for cross-stage dependencies
+        for node in &self.nodes {
+            // Check if this node has dependencies on other stages
+            if let Instruction::Copy { from_stage: Some(ref stage_name), .. } = &node.instruction {
+                // Find the stage index for the referenced stage
+                // stage_name could be a name or an index
+                if let Ok(stage_idx) = stage_name.parse::<usize>() {
+                    if stage_idx != node.stage_index {
+                        stage_deps.entry(node.stage_index).or_default().insert(stage_idx);
+                    }
+                } else {
+                    // It's a named stage - need to find its index from other nodes
+                    // For now, we track this through the graph edges
+                }
+            }
+
+            // Check edges for cross-stage dependencies
+            let deps = self.get_dependencies(node.id);
+            for dep_id in deps {
+                if let Some(dep_node) = self.get_node(dep_id) {
+                    if dep_node.stage_index != node.stage_index {
+                        stage_deps
+                            .entry(node.stage_index)
+                            .or_default()
+                            .insert(dep_node.stage_index);
+                    }
+                }
+            }
+        }
+
+        // Convert HashSet to Vec
+        stage_deps.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect()
+    }
+
+    /// Returns stage indices that can be executed in parallel (no dependencies on each other).
+    /// Groups stages into batches where each batch can run concurrently.
+    pub fn get_parallel_stage_batches(&self) -> Vec<Vec<usize>> {
+        let stage_deps = self.get_stage_dependencies();
+        let num_stages = stage_deps.keys().max().map(|m| m + 1).unwrap_or(0);
+
+        if num_stages == 0 {
+            return Vec::new();
+        }
+
+        let mut batches: Vec<Vec<usize>> = Vec::new();
+        let mut completed: HashSet<usize> = HashSet::new();
+
+        while completed.len() < num_stages {
+            let mut batch = Vec::new();
+
+            for stage_idx in 0..num_stages {
+                if completed.contains(&stage_idx) {
+                    continue;
+                }
+
+                // Check if all dependencies are completed
+                let deps = stage_deps.get(&stage_idx).map(|v| v.as_slice()).unwrap_or(&[]);
+                let all_deps_met = deps.iter().all(|d| completed.contains(d));
+
+                if all_deps_met {
+                    batch.push(stage_idx);
+                }
+            }
+
+            if batch.is_empty() {
+                // No progress possible - should not happen if graph is valid
+                break;
+            }
+
+            for &stage_idx in &batch {
+                completed.insert(stage_idx);
+            }
+            batches.push(batch);
+        }
+
+        batches
+    }
 }
 
 /// Internal builder for constructing the build graph.
@@ -511,5 +599,90 @@ CMD ["nginx"]
 
         assert_eq!(sort1, sort2);
         assert_eq!(sort2, sort3);
+    }
+
+    #[test]
+    fn test_parallel_stages_independent() {
+        // Two independent stages that can run in parallel
+        let dockerfile = r#"
+FROM golang:1.21 AS builder
+RUN go build -o app
+
+FROM node:18 AS frontend
+RUN npm run build
+
+FROM alpine:3.19
+COPY --from=builder /app /usr/bin/
+COPY --from=frontend /dist /var/www/
+        "#;
+
+        let parsed = parse_dockerfile(dockerfile).unwrap();
+        let graph = BuildGraph::from_dockerfile(&parsed).unwrap();
+
+        let batches = graph.get_parallel_stage_batches();
+
+        // Should have 2 batches:
+        // Batch 1: stages 0 and 1 (builder and frontend) - independent
+        // Batch 2: stage 2 (final) - depends on both
+        assert_eq!(batches.len(), 2);
+
+        // First batch should contain stages 0 and 1 (can run in parallel)
+        assert!(batches[0].contains(&0));
+        assert!(batches[0].contains(&1));
+
+        // Second batch should contain only stage 2
+        assert_eq!(batches[1], vec![2]);
+    }
+
+    #[test]
+    fn test_parallel_stages_sequential() {
+        // Stages that must run sequentially due to COPY --from dependencies
+        let dockerfile = r#"
+FROM golang:1.21 AS builder
+RUN go build -o app
+
+FROM golang:1.21 AS tester
+COPY --from=builder /app /app
+RUN go test
+
+FROM alpine:3.19
+COPY --from=tester /app /usr/bin/
+        "#;
+
+        let parsed = parse_dockerfile(dockerfile).unwrap();
+        let graph = BuildGraph::from_dockerfile(&parsed).unwrap();
+
+        let batches = graph.get_parallel_stage_batches();
+
+        // Should have 3 batches (all sequential):
+        // Batch 1: stage 0 (builder)
+        // Batch 2: stage 1 (tester, depends on builder via COPY --from)
+        // Batch 3: stage 2 (final, depends on tester via COPY --from)
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[0], vec![0]);
+        assert_eq!(batches[1], vec![1]);
+        assert_eq!(batches[2], vec![2]);
+    }
+
+    #[test]
+    fn test_stage_dependencies_multi_stage() {
+        let dockerfile = r#"
+FROM golang:1.21 AS builder
+RUN go build
+
+FROM alpine:3.19
+COPY --from=builder /app/myapp /usr/local/bin/
+        "#;
+
+        let parsed = parse_dockerfile(dockerfile).unwrap();
+        let graph = BuildGraph::from_dockerfile(&parsed).unwrap();
+
+        let stage_deps = graph.get_stage_dependencies();
+
+        // Stage 0 has no dependencies
+        assert!(stage_deps.get(&0).map(|v| v.is_empty()).unwrap_or(true));
+
+        // Stage 1 depends on stage 0 (via COPY --from=builder)
+        assert!(stage_deps.get(&1).map(|v| v.contains(&0)).unwrap_or(false));
     }
 }

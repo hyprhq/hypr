@@ -22,15 +22,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let health_checker = HealthChecker::new();
     health_checker.register_subsystem("daemon".to_string()).await;
 
-    // Initialize state manager
-    let db_path = std::env::var("HYPR_DB_PATH").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").expect("HOME not set");
-        format!("{}/.hypr/hypr.db", home)
-    });
+    // Initialize state manager (uses centralized paths)
+    let db_path = hypr_core::paths::db_path();
+    let db_path_str = db_path.to_string_lossy().to_string();
 
-    info!("Initializing state manager at {}", db_path);
-    let _state =
-        Arc::new(StateManager::new(&db_path).await.expect("Failed to initialize state manager"));
+    // Ensure parent directory exists
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    info!("Initializing state manager at {}", db_path_str);
+    let _state = Arc::new(
+        StateManager::new(&db_path_str).await.expect("Failed to initialize state manager"),
+    );
     health_checker.register_subsystem("database".to_string()).await;
 
     // Create VMM adapter using the factory (auto-detects platform)

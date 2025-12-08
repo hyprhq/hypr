@@ -17,6 +17,9 @@ service HyprService {
   rpc ListVms(ListVmsRequest) returns (ListVmsResponse);
   rpc GetVM(GetVMRequest) returns (GetVMResponse);
 
+  // Logging
+  rpc StreamLogs(StreamLogsRequest) returns (stream LogEntry);
+
   // Image operations
   rpc ListImages(ListImagesRequest) returns (ListImagesResponse);
   rpc GetImage(GetImageRequest) returns (GetImageResponse);
@@ -296,4 +299,21 @@ message HealthResponse {
   string status = 1; // "healthy", "degraded", "unhealthy"
   string version = 2;
   map<string, string> details = 3;
+}
+
+// ============================================================================
+// Logging Types
+// ============================================================================
+
+message StreamLogsRequest {
+  string vm_id = 1;           // VM ID to stream logs from
+  bool follow = 2;            // If true, continue streaming new logs (like tail -f)
+  uint32 tail = 3;            // Number of lines from end to show (0 = all)
+  optional int64 since = 4;   // Only show logs after this timestamp (Unix epoch)
+}
+
+message LogEntry {
+  int64 timestamp = 1;        // Unix timestamp in milliseconds
+  string line = 2;            // Log line content
+  string stream = 3;          // "stdout" or "stderr"
 }

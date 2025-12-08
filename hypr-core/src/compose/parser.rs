@@ -85,15 +85,23 @@ impl ComposeParser {
     }
 
     /// Validate that services are properly defined.
+    /// Each service must have either an image or a build configuration (or both).
     fn validate_services(services: &HashMap<String, Service>) -> Result<()> {
         if services.is_empty() {
             return Err(HyprError::ComposeParseError { reason: "No services defined".to_string() });
         }
 
         for (name, service) in services {
-            if service.image.is_empty() {
+            // Service must have either image or build (or both)
+            let has_image = !service.image.is_empty();
+            let has_build = service.build.is_some();
+
+            if !has_image && !has_build {
                 return Err(HyprError::ComposeParseError {
-                    reason: format!("Service '{}' missing image", name),
+                    reason: format!(
+                        "Service '{}' must have either 'image' or 'build' specified",
+                        name
+                    ),
                 });
             }
         }
@@ -136,12 +144,13 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_services_missing_image() {
+    fn test_validate_services_missing_image_and_build() {
         let mut services = HashMap::new();
         services.insert(
             "web".to_string(),
             Service {
                 image: "".to_string(),
+                build: None,
                 ports: vec![],
                 environment: Environment::default(),
                 volumes: vec![],
@@ -159,12 +168,61 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_services_valid() {
+    fn test_validate_services_valid_with_image() {
         let mut services = HashMap::new();
         services.insert(
             "web".to_string(),
             Service {
                 image: "nginx:latest".to_string(),
+                build: None,
+                ports: vec![],
+                environment: Environment::default(),
+                volumes: vec![],
+                networks: vec![],
+                depends_on: vec![],
+                command: None,
+                entrypoint: None,
+                working_dir: None,
+                user: None,
+                labels: HashMap::new(),
+                deploy: None,
+            },
+        );
+        assert!(ComposeParser::validate_services(&services).is_ok());
+    }
+
+    #[test]
+    fn test_validate_services_valid_with_build() {
+        let mut services = HashMap::new();
+        services.insert(
+            "web".to_string(),
+            Service {
+                image: "".to_string(),
+                build: Some(BuildSpec::Path("./app".to_string())),
+                ports: vec![],
+                environment: Environment::default(),
+                volumes: vec![],
+                networks: vec![],
+                depends_on: vec![],
+                command: None,
+                entrypoint: None,
+                working_dir: None,
+                user: None,
+                labels: HashMap::new(),
+                deploy: None,
+            },
+        );
+        assert!(ComposeParser::validate_services(&services).is_ok());
+    }
+
+    #[test]
+    fn test_validate_services_valid_with_both() {
+        let mut services = HashMap::new();
+        services.insert(
+            "web".to_string(),
+            Service {
+                image: "myapp:latest".to_string(),
+                build: Some(BuildSpec::Path("./app".to_string())),
                 ports: vec![],
                 environment: Environment::default(),
                 volumes: vec![],

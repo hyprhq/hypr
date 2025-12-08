@@ -2,19 +2,23 @@
 
 use crate::network_manager::NetworkManager;
 use crate::orchestrator::StackOrchestrator;
+use base64::Engine;
 use hypr_api::hypr::v1::hypr_service_server::{HyprService, HyprServiceServer};
 use hypr_api::hypr::v1::*;
 use hypr_core::adapters::VmmAdapter;
 use hypr_core::{HyprError, Result, StateManager, Vm, VmConfig, VmStatus};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
+use tokio_stream::{Stream, StreamExt};
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
 
 /// gRPC service implementation
 #[allow(dead_code)]
@@ -51,6 +55,60 @@ impl HyprService for HyprServiceImpl {
         let config = req.config.ok_or_else(|| Status::invalid_argument("config required"))?;
         let mut vm_config: VmConfig =
             config.try_into().map_err(|e: HyprError| Status::invalid_argument(e.to_string()))?;
+
+        // Load image to get entrypoint/cmd for runtime manifest
+        let image_ref = &req.image;
+        let (image_name, image_tag) = if let Some(pos) = image_ref.rfind(':') {
+            (&image_ref[..pos], &image_ref[pos + 1..])
+        } else {
+            (image_ref.as_str(), "latest")
+        };
+
+        let image = self
+            .state
+            .get_image_by_name_tag(image_name, image_tag)
+            .await
+            .map_err(|e| Status::not_found(format!("Image not found: {}", e)))?;
+
+        // Build RuntimeManifest from image manifest
+        let mut entrypoint = image.manifest.entrypoint.clone();
+        if entrypoint.is_empty() {
+            entrypoint = image.manifest.cmd.clone();
+        } else if !image.manifest.cmd.is_empty() {
+            // Entrypoint + cmd as args (Docker behavior)
+            entrypoint.extend(image.manifest.cmd.clone());
+        }
+
+        if !entrypoint.is_empty() {
+            // Pass command directly via kernel cmdline (simpler than full manifest)
+            // Format: cmd=<base64-encoded-command>
+            // Shell-quote arguments that contain spaces or special characters
+            let cmd_str = entrypoint
+                .iter()
+                .map(|arg| {
+                    if arg.contains(' ')
+                        || arg.contains(';')
+                        || arg.contains('&')
+                        || arg.contains('|')
+                    {
+                        format!("\"{}\"", arg.replace('"', "\\\""))
+                    } else {
+                        arg.clone()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            let cmd_b64 =
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(cmd_str.as_bytes());
+            vm_config.kernel_args.push(format!("cmd={}", cmd_b64));
+
+            // Pass workdir if specified
+            if !image.manifest.workdir.is_empty() {
+                vm_config.kernel_args.push(format!("workdir={}", image.manifest.workdir));
+            }
+
+            info!("Injected cmd into kernel cmdline: {}", cmd_str);
+        }
 
         // 1. Allocate IP for VM
         let vm_ip = self
@@ -214,6 +272,15 @@ impl HyprService for HyprServiceImpl {
             ));
         }
 
+        // If VM is running (force=true), kill it first
+        if vm.status == VmStatus::Running {
+            info!("Force killing running VM before deletion");
+            let handle = hypr_core::VmHandle { id: vm.id.clone(), pid: vm.pid, socket_path: None };
+            if let Err(e) = self.adapter.kill(&handle).await {
+                warn!("Failed to kill VM process: {}", e);
+            }
+        }
+
         // 1. Remove port forwarding
         if let Err(e) = self.network_mgr.remove_vm_port_forwards(&vm.id).await {
             info!("Warning: Failed to remove port forwards: {}", e);
@@ -236,8 +303,16 @@ impl HyprService for HyprServiceImpl {
         // Delete via adapter
         self.adapter.delete(&handle).await.map_err(|e| Status::internal(e.to_string()))?;
 
-        // Delete from state
-        self.state.delete_vm(&req.id).await.map_err(|e| Status::internal(e.to_string()))?;
+        // Delete from state (use vm.id, not req.id - req.id might be partial/name)
+        self.state.delete_vm(&vm.id).await.map_err(|e| Status::internal(e.to_string()))?;
+
+        // 5. Clean up log file
+        let log_path = hypr_core::paths::vm_log_path(&vm.id);
+        if log_path.exists() {
+            if let Err(e) = std::fs::remove_file(&log_path) {
+                info!("Warning: Failed to remove log file: {}", e);
+            }
+        }
 
         let response = DeleteVmResponse { success: true };
 
@@ -377,6 +452,52 @@ impl HyprService for HyprServiceImpl {
         Ok(Response::new(response))
     }
 
+    type StreamLogsStream =
+        Pin<Box<dyn Stream<Item = std::result::Result<LogEntry, Status>> + Send>>;
+
+    #[instrument(skip(self), fields(vm_id = %request.get_ref().vm_id))]
+    async fn stream_logs(
+        &self,
+        request: Request<StreamLogsRequest>,
+    ) -> std::result::Result<Response<Self::StreamLogsStream>, Status> {
+        info!("gRPC: StreamLogs");
+
+        let req = request.into_inner();
+        let vm_id = req.vm_id.clone();
+        let follow = req.follow;
+        let tail = req.tail as usize;
+
+        // Verify VM exists
+        let _vm = self
+            .state
+            .get_vm(&vm_id)
+            .await
+            .map_err(|_| Status::not_found(format!("VM {} not found", vm_id)))?;
+
+        // Get log file path
+        let log_path = hypr_core::paths::vm_log_path(&vm_id);
+
+        if !log_path.exists() {
+            return Err(Status::not_found(format!("Log file not found for VM {}", vm_id)));
+        }
+
+        // Create async channel for streaming
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+
+        // Spawn task to read logs and send to channel
+        let log_path_clone = log_path.clone();
+        tokio::spawn(async move {
+            if let Err(e) = stream_log_file(log_path_clone, tx, tail, follow).await {
+                warn!("Error streaming logs: {}", e);
+            }
+        });
+
+        // Convert channel receiver to stream
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        Ok(Response::new(Box::pin(stream) as Self::StreamLogsStream))
+    }
+
     #[instrument(skip(self))]
     async fn deploy_stack(
         &self,
@@ -481,6 +602,11 @@ pub async fn start_api_server(
     let uds = UnixListener::bind(socket_path)
         .map_err(|e| HyprError::Internal(format!("Failed to bind socket: {}", e)))?;
 
+    // Make socket accessible to all users (so CLI works without sudo even when daemon runs as root)
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o666))
+        .map_err(|e| HyprError::Internal(format!("Failed to set socket permissions: {}", e)))?;
+
     let uds_stream = UnixListenerStream::new(uds);
 
     // Create service
@@ -494,6 +620,105 @@ pub async fn start_api_server(
         .serve_with_incoming(uds_stream)
         .await
         .map_err(|e| HyprError::Internal(format!("Server error: {}", e)))?;
+
+    Ok(())
+}
+
+/// Stream log file contents to a channel.
+///
+/// Supports:
+/// - `tail`: Show only last N lines (0 = all)
+/// - `follow`: Continue watching for new content (like tail -f)
+async fn stream_log_file(
+    log_path: PathBuf,
+    tx: tokio::sync::mpsc::Sender<std::result::Result<LogEntry, Status>>,
+    tail: usize,
+    follow: bool,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let file = tokio::fs::File::open(&log_path).await?;
+    let mut reader = BufReader::new(file);
+
+    // If tail is specified, we need to read the file to find the last N lines
+    if tail > 0 {
+        // Read entire file to count lines and find offset for last N
+        let mut all_lines = Vec::new();
+        let mut line = String::new();
+        while reader.read_line(&mut line).await? > 0 {
+            all_lines.push(line.clone());
+            line.clear();
+        }
+
+        // Send only the last `tail` lines
+        let start = if all_lines.len() > tail { all_lines.len() - tail } else { 0 };
+        for log_line in all_lines[start..].iter() {
+            let entry = LogEntry {
+                timestamp: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+                line: log_line.trim_end().to_string(),
+                stream: "stdout".to_string(),
+            };
+            if tx.send(Ok(entry)).await.is_err() {
+                return Ok(()); // Client disconnected
+            }
+        }
+    } else {
+        // Read all lines from the beginning
+        let mut line = String::new();
+        while reader.read_line(&mut line).await? > 0 {
+            let entry = LogEntry {
+                timestamp: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+                line: line.trim_end().to_string(),
+                stream: "stdout".to_string(),
+            };
+            if tx.send(Ok(entry)).await.is_err() {
+                return Ok(()); // Client disconnected
+            }
+            line.clear();
+        }
+    }
+
+    // If follow mode, keep watching for new content
+    if follow {
+        // Get current position
+        let mut pos = reader.seek(std::io::SeekFrom::Current(0)).await?;
+
+        loop {
+            // Check for new content
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            // Re-check file size
+            let metadata = tokio::fs::metadata(&log_path).await?;
+            let new_len = metadata.len();
+
+            if new_len > pos {
+                // New content available - seek to position and read
+                reader.seek(std::io::SeekFrom::Start(pos)).await?;
+
+                let mut line = String::new();
+                while reader.read_line(&mut line).await? > 0 {
+                    let entry = LogEntry {
+                        timestamp: SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as i64,
+                        line: line.trim_end().to_string(),
+                        stream: "stdout".to_string(),
+                    };
+                    if tx.send(Ok(entry)).await.is_err() {
+                        return Ok(()); // Client disconnected
+                    }
+                    line.clear();
+                }
+
+                pos = reader.seek(std::io::SeekFrom::Current(0)).await?;
+            }
+        }
+    }
 
     Ok(())
 }

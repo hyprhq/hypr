@@ -27,8 +27,13 @@ pub struct ComposeFile {
 /// A service in a docker-compose file.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Service {
-    /// Container image to use
+    /// Container image to use (mutually exclusive with build)
+    #[serde(default)]
     pub image: String,
+
+    /// Build configuration (mutually exclusive with image for source)
+    #[serde(default)]
+    pub build: Option<BuildSpec>,
 
     /// Port mappings (e.g., ["8080:80", "443:443"])
     #[serde(default)]
@@ -73,6 +78,84 @@ pub struct Service {
     /// Deployment configuration (Compose v3 swarm mode)
     #[serde(default)]
     pub deploy: Option<DeployConfig>,
+}
+
+/// Build configuration for a service.
+/// Can be a simple string path or a full build configuration object.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum BuildSpec {
+    /// Simple form: "build: ./path"
+    Path(String),
+    /// Full form: "build: { context: ..., dockerfile: ..., args: ... }"
+    Full(BuildConfig),
+}
+
+/// Full build configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BuildConfig {
+    /// Build context directory
+    pub context: String,
+
+    /// Dockerfile path (relative to context, defaults to "Dockerfile")
+    #[serde(default = "default_dockerfile")]
+    pub dockerfile: String,
+
+    /// Build arguments
+    #[serde(default)]
+    pub args: BuildArgs,
+
+    /// Target stage for multi-stage builds
+    #[serde(default)]
+    pub target: Option<String>,
+
+    /// Images to use as cache sources
+    #[serde(default)]
+    pub cache_from: Vec<String>,
+
+    /// Labels to add to the built image
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
+}
+
+fn default_dockerfile() -> String {
+    "Dockerfile".to_string()
+}
+
+/// Build arguments can be specified as a map or list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum BuildArgs {
+    /// Args as key-value map
+    Map(HashMap<String, String>),
+    /// Args as list of KEY=value strings
+    List(Vec<String>),
+}
+
+impl Default for BuildArgs {
+    fn default() -> Self {
+        BuildArgs::Map(HashMap::new())
+    }
+}
+
+impl BuildArgs {
+    /// Convert build args to a HashMap regardless of input format.
+    pub fn to_map(&self) -> HashMap<String, String> {
+        match self {
+            BuildArgs::Map(map) => map.clone(),
+            BuildArgs::List(list) => list
+                .iter()
+                .filter_map(|s| {
+                    let parts: Vec<&str> = s.splitn(2, '=').collect();
+                    if parts.len() == 2 {
+                        Some((parts[0].to_string(), parts[1].to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Environment variables can be specified as a map or list.

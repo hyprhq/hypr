@@ -10,6 +10,7 @@ pub mod error;
 pub mod manifest;
 pub mod network;
 pub mod observability;
+pub mod paths;
 pub mod ports;
 pub mod proto_convert;
 pub mod state;

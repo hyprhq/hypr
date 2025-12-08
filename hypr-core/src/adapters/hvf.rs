@@ -18,10 +18,8 @@ use tracing::{debug, error, info, instrument, warn};
 // Embed kestrel initramfs directly in the binary (1.9MB)
 // This is built by hypr-core/build.rs during compilation
 // Works for both development and distributed binaries!
-static KESTREL_INITRAMFS: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/embedded/initramfs-linux-arm64.cpio"
-));
+static KESTREL_INITRAMFS: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/embedded/initramfs-linux-arm64.cpio"));
 
 /// HVF adapter using vfkit.
 pub struct HvfAdapter {
@@ -35,7 +33,7 @@ impl HvfAdapter {
     /// Create a new HVF adapter.
     pub fn new() -> Result<Self> {
         let binary_path = Self::find_binary()?;
-        let kernel_path = PathBuf::from("/usr/local/lib/hypr/vmlinux");
+        let kernel_path = crate::paths::kernel_path();
 
         Ok(Self { binary_path, kernel_path })
     }
@@ -51,25 +49,19 @@ impl HvfAdapter {
         // Only write if it doesn't exist or is outdated
         // (Check size to avoid rewriting on every VM)
         let should_write = if temp_path.exists() {
-            let metadata = std::fs::metadata(&temp_path).map_err(|e| HyprError::IoError {
-                path: temp_path.clone(),
-                source: e,
-            })?;
+            let metadata = std::fs::metadata(&temp_path)
+                .map_err(|e| HyprError::IoError { path: temp_path.clone(), source: e })?;
             metadata.len() != KESTREL_INITRAMFS.len() as u64
         } else {
             true
         };
 
         if should_write {
-            let mut file = std::fs::File::create(&temp_path).map_err(|e| HyprError::IoError {
-                path: temp_path.clone(),
-                source: e,
-            })?;
+            let mut file = std::fs::File::create(&temp_path)
+                .map_err(|e| HyprError::IoError { path: temp_path.clone(), source: e })?;
 
-            file.write_all(KESTREL_INITRAMFS).map_err(|e| HyprError::IoError {
-                path: temp_path.clone(),
-                source: e,
-            })?;
+            file.write_all(KESTREL_INITRAMFS)
+                .map_err(|e| HyprError::IoError { path: temp_path.clone(), source: e })?;
 
             debug!("Wrote embedded kestrel initramfs to {}", temp_path.display());
         }
@@ -92,6 +84,95 @@ impl HvfAdapter {
         }
 
         Err(HyprError::HypervisorNotFound { hypervisor: "vfkit".to_string() })
+    }
+
+    /// Convert a squashfs file to a raw disk image for macOS Virtualization.framework.
+    ///
+    /// macOS VZ framework doesn't recognize squashfs format, so we create a raw disk image
+    /// that contains the squashfs data. The guest kernel can then mount /dev/vda as squashfs.
+    ///
+    /// Uses streaming I/O (io::copy) to avoid loading large images into memory.
+    fn convert_to_raw_disk(squashfs_path: &std::path::Path) -> Result<PathBuf> {
+        use std::fs;
+        use std::io::{self, Write};
+
+        // Get squashfs file size
+        let metadata = fs::metadata(squashfs_path)
+            .map_err(|e| HyprError::IoError { path: squashfs_path.to_path_buf(), source: e })?;
+        let squashfs_size = metadata.len();
+
+        // Calculate padded size (align to 512-byte sectors)
+        let sector_size = 512u64;
+        let padded_size = squashfs_size.div_ceil(sector_size) * sector_size;
+
+        // Create output path (cache in /tmp for reuse)
+        let hash = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            squashfs_path.hash(&mut hasher);
+            squashfs_size.hash(&mut hasher);
+            hasher.finish()
+        };
+        let raw_path = PathBuf::from(format!("/tmp/hypr-rootfs-{:x}.raw", hash));
+
+        // Check if already converted (same size means same content)
+        if raw_path.exists() {
+            if let Ok(raw_meta) = fs::metadata(&raw_path) {
+                if raw_meta.len() == padded_size {
+                    debug!("Using cached raw disk image: {}", raw_path.display());
+                    return Ok(raw_path);
+                }
+            }
+        }
+
+        info!(
+            "Converting squashfs to raw disk image: {} -> {} ({} bytes)",
+            squashfs_path.display(),
+            raw_path.display(),
+            padded_size
+        );
+
+        // Open source file for streaming read
+        let mut src_file = fs::File::open(squashfs_path)
+            .map_err(|e| HyprError::IoError { path: squashfs_path.to_path_buf(), source: e })?;
+
+        // Create destination file
+        let mut dst_file = fs::File::create(&raw_path)
+            .map_err(|e| HyprError::IoError { path: raw_path.clone(), source: e })?;
+
+        // Stream copy squashfs data (no memory buffering of entire file)
+        io::copy(&mut src_file, &mut dst_file)
+            .map_err(|e| HyprError::IoError { path: raw_path.clone(), source: e })?;
+
+        // Pad to sector alignment (at most 511 bytes)
+        let padding_size = (padded_size - squashfs_size) as usize;
+        if padding_size > 0 {
+            let padding = [0u8; 512]; // Stack-allocated, reuse for any padding <= 512
+            dst_file
+                .write_all(&padding[..padding_size])
+                .map_err(|e| HyprError::IoError { path: raw_path.clone(), source: e })?;
+        }
+
+        dst_file
+            .sync_all()
+            .map_err(|e| HyprError::IoError { path: raw_path.clone(), source: e })?;
+
+        info!("Raw disk image created: {}", raw_path.display());
+        Ok(raw_path)
+    }
+
+    /// Get the log file path for a VM.
+    ///
+    /// Uses centralized paths module for consistency.
+    fn get_vm_log_path(vm_id: &str) -> Result<PathBuf> {
+        let log_dir = crate::paths::logs_dir();
+
+        // Create log directory if it doesn't exist
+        std::fs::create_dir_all(&log_dir)
+            .map_err(|e| HyprError::IoError { path: log_dir.clone(), source: e })?;
+
+        Ok(log_dir.join(format!("{}.log", vm_id)))
     }
 
     /// Build vfkit command-line arguments.
@@ -123,12 +204,50 @@ impl HvfAdapter {
 
         // Kernel command line (REQUIRED by vfkit when using --kernel/--initrd, even if empty)
         args.push("--kernel-cmdline".to_string());
-        args.push(config.kernel_args.join(" "));
 
-        // Disks
+        // Build kernel command line with network parameters if IP is assigned
+        let mut kernel_cmdline_parts: Vec<String> = config.kernel_args.clone();
+
+        // Enable serial console output (vfkit uses virtio-serial which maps to hvc0)
+        kernel_cmdline_parts.push("console=hvc0".to_string());
+
+        // Inject network configuration into kernel cmdline for runtime VMs
+        if config.network_enabled {
+            if let Some(ip) = &config.network.ip_address {
+                kernel_cmdline_parts.push(format!("ip={}", ip));
+                // macOS vmnet uses 192.168.64.0/24 subnet
+                kernel_cmdline_parts.push("netmask=255.255.255.0".to_string());
+                kernel_cmdline_parts.push("gateway=192.168.64.1".to_string());
+                kernel_cmdline_parts.push("mode=runtime".to_string());
+                debug!(
+                    "Injected network config: ip={} netmask=255.255.255.0 gateway=192.168.64.1",
+                    ip
+                );
+            }
+        }
+
+        args.push(kernel_cmdline_parts.join(" "));
+
+        // Disks - macOS Virtualization.framework requires raw disk images
+        // For squashfs files, we need to convert them to a raw image format
         for disk in &config.disks {
             args.push("--device".to_string());
-            args.push(format!("virtio-blk,path={}", disk.path.display()));
+
+            // Check if this is a squashfs file that needs conversion
+            let disk_path = if disk.path.extension().is_some_and(|ext| ext == "squashfs") {
+                // Convert squashfs to raw disk image for macOS compatibility
+                match Self::convert_to_raw_disk(&disk.path) {
+                    Ok(raw_path) => raw_path,
+                    Err(e) => {
+                        warn!("Failed to convert squashfs to raw disk: {}, using original", e);
+                        disk.path.clone()
+                    }
+                }
+            } else {
+                disk.path.clone()
+            };
+
+            args.push(format!("virtio-blk,path={}", disk_path.display()));
         }
 
         // virtio-fs mounts
@@ -155,18 +274,14 @@ impl HvfAdapter {
 
         // Serial console
         // For runtime VMs: use stdio (user needs to see output!)
-        // For build VMs: use temp file (output is parsed, not shown)
+        // Serial console output to log file (required for daemon mode - no stdio available)
         args.push("--device".to_string());
-        if config.id.starts_with("builder-") {
-            // Build VM: log to file (output is parsed by builder)
-            let log_path = format!("/tmp/hypr-vm-{}.log", config.id);
-            args.push(format!("virtio-serial,logFilePath={}", log_path));
-            debug!("Build VM console log: {}", log_path);
-        } else {
-            // Runtime VM: output to stdio (user sees VM boot + app logs)
-            args.push("virtio-serial,logFilePath=stdio".to_string());
-            debug!("Runtime VM console: stdio");
+        let log_path = crate::paths::vm_log_path(&config.id);
+        if let Some(parent) = log_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
         }
+        args.push(format!("virtio-serial,logFilePath={}", log_path.display()));
+        debug!("VM console log: {}", log_path.display());
 
         // RNG device (entropy source for VM)
         // Eliminates getrandom() blocking on fresh VM boot
@@ -227,12 +342,22 @@ impl VmmAdapter for HvfAdapter {
         // Build arguments
         let args = self.build_args(config)?;
 
-        // Spawn vfkit process (inherit stdout/stderr to see VM console output)
+        // Create log file for VM output
+        let log_path = Self::get_vm_log_path(&config.id)?;
+        let log_file = std::fs::File::create(&log_path)
+            .map_err(|e| HyprError::IoError { path: log_path.clone(), source: e })?;
+        let log_file_err = log_file
+            .try_clone()
+            .map_err(|e| HyprError::IoError { path: log_path.clone(), source: e })?;
+
+        info!("VM logs will be written to: {}", log_path.display());
+
+        // Spawn vfkit process with stdout/stderr redirected to log file
         let start = Instant::now();
         let child = Command::new(&self.binary_path)
             .args(&args)
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::from(log_file))
+            .stderr(std::process::Stdio::from(log_file_err))
             .spawn()
             .map_err(|e| {
                 metrics::counter!("hypr_vm_start_failures_total", "adapter" => "hvf", "reason" => "spawn_failed").increment(1);

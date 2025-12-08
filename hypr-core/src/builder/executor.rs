@@ -11,7 +11,7 @@ use crate::builder::parser::Instruction;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 #[cfg(target_os = "linux")]
 use tracing::instrument;
@@ -957,15 +957,15 @@ impl NativeBuilder {
             "Generating SquashFS image"
         );
 
-        // Use mksquashfs command to create SquashFS with zstd compression
-        // -comp zstd: Fast compression, good ratio
+        // Use mksquashfs command to create SquashFS with gzip compression
+        // -comp gzip: Universal support in all kernels
         // -noappend: Overwrite if exists
         // -no-progress: Suppress progress output
         let output = std::process::Command::new("mksquashfs")
             .arg(&self.current_rootfs)
             .arg(&squashfs_path)
             .arg("-comp")
-            .arg("zstd") // zstd is faster than xz with similar compression
+            .arg("gzip") // gzip is universally supported by all kernels
             .arg("-noappend")
             .arg("-no-progress")
             .output()
@@ -1004,6 +1004,7 @@ impl NativeBuilder {
 ///
 /// Executes build steps in isolated VMs with cloud-hypervisor,
 /// providing the same security guarantees as MacOsVmBuilder.
+/// Supports multi-stage builds with intermediate stage caching.
 #[cfg(target_os = "linux")]
 pub struct LinuxVmBuilder {
     /// VM builder for executing build steps
@@ -1020,6 +1021,8 @@ pub struct LinuxVmBuilder {
     oci_client: crate::builder::oci::OciClient,
     /// Path to current base image rootfs (shared via virtio-fs)
     base_rootfs: Option<PathBuf>,
+    /// Map of stage name/index -> final rootfs path (for multi-stage builds)
+    stage_outputs: HashMap<String, PathBuf>,
 }
 
 /// macOS VM-based builder using vfkit/HVF.
@@ -1027,6 +1030,7 @@ pub struct LinuxVmBuilder {
 /// Executes builds in isolated Linux VMs. Base images are pulled on the host
 /// and shared via virtio-fs. The build VM pivots root into the base image.
 /// All HTTP traffic is proxied via vsock to the host's BuilderHttpProxy.
+/// Supports multi-stage builds with intermediate stage caching.
 #[cfg(target_os = "macos")]
 pub struct MacOsVmBuilder {
     /// VM builder for executing build steps
@@ -1043,6 +1047,8 @@ pub struct MacOsVmBuilder {
     oci_client: crate::builder::oci::OciClient,
     /// Path to current base image rootfs (shared via virtio-fs)
     base_rootfs: Option<PathBuf>,
+    /// Map of stage name/index -> final rootfs path (for multi-stage builds)
+    stage_outputs: HashMap<String, PathBuf>,
 }
 
 #[cfg(target_os = "linux")]
@@ -1055,17 +1061,15 @@ impl LinuxVmBuilder {
         std::fs::create_dir_all(&work_dir)
             .map_err(|e| BuildError::IoError { path: work_dir.clone(), source: e })?;
 
-        // Locate or download kernel
-        let home = std::env::var("HOME")
-            .map_err(|_| BuildError::ContextError("HOME environment variable not set".into()))?;
-        let kernel_dir = PathBuf::from(format!("{}/.hypr/kernel", home));
-        let kernel_path = kernel_dir.join("vmlinux");
+        // Locate or download kernel (uses centralized paths)
+        let kernel_path = crate::paths::kernel_path();
 
         // Auto-download cloud-hypervisor kernel if not present
         if !kernel_path.exists() {
             info!("Cloud Hypervisor kernel not found, downloading...");
-            std::fs::create_dir_all(&kernel_dir)
-                .map_err(|e| BuildError::IoError { path: kernel_dir.clone(), source: e })?;
+            let data_dir = crate::paths::data_dir();
+            std::fs::create_dir_all(&data_dir)
+                .map_err(|e| BuildError::IoError { path: data_dir.clone(), source: e })?;
 
             // Detect architecture
             let arch = std::env::consts::ARCH;
@@ -1131,7 +1135,25 @@ impl LinuxVmBuilder {
             },
             oci_client,
             base_rootfs: None,
+            stage_outputs: HashMap::new(),
         })
+    }
+
+    /// Reset builder state for a new stage (preserves stage_outputs)
+    fn reset_for_stage(&mut self) {
+        self.env.clear();
+        self.workdir = "/".to_string();
+        self.config = ImageConfig {
+            entrypoint: None,
+            cmd: None,
+            env: HashMap::new(),
+            workdir: None,
+            user: None,
+            exposed_ports: Vec::new(),
+            volumes: Vec::new(),
+            labels: HashMap::new(),
+        };
+        self.base_rootfs = None;
     }
 }
 
@@ -1142,63 +1164,268 @@ impl BuildExecutor for LinuxVmBuilder {
         &mut self,
         graph: &BuildGraph,
         context: &BuildContext,
-        _cache: &mut CacheManager,
+        cache: &mut CacheManager,
     ) -> BuildResult<BuildOutput> {
-        info!("Starting Linux VM-based build with cloud-hypervisor");
+        use crate::builder::parser::{BuildStage, ImageRef};
 
-        // PHASE 1: Pull base image (FROM instruction)
-        for node in &graph.nodes {
-            if let Instruction::From { image, .. } = &node.instruction {
-                use crate::builder::parser::ImageRef;
+        info!("Starting Linux VM-based build with cloud-hypervisor (multi-stage support)");
 
-                match image {
-                    ImageRef::Scratch => {
-                        info!("FROM scratch: using minimal rootfs");
-                        // Create minimal directory structure
-                        let scratch_dir = self.work_dir.join("rootfs-scratch");
-                        std::fs::create_dir_all(&scratch_dir)?;
-                        std::fs::create_dir_all(scratch_dir.join("tmp"))?;
-                        std::fs::create_dir_all(scratch_dir.join("etc"))?;
-                        std::fs::create_dir_all(scratch_dir.join("proc"))?;
-                        std::fs::create_dir_all(scratch_dir.join("sys"))?;
-                        std::fs::create_dir_all(scratch_dir.join("dev"))?;
-                        self.base_rootfs = Some(scratch_dir);
+        // Get the parsed Dockerfile from the context to access stages
+        let dockerfile_content = std::fs::read_to_string(
+            context.context_path.join(&context.dockerfile_path),
+        )
+        .map_err(|e| BuildError::IoError {
+            path: context.context_path.join(&context.dockerfile_path),
+            source: e,
+        })?;
+
+        let dockerfile = crate::builder::parser::parse_dockerfile(&dockerfile_content)
+            .map_err(|e| BuildError::ContextError(format!("Failed to parse Dockerfile: {}", e)))?;
+
+        let num_stages = dockerfile.stages.len();
+        info!("Dockerfile has {} stage(s)", num_stages);
+
+        // Determine target stage (last stage if not specified)
+        let target_stage_idx = if let Some(ref target_name) = context.target {
+            dockerfile
+                .stages
+                .iter()
+                .position(|s| s.name.as_deref() == Some(target_name))
+                .ok_or_else(|| {
+                    BuildError::ContextError(format!("Target stage '{}' not found", target_name))
+                })?
+        } else {
+            num_stages - 1
+        };
+
+        // Copy build context once (shared across all stages)
+        let context_dir = self.work_dir.join("context");
+        std::fs::create_dir_all(&context_dir)?;
+
+        // Check for .dockerignore and build rsync args
+        let dockerignore_path = context.context_path.join(".dockerignore");
+        let has_dockerignore = dockerignore_path.exists();
+        if has_dockerignore {
+            info!("Found .dockerignore, excluding matched patterns from build context");
+        }
+
+        info!(
+            "Copying build context from {} to {}",
+            context.context_path.display(),
+            context_dir.display()
+        );
+
+        let mut rsync_args = vec!["-a".to_string()];
+        if has_dockerignore {
+            // Use rsync's filter to read .dockerignore patterns
+            // :- means "exclude if matching", reading from .dockerignore in source dir
+            rsync_args.push("--filter=:- .dockerignore".to_string());
+        }
+        rsync_args.push(format!("{}/", context.context_path.to_str().unwrap()));
+        rsync_args.push(context_dir.to_str().unwrap().to_string());
+
+        let status = std::process::Command::new("rsync")
+            .args(&rsync_args)
+            .status()
+            .map_err(|e| BuildError::IoError { path: context.context_path.clone(), source: e })?;
+        if !status.success() {
+            return Err(BuildError::InstructionFailed {
+                instruction: "Copy build context".to_string(),
+                details: "Failed to copy build context files".into(),
+            });
+        }
+
+        // Process each stage up to and including the target
+        for (stage_idx, stage) in dockerfile.stages.iter().enumerate() {
+            if stage_idx > target_stage_idx {
+                info!("Skipping stage {} (after target)", stage_idx);
+                break;
+            }
+
+            let stage_name = stage.name.clone().unwrap_or_else(|| format!("stage{}", stage_idx));
+            info!("=== Building stage {}: {} ===", stage_idx, stage_name);
+
+            // Reset builder state for this stage (but keep stage_outputs)
+            self.reset_for_stage();
+
+            // Execute this stage
+            let stage_rootfs = self.execute_stage(stage_idx, stage, &context_dir, cache).await?;
+
+            // Store stage output for potential COPY --from references
+            self.stage_outputs.insert(stage_name.clone(), stage_rootfs.clone());
+            self.stage_outputs.insert(stage_idx.to_string(), stage_rootfs);
+
+            info!("Stage {} complete", stage_idx);
+        }
+
+        // The final stage's rootfs becomes our output
+        let target_stage_name = dockerfile.stages[target_stage_idx]
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("stage{}", target_stage_idx));
+        let final_rootfs = self
+            .stage_outputs
+            .get(&target_stage_name)
+            .ok_or_else(|| BuildError::ContextError("Final stage rootfs not found".into()))?
+            .clone();
+
+        // Create SquashFS from final rootfs
+        info!("Creating SquashFS from {} -> {}", final_rootfs.display(), self.work_dir.join("final.squashfs").display());
+
+        // Log the size of final_rootfs directory before compression
+        if let Ok(output) = std::process::Command::new("du")
+            .args(["-sh", final_rootfs.to_str().unwrap()])
+            .output()
+        {
+            let du_output = String::from_utf8_lossy(&output.stdout);
+            info!("Final rootfs size (before compression): {}", du_output.trim());
+        }
+
+        let squashfs_path = self.work_dir.join("final.squashfs");
+        let mksquashfs_output = std::process::Command::new("mksquashfs")
+            .args([
+                final_rootfs.to_str().unwrap(),
+                squashfs_path.to_str().unwrap(),
+                "-noappend",
+                "-comp",
+                "gzip",
+            ])
+            .output()
+            .map_err(|e| BuildError::IoError { path: squashfs_path.clone(), source: e })?;
+
+        if !mksquashfs_output.status.success() {
+            let stderr = String::from_utf8_lossy(&mksquashfs_output.stderr);
+            error!("mksquashfs failed: {}", stderr);
+            return Err(BuildError::ContextError(format!("mksquashfs failed: {}", stderr)));
+        }
+
+        // Log mksquashfs output
+        let stdout = String::from_utf8_lossy(&mksquashfs_output.stdout);
+        let stderr = String::from_utf8_lossy(&mksquashfs_output.stderr);
+        if !stdout.is_empty() {
+            info!("mksquashfs stdout: {}", stdout);
+        }
+        if !stderr.is_empty() {
+            info!("mksquashfs stderr: {}", stderr);
+        }
+
+        // Generate manifest
+        let manifest = ImageManifest {
+            name: "built-image".to_string(),
+            tag: "latest".to_string(),
+            config: self.config.clone(),
+            created: chrono::Utc::now().to_rfc3339(),
+            architecture: std::env::consts::ARCH.to_string(),
+            os: "linux".to_string(),
+        };
+
+        // Compute image ID
+        let manifest_json = serde_json::to_string(&manifest).map_err(|e| {
+            BuildError::ContextError(format!("Failed to serialize manifest: {}", e))
+        })?;
+        use sha2::Digest;
+        let image_id = format!("{:x}", sha2::Sha256::digest(manifest_json.as_bytes()));
+
+        let total_size = std::fs::metadata(&squashfs_path).map(|m| m.len()).unwrap_or(0);
+        info!("Build complete: {} (size: {} bytes)", image_id, total_size);
+
+        Ok(BuildOutput {
+            image_id,
+            rootfs_path: squashfs_path,
+            manifest,
+            stats: BuildStats {
+                duration_secs: 0.0,
+                layer_count: num_stages,
+                cached_layers: 0,
+                total_size,
+            },
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxVmBuilder {
+    /// Execute a single build stage, returning the path to its final rootfs
+    async fn execute_stage(
+        &mut self,
+        stage_idx: usize,
+        stage: &crate::builder::parser::BuildStage,
+        context_dir: &std::path::Path,
+        _cache: &mut CacheManager,
+    ) -> BuildResult<PathBuf> {
+        use crate::builder::parser::ImageRef;
+
+        // Determine base for this stage
+        match &stage.from {
+            ImageRef::Scratch => {
+                info!("FROM scratch: using minimal rootfs");
+                let scratch_dir = self.work_dir.join(format!("rootfs-stage{}-scratch", stage_idx));
+                std::fs::create_dir_all(&scratch_dir)?;
+                std::fs::create_dir_all(scratch_dir.join("tmp"))?;
+                std::fs::create_dir_all(scratch_dir.join("etc"))?;
+                std::fs::create_dir_all(scratch_dir.join("proc"))?;
+                std::fs::create_dir_all(scratch_dir.join("sys"))?;
+                std::fs::create_dir_all(scratch_dir.join("dev"))?;
+                self.base_rootfs = Some(scratch_dir);
+            }
+            ImageRef::Stage(stage_name) => {
+                // Multi-stage: use output from a previous stage
+                let source_rootfs = self.stage_outputs.get(stage_name).ok_or_else(|| {
+                    BuildError::InstructionFailed {
+                        instruction: "FROM".to_string(),
+                        details: format!(
+                            "Stage '{}' not found. Available: {:?}",
+                            stage_name,
+                            self.stage_outputs.keys().collect::<Vec<_>>()
+                        ),
                     }
-                    ImageRef::Stage(_) => {
-                        return Err(BuildError::InstructionFailed {
-                            instruction: "FROM".to_string(),
-                            details: "Multi-stage builds not yet supported".into(),
-                        });
-                    }
-                    ImageRef::Image { name, tag, digest } => {
-                        // Construct full image reference
-                        let image_str = if let Some(digest) = digest {
-                            format!("{}@{}", name, digest)
-                        } else {
-                            format!("{}:{}", name, tag.as_deref().unwrap_or("latest"))
-                        };
+                })?;
+                info!(
+                    "FROM {}: using previous stage rootfs at {}",
+                    stage_name,
+                    source_rootfs.display()
+                );
 
-                        info!("FROM {}: pulling base image from registry", image_str);
-
-                        // Create directory for base image
-                        let base_dir = self.work_dir.join("rootfs-base");
-                        std::fs::create_dir_all(&base_dir)?;
-
-                        // Pull and extract image
-                        self.oci_client.pull_image(&image_str, &base_dir).await?;
-
-                        info!("Base image extracted to {}", base_dir.display());
-                        self.base_rootfs = Some(base_dir);
-                    }
+                // Copy the stage rootfs as our base
+                let base_dir = self.work_dir.join(format!("rootfs-stage{}-base", stage_idx));
+                std::fs::create_dir_all(&base_dir)?;
+                let status = std::process::Command::new("rsync")
+                    .args([
+                        "-a",
+                        &format!("{}/", source_rootfs.to_str().unwrap()),
+                        base_dir.to_str().unwrap(),
+                    ])
+                    .status()
+                    .map_err(|e| BuildError::IoError { path: source_rootfs.clone(), source: e })?;
+                if !status.success() {
+                    return Err(BuildError::InstructionFailed {
+                        instruction: "FROM".to_string(),
+                        details: format!("Failed to copy stage '{}' rootfs", stage_name),
+                    });
                 }
-                break; // Only one FROM
+                self.base_rootfs = Some(base_dir);
+            }
+            ImageRef::Image { name, tag, digest } => {
+                let image_str = if let Some(digest) = digest {
+                    format!("{}@{}", name, digest)
+                } else {
+                    format!("{}:{}", name, tag.as_deref().unwrap_or("latest"))
+                };
+                info!("FROM {}: pulling base image", image_str);
+
+                let base_dir = self.work_dir.join(format!("rootfs-stage{}-base", stage_idx));
+                std::fs::create_dir_all(&base_dir)?;
+                self.oci_client.pull_image(&image_str, &base_dir).await?;
+                info!("Base image extracted to {}", base_dir.display());
+                self.base_rootfs = Some(base_dir);
             }
         }
 
-        // PHASE 2: Collect all RUN/COPY/WORKDIR/ENV instructions
+        // Collect build steps for this stage
         let mut build_steps = Vec::new();
-        for node in &graph.nodes {
-            match &node.instruction {
+        for (instr_idx, instruction) in stage.instructions.iter().enumerate() {
+            let _ = instr_idx; // Suppress unused warning
+            match instruction {
                 Instruction::Run { command } => {
                     let cmd_str = match command {
                         crate::builder::parser::RunCommand::Shell(c) => c.clone(),
@@ -1209,33 +1436,111 @@ impl BuildExecutor for LinuxVmBuilder {
                         workdir: self.workdir.clone(),
                     });
                 }
-                Instruction::Copy { sources, destination, .. } => {
-                    // Normalize destination path
-                    let dest_path = if destination.starts_with('/') {
-                        destination.clone()
-                    } else if destination == "." || destination == "./" {
-                        self.workdir.clone()
+                Instruction::Copy { sources, destination, from_stage, .. } => {
+                    let dest_path = self.normalize_path(destination);
+
+                    if let Some(stage_name) = from_stage {
+                        // COPY --from=stage: copy from another stage's rootfs
+                        let source_rootfs =
+                            self.stage_outputs.get(stage_name).ok_or_else(|| {
+                                BuildError::InstructionFailed {
+                                    instruction: "COPY --from".to_string(),
+                                    details: format!("Stage '{}' not found", stage_name),
+                                }
+                            })?;
+
+                        // Generate copy command that copies from /stage mount
+                        // We'll mount the source stage's rootfs at /stage in the VM
+                        let source_list = sources.join(" ");
+                        let copy_cmd = format!(
+                            "mkdir -p {} && cp -r {} {} 2>/dev/null || true",
+                            dest_path,
+                            sources
+                                .iter()
+                                .map(|s| format!("/stage{}", s))
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                            dest_path
+                        );
+
+                        // For now, we'll handle this by copying files on the host side before VM execution
+                        // This is simpler and doesn't require kestrel changes
+                        // Copy files on the host side before VM execution
+                        for source in sources {
+                            let src_path = source_rootfs.join(source.trim_start_matches('/'));
+                            if src_path.exists() {
+                                let base_rootfs = self.base_rootfs.as_ref().unwrap();
+                                let dest_full = base_rootfs.join(dest_path.trim_start_matches('/'));
+
+                                // Create parent directory, not dest itself
+                                if let Some(parent) = dest_full.parent() {
+                                    std::fs::create_dir_all(parent)?;
+                                }
+
+                                if src_path.is_dir() {
+                                    // Use rsync to properly copy directory contents
+                                    let status = std::process::Command::new("rsync")
+                                        .args([
+                                            "-a",
+                                            &format!("{}/", src_path.to_str().unwrap()),
+                                            &format!("{}/", dest_full.to_str().unwrap()),
+                                        ])
+                                        .status()
+                                        .map_err(|e| BuildError::IoError {
+                                            path: src_path.clone(),
+                                            source: e,
+                                        })?;
+                                    if !status.success() {
+                                        return Err(BuildError::InstructionFailed {
+                                            instruction: "COPY --from".to_string(),
+                                            details: format!(
+                                                "Failed to copy {} from stage {}",
+                                                source, stage_name
+                                            ),
+                                        });
+                                    }
+                                } else {
+                                    // For files, if dest_path looks like a directory, copy to dest_full/filename
+                                    let final_dest = if dest_full.is_dir() || dest_path.ends_with('/') {
+                                        std::fs::create_dir_all(&dest_full)?;
+                                        dest_full.join(src_path.file_name().unwrap())
+                                    } else {
+                                        dest_full.clone()
+                                    };
+                                    std::fs::copy(&src_path, &final_dest)?;
+                                }
+                                info!("COPY --from={}: {} -> {}", stage_name, source, dest_path);
+                            } else {
+                                return Err(BuildError::InstructionFailed {
+                                    instruction: "COPY --from".to_string(),
+                                    details: format!(
+                                        "Source '{}' not found in stage '{}' (looked in {})",
+                                        source, stage_name, src_path.display()
+                                    ),
+                                });
+                            }
+                        }
                     } else {
-                        // Remove leading "./" if present
-                        let clean_dest = destination.strip_prefix("./").unwrap_or(destination);
-                        format!("{}/{}", self.workdir.trim_end_matches('/'), clean_dest)
-                    };
-
-                    // Create destination and copy files (cd to /context first so globs expand)
-                    let source_list = sources.join(" ");
-                    let copy_cmd = format!(
-                        "mkdir -p {} && cd /context && cp -r {} {}/ 2>/dev/null || true",
-                        dest_path, source_list, dest_path
-                    );
-
-                    build_steps.push(crate::builder::BuildStep::Run {
-                        command: copy_cmd,
-                        workdir: self.workdir.clone(),
-                    });
+                        // Regular COPY from build context
+                        // Build a robust copy command that checks file existence and reports errors
+                        let source_list = sources.join(" ");
+                        let copy_cmd = format!(
+                            "mkdir -p {} && cd /context && for src in {}; do if [ -e \"$src\" ]; then cp -r \"$src\" {}/; else echo \"COPY ERROR: $src not found in /context\" >&2; exit 1; fi; done",
+                            dest_path, source_list, dest_path
+                        );
+                        build_steps.push(crate::builder::BuildStep::Run {
+                            command: copy_cmd,
+                            workdir: self.workdir.clone(),
+                        });
+                    }
                 }
                 Instruction::Workdir { path } => {
                     self.workdir = path.clone();
                     self.config.workdir = Some(path.clone());
+                    // Create workdir in base rootfs
+                    if let Some(ref base) = self.base_rootfs {
+                        std::fs::create_dir_all(base.join(path.trim_start_matches('/')))?;
+                    }
                 }
                 Instruction::Env { vars } => {
                     for (k, v) in vars {
@@ -1269,48 +1574,65 @@ impl BuildExecutor for LinuxVmBuilder {
                         }
                     }
                 }
-                _ => {} // Skip other instructions
+                Instruction::User { user } => {
+                    self.config.user = Some(user.clone());
+                }
+                Instruction::Label { labels } => {
+                    self.config.labels.extend(labels.clone());
+                }
+                Instruction::Volume { paths } => {
+                    self.config.volumes.extend(paths.clone());
+                }
+                _ => {} // Skip other instructions (ARG, etc.)
             }
         }
 
-        // PHASE 3: Execute ALL build steps in ONE VM
-        let mut final_layers: Vec<PathBuf> = Vec::new();
-        if !build_steps.is_empty() {
-            info!("Executing {} build steps in one VM", build_steps.len());
-            let output_dir = self.work_dir.join("layers");
-            std::fs::create_dir_all(&output_dir)?;
-            let context_dir = self.work_dir.join("context");
-            std::fs::create_dir_all(&context_dir)?;
+        // Execute build steps in VM if any
+        let stage_rootfs = self.work_dir.join(format!("rootfs-stage{}", stage_idx));
+        std::fs::create_dir_all(&stage_rootfs)?;
 
-            // Copy build context files into context_dir so they're available in the VM
-            info!(
-                "Copying build context from {} to {}",
-                context.context_path.display(),
-                context_dir.display()
-            );
+        // Start with base rootfs
+        if let Some(base_path) = &self.base_rootfs {
             let status = std::process::Command::new("rsync")
                 .args([
                     "-a",
-                    &format!("{}/", context.context_path.to_str().unwrap()),
-                    context_dir.to_str().unwrap(),
+                    &format!("{}/", base_path.to_str().unwrap()),
+                    stage_rootfs.to_str().unwrap(),
                 ])
                 .status()
-                .map_err(|e| BuildError::IoError {
-                    path: context.context_path.clone(),
-                    source: e,
-                })?;
+                .map_err(|e| BuildError::IoError { path: base_path.clone(), source: e })?;
             if !status.success() {
                 return Err(BuildError::InstructionFailed {
-                    instruction: "Copy build context".to_string(),
-                    details: "Failed to copy build context files".into(),
+                    instruction: "Copy base rootfs".to_string(),
+                    details: "Failed to copy base image files".into(),
                 });
             }
+        }
+
+        // Log what we collected for this stage
+        info!("Stage {} collected {} build steps (RUN/COPY)", stage_idx, build_steps.len());
+        for (i, step) in build_steps.iter().enumerate() {
+            match step {
+                crate::builder::BuildStep::Run { command, workdir } => {
+                    let preview = if command.len() > 60 { &command[..60] } else { command };
+                    info!("  Step {}: RUN {} (workdir: {})", i + 1, preview, workdir);
+                }
+                crate::builder::BuildStep::Finalize { layer_id } => {
+                    info!("  Step {}: FINALIZE {}", i + 1, layer_id);
+                }
+            }
+        }
+
+        if !build_steps.is_empty() {
+            info!("Executing {} build steps for stage {} in VM...", build_steps.len(), stage_idx);
+            let output_dir = self.work_dir.join(format!("layers-stage{}", stage_idx));
+            std::fs::create_dir_all(&output_dir)?;
 
             let _layer_infos = self
                 .vm_builder
                 .execute_all_steps(
                     build_steps,
-                    &context_dir,
+                    context_dir,
                     &output_dir,
                     self.base_rootfs.as_deref(),
                 )
@@ -1320,112 +1642,39 @@ impl BuildExecutor for LinuxVmBuilder {
                     details: e.to_string(),
                 })?;
 
-            // Find the layer tarballs in output_dir
-            for entry in std::fs::read_dir(&output_dir)
-                .map_err(|e| BuildError::IoError { path: output_dir.clone(), source: e })?
-            {
-                let entry = entry
-                    .map_err(|e| BuildError::IoError { path: output_dir.clone(), source: e })?;
+            // Extract layer tarballs into stage rootfs
+            for entry in std::fs::read_dir(&output_dir)? {
+                let entry = entry?;
                 let path = entry.path();
                 if path.extension().and_then(|s| s.to_str()) == Some("tar") {
-                    final_layers.push(path);
+                    debug!("Extracting layer: {}", path.display());
+                    let status = std::process::Command::new("tar")
+                        .args(["-xf", path.to_str().unwrap(), "-C", stage_rootfs.to_str().unwrap()])
+                        .status()
+                        .map_err(|e| BuildError::IoError { path: path.clone(), source: e })?;
+                    if !status.success() {
+                        return Err(BuildError::LayerExtractionFailed {
+                            path,
+                            reason: "tar extraction failed".into(),
+                        });
+                    }
                 }
             }
-
-            info!("Found {} layer tarball(s)", final_layers.len());
         }
 
-        // PHASE 4: Create final rootfs + squashfs
-        let final_rootfs = self.work_dir.join("rootfs");
-        std::fs::create_dir_all(&final_rootfs)
-            .map_err(|e| BuildError::IoError { path: final_rootfs.clone(), source: e })?;
+        Ok(stage_rootfs)
+    }
 
-        // First, copy base image rootfs if it exists
-        if let Some(base_path) = &self.base_rootfs {
-            info!("Copying base image from {}", base_path.display());
-            // Use rsync for cross-platform compatibility
-            let status = std::process::Command::new("rsync")
-                .args([
-                    "-a",
-                    &format!("{}/", base_path.to_str().unwrap()),
-                    final_rootfs.to_str().unwrap(),
-                ])
-                .status()
-                .map_err(|e| BuildError::IoError { path: base_path.clone(), source: e })?;
-
-            if !status.success() {
-                return Err(BuildError::InstructionFailed {
-                    instruction: "Copy base rootfs".to_string(),
-                    details: "Failed to copy base image files".into(),
-                });
-            }
+    /// Normalize a destination path relative to current workdir
+    fn normalize_path(&self, destination: &str) -> String {
+        if destination.starts_with('/') {
+            destination.to_string()
+        } else if destination == "." || destination == "./" {
+            self.workdir.clone()
+        } else {
+            let clean_dest = destination.strip_prefix("./").unwrap_or(destination);
+            format!("{}/{}", self.workdir.trim_end_matches('/'), clean_dest)
         }
-
-        // Then extract layer tarballs on top
-        info!("Extracting {} layer(s) into final rootfs", final_layers.len());
-        for layer in &final_layers {
-            debug!("Extracting layer: {}", layer.display());
-            let status = std::process::Command::new("tar")
-                .args(["-xf", layer.to_str().unwrap(), "-C", final_rootfs.to_str().unwrap()])
-                .status()
-                .map_err(|e| BuildError::IoError { path: layer.clone(), source: e })?;
-
-            if !status.success() {
-                return Err(BuildError::LayerExtractionFailed {
-                    path: layer.clone(),
-                    reason: "tar extraction failed".into(),
-                });
-            }
-        }
-
-        // Create SquashFS from final rootfs
-        info!("Creating SquashFS image");
-        let squashfs_path = self.work_dir.join("final.squashfs");
-        let status = std::process::Command::new("mksquashfs")
-            .args([
-                final_rootfs.to_str().unwrap(),
-                squashfs_path.to_str().unwrap(),
-                "-noappend",
-                "-comp",
-                "zstd",
-            ])
-            .status()
-            .map_err(|e| BuildError::IoError { path: squashfs_path.clone(), source: e })?;
-
-        if !status.success() {
-            return Err(BuildError::ContextError("mksquashfs failed".into()));
-        }
-
-        // Generate manifest
-        let manifest = ImageManifest {
-            name: "built-image".to_string(),
-            tag: "latest".to_string(),
-            config: self.config.clone(),
-            created: chrono::Utc::now().to_rfc3339(),
-            architecture: "x86_64".to_string(),
-            os: "linux".to_string(),
-        };
-
-        // Compute image ID (SHA256 of manifest)
-        let manifest_json = serde_json::to_string(&manifest).map_err(|e| {
-            BuildError::ContextError(format!("Failed to serialize manifest: {}", e))
-        })?;
-        use sha2::Digest;
-        let image_id = format!("{:x}", sha2::Sha256::digest(manifest_json.as_bytes()));
-
-        info!("Build complete: {}", image_id);
-
-        Ok(BuildOutput {
-            image_id,
-            rootfs_path: squashfs_path,
-            manifest,
-            stats: BuildStats {
-                duration_secs: 0.0,
-                layer_count: final_layers.len(),
-                cached_layers: 0,
-                total_size: 0,
-            },
-        })
     }
 }
 
@@ -1434,25 +1683,20 @@ impl MacOsVmBuilder {
     /// Create a new macOS VM-based builder.
     pub fn new() -> BuildResult<Self> {
         use crate::adapters::HvfAdapter;
-        use dirs::home_dir;
 
         let work_dir = std::env::temp_dir().join(format!("hypr-build-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&work_dir)
             .map_err(|e| BuildError::IoError { path: work_dir.clone(), source: e })?;
 
         // Locate kernel (initramfs will be generated on-the-fly)
-        let hypr_dir = home_dir()
-            .ok_or_else(|| BuildError::ContextError("Could not find home directory".into()))?
-            .join(".hypr");
-
-        let kernel_path = hypr_dir.join("kernel").join("vmlinuz");
+        let kernel_path = crate::paths::kernel_path();
 
         // Download kernel if not present
         if !kernel_path.exists() {
             info!("Kernel not found, downloading...");
-            let kernel_dir = hypr_dir.join("kernel");
-            std::fs::create_dir_all(&kernel_dir)
-                .map_err(|e| BuildError::IoError { path: kernel_dir.clone(), source: e })?;
+            let data_dir = crate::paths::data_dir();
+            std::fs::create_dir_all(&data_dir)
+                .map_err(|e| BuildError::IoError { path: data_dir.clone(), source: e })?;
 
             // Detect architecture
             let arch = std::env::consts::ARCH;
@@ -1519,7 +1763,25 @@ impl MacOsVmBuilder {
             },
             oci_client,
             base_rootfs: None,
+            stage_outputs: HashMap::new(),
         })
+    }
+
+    /// Reset builder state for a new stage (preserves stage_outputs)
+    fn reset_for_stage(&mut self) {
+        self.env.clear();
+        self.workdir = "/".to_string();
+        self.config = ImageConfig {
+            entrypoint: None,
+            cmd: None,
+            env: HashMap::new(),
+            workdir: None,
+            user: None,
+            exposed_ports: Vec::new(),
+            volumes: Vec::new(),
+            labels: HashMap::new(),
+        };
+        self.base_rootfs = None;
     }
 }
 
@@ -1528,64 +1790,278 @@ impl MacOsVmBuilder {
 impl BuildExecutor for MacOsVmBuilder {
     async fn execute(
         &mut self,
-        graph: &BuildGraph,
+        _graph: &BuildGraph,
         context: &BuildContext,
-        _cache: &mut CacheManager,
+        cache: &mut CacheManager,
     ) -> BuildResult<BuildOutput> {
-        // TODO: Apply same batch execution fix as Linux
-        // PHASE 1: Pull base image (FROM instruction)
-        for node in &graph.nodes {
-            if let Instruction::From { image, .. } = &node.instruction {
-                use crate::builder::parser::ImageRef;
+        info!("Starting macOS VM-based build with HVF (multi-stage support)");
 
-                match image {
-                    ImageRef::Scratch => {
-                        info!("FROM scratch: using minimal rootfs");
-                        // Create minimal directory structure
-                        let scratch_dir = self.work_dir.join("rootfs-scratch");
-                        std::fs::create_dir_all(&scratch_dir)?;
-                        std::fs::create_dir_all(scratch_dir.join("tmp"))?;
-                        std::fs::create_dir_all(scratch_dir.join("etc"))?;
-                        std::fs::create_dir_all(scratch_dir.join("proc"))?;
-                        std::fs::create_dir_all(scratch_dir.join("sys"))?;
-                        std::fs::create_dir_all(scratch_dir.join("dev"))?;
-                        self.base_rootfs = Some(scratch_dir);
+        // Get the parsed Dockerfile from the context to access stages
+        let dockerfile_content = std::fs::read_to_string(
+            context.context_path.join(&context.dockerfile_path),
+        )
+        .map_err(|e| BuildError::IoError {
+            path: context.context_path.join(&context.dockerfile_path),
+            source: e,
+        })?;
+
+        let dockerfile = crate::builder::parser::parse_dockerfile(&dockerfile_content)
+            .map_err(|e| BuildError::ContextError(format!("Failed to parse Dockerfile: {}", e)))?;
+
+        let num_stages = dockerfile.stages.len();
+        info!("Dockerfile has {} stage(s)", num_stages);
+
+        // Determine target stage (last stage if not specified)
+        let target_stage_idx = if let Some(ref target_name) = context.target {
+            dockerfile
+                .stages
+                .iter()
+                .position(|s| s.name.as_deref() == Some(target_name))
+                .ok_or_else(|| {
+                    BuildError::ContextError(format!("Target stage '{}' not found", target_name))
+                })?
+        } else {
+            num_stages - 1
+        };
+
+        // Copy build context once (shared across all stages)
+        let context_dir = self.work_dir.join("context");
+        std::fs::create_dir_all(&context_dir)?;
+
+        // Check for .dockerignore and build rsync args
+        let dockerignore_path = context.context_path.join(".dockerignore");
+        let has_dockerignore = dockerignore_path.exists();
+        if has_dockerignore {
+            info!("Found .dockerignore, excluding matched patterns from build context");
+        }
+
+        info!(
+            "Copying build context from {} to {}",
+            context.context_path.display(),
+            context_dir.display()
+        );
+
+        let mut rsync_args = vec!["-a".to_string()];
+        if has_dockerignore {
+            // Use rsync's filter to read .dockerignore patterns
+            // :- means "exclude if matching", reading from .dockerignore in source dir
+            rsync_args.push("--filter=:- .dockerignore".to_string());
+        }
+        rsync_args.push(format!("{}/", context.context_path.to_str().unwrap()));
+        rsync_args.push(context_dir.to_str().unwrap().to_string());
+
+        let status = std::process::Command::new("rsync")
+            .args(&rsync_args)
+            .status()
+            .map_err(|e| BuildError::IoError { path: context.context_path.clone(), source: e })?;
+        if !status.success() {
+            return Err(BuildError::InstructionFailed {
+                instruction: "Copy build context".to_string(),
+                details: "Failed to copy build context files".into(),
+            });
+        }
+
+        // Process each stage up to and including the target
+        for (stage_idx, stage) in dockerfile.stages.iter().enumerate() {
+            if stage_idx > target_stage_idx {
+                info!("Skipping stage {} (after target)", stage_idx);
+                break;
+            }
+
+            let stage_name = stage.name.clone().unwrap_or_else(|| format!("stage{}", stage_idx));
+            info!("=== Building stage {}: {} ===", stage_idx, stage_name);
+
+            // Reset builder state for this stage (but keep stage_outputs)
+            self.reset_for_stage();
+
+            // Execute this stage
+            let stage_rootfs = self.execute_stage(stage_idx, stage, &context_dir, cache).await?;
+
+            // Store stage output for potential COPY --from references
+            self.stage_outputs.insert(stage_name.clone(), stage_rootfs.clone());
+            self.stage_outputs.insert(stage_idx.to_string(), stage_rootfs);
+
+            info!("Stage {} complete", stage_idx);
+        }
+
+        // The final stage's rootfs becomes our output
+        let target_stage_name = dockerfile.stages[target_stage_idx]
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("stage{}", target_stage_idx));
+        let final_rootfs = self
+            .stage_outputs
+            .get(&target_stage_name)
+            .ok_or_else(|| BuildError::ContextError("Final stage rootfs not found".into()))?
+            .clone();
+
+        // Create SquashFS from final rootfs
+        info!("Creating SquashFS from {} -> {}", final_rootfs.display(), self.work_dir.join("final.squashfs").display());
+
+        // Log the size of final_rootfs directory before compression
+        if let Ok(output) = std::process::Command::new("du")
+            .args(["-sh", final_rootfs.to_str().unwrap()])
+            .output()
+        {
+            let du_output = String::from_utf8_lossy(&output.stdout);
+            info!("Final rootfs size (before compression): {}", du_output.trim());
+        }
+
+        let squashfs_path = self.work_dir.join("final.squashfs");
+        let mksquashfs_output = std::process::Command::new("mksquashfs")
+            .args([
+                final_rootfs.to_str().unwrap(),
+                squashfs_path.to_str().unwrap(),
+                "-noappend",
+                "-comp",
+                "gzip",
+            ])
+            .output()
+            .map_err(|e| BuildError::IoError { path: squashfs_path.clone(), source: e })?;
+
+        if !mksquashfs_output.status.success() {
+            let stderr = String::from_utf8_lossy(&mksquashfs_output.stderr);
+            error!("mksquashfs failed: {}", stderr);
+            return Err(BuildError::ContextError(format!("mksquashfs failed: {}", stderr)));
+        }
+
+        // Log mksquashfs output
+        let stdout = String::from_utf8_lossy(&mksquashfs_output.stdout);
+        let stderr = String::from_utf8_lossy(&mksquashfs_output.stderr);
+        if !stdout.is_empty() {
+            info!("mksquashfs stdout: {}", stdout);
+        }
+        if !stderr.is_empty() {
+            info!("mksquashfs stderr: {}", stderr);
+        }
+
+        // Generate manifest
+        let manifest = ImageManifest {
+            name: "built-image".to_string(),
+            tag: "latest".to_string(),
+            config: self.config.clone(),
+            created: chrono::Utc::now().to_rfc3339(),
+            architecture: std::env::consts::ARCH.to_string(),
+            os: "linux".to_string(),
+        };
+
+        // Compute image ID
+        let manifest_json = serde_json::to_string(&manifest).map_err(|e| {
+            BuildError::ContextError(format!("Failed to serialize manifest: {}", e))
+        })?;
+        use sha2::Digest;
+        let image_id = format!("{:x}", sha2::Sha256::digest(manifest_json.as_bytes()));
+
+        let total_size = match std::fs::metadata(&squashfs_path) {
+            Ok(m) => {
+                let size = m.len();
+                info!("Squashfs file {} size: {} bytes ({:.2} MB)", squashfs_path.display(), size, size as f64 / 1024.0 / 1024.0);
+                size
+            }
+            Err(e) => {
+                error!("Failed to read squashfs metadata at {}: {}", squashfs_path.display(), e);
+                0
+            }
+        };
+        info!("Build complete: {} (size: {} bytes)", image_id, total_size);
+
+        Ok(BuildOutput {
+            image_id,
+            rootfs_path: squashfs_path,
+            manifest,
+            stats: BuildStats {
+                duration_secs: 0.0,
+                layer_count: num_stages,
+                cached_layers: 0,
+                total_size,
+            },
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl MacOsVmBuilder {
+    /// Execute a single build stage, returning the path to its final rootfs
+    async fn execute_stage(
+        &mut self,
+        stage_idx: usize,
+        stage: &crate::builder::parser::BuildStage,
+        context_dir: &std::path::Path,
+        _cache: &mut CacheManager,
+    ) -> BuildResult<PathBuf> {
+        use crate::builder::parser::ImageRef;
+
+        // Determine base for this stage
+        match &stage.from {
+            ImageRef::Scratch => {
+                info!("FROM scratch: using minimal rootfs");
+                let scratch_dir = self.work_dir.join(format!("rootfs-stage{}-scratch", stage_idx));
+                std::fs::create_dir_all(&scratch_dir)?;
+                std::fs::create_dir_all(scratch_dir.join("tmp"))?;
+                std::fs::create_dir_all(scratch_dir.join("etc"))?;
+                std::fs::create_dir_all(scratch_dir.join("proc"))?;
+                std::fs::create_dir_all(scratch_dir.join("sys"))?;
+                std::fs::create_dir_all(scratch_dir.join("dev"))?;
+                self.base_rootfs = Some(scratch_dir);
+            }
+            ImageRef::Stage(stage_name) => {
+                // Multi-stage: use output from a previous stage
+                let source_rootfs = self.stage_outputs.get(stage_name).ok_or_else(|| {
+                    BuildError::InstructionFailed {
+                        instruction: "FROM".to_string(),
+                        details: format!(
+                            "Stage '{}' not found. Available: {:?}",
+                            stage_name,
+                            self.stage_outputs.keys().collect::<Vec<_>>()
+                        ),
                     }
-                    ImageRef::Stage(_) => {
-                        return Err(BuildError::InstructionFailed {
-                            instruction: "FROM".to_string(),
-                            details: "Multi-stage builds not yet supported".into(),
-                        });
-                    }
-                    ImageRef::Image { name, tag, digest } => {
-                        // Construct full image reference
-                        let image_str = if let Some(digest) = digest {
-                            format!("{}@{}", name, digest)
-                        } else {
-                            format!("{}:{}", name, tag.as_deref().unwrap_or("latest"))
-                        };
+                })?;
+                info!(
+                    "FROM {}: using previous stage rootfs at {}",
+                    stage_name,
+                    source_rootfs.display()
+                );
 
-                        info!("FROM {}: pulling base image from registry", image_str);
-
-                        // Create directory for base image
-                        let base_dir = self.work_dir.join("rootfs-base");
-                        std::fs::create_dir_all(&base_dir)?;
-
-                        // Pull and extract image
-                        self.oci_client.pull_image(&image_str, &base_dir).await?;
-
-                        info!("Base image extracted to {}", base_dir.display());
-                        self.base_rootfs = Some(base_dir);
-                    }
+                // Copy the stage rootfs as our base
+                let base_dir = self.work_dir.join(format!("rootfs-stage{}-base", stage_idx));
+                std::fs::create_dir_all(&base_dir)?;
+                let status = std::process::Command::new("rsync")
+                    .args([
+                        "-a",
+                        &format!("{}/", source_rootfs.to_str().unwrap()),
+                        base_dir.to_str().unwrap(),
+                    ])
+                    .status()
+                    .map_err(|e| BuildError::IoError { path: source_rootfs.clone(), source: e })?;
+                if !status.success() {
+                    return Err(BuildError::InstructionFailed {
+                        instruction: "FROM".to_string(),
+                        details: format!("Failed to copy stage '{}' rootfs", stage_name),
+                    });
                 }
-                break; // Only one FROM
+                self.base_rootfs = Some(base_dir);
+            }
+            ImageRef::Image { name, tag, digest } => {
+                let image_str = if let Some(digest) = digest {
+                    format!("{}@{}", name, digest)
+                } else {
+                    format!("{}:{}", name, tag.as_deref().unwrap_or("latest"))
+                };
+                info!("FROM {}: pulling base image", image_str);
+
+                let base_dir = self.work_dir.join(format!("rootfs-stage{}-base", stage_idx));
+                std::fs::create_dir_all(&base_dir)?;
+                self.oci_client.pull_image(&image_str, &base_dir).await?;
+                info!("Base image extracted to {}", base_dir.display());
+                self.base_rootfs = Some(base_dir);
             }
         }
 
-        // PHASE 2: Collect all RUN/COPY/WORKDIR/ENV instructions
+        // Collect build steps for this stage
         let mut build_steps = Vec::new();
-        for node in &graph.nodes {
-            match &node.instruction {
+        for (instr_idx, instruction) in stage.instructions.iter().enumerate() {
+            let _ = instr_idx; // Suppress unused warning
+            match instruction {
                 Instruction::Run { command } => {
                     let cmd_str = match command {
                         crate::builder::parser::RunCommand::Shell(c) => c.clone(),
@@ -1596,33 +2072,96 @@ impl BuildExecutor for MacOsVmBuilder {
                         workdir: self.workdir.clone(),
                     });
                 }
-                Instruction::Copy { sources, destination, .. } => {
-                    // Normalize destination path
-                    let dest_path = if destination.starts_with('/') {
-                        destination.clone()
-                    } else if destination == "." || destination == "./" {
-                        self.workdir.clone()
+                Instruction::Copy { sources, destination, from_stage, .. } => {
+                    let dest_path = self.normalize_path(destination);
+
+                    if let Some(stage_name) = from_stage {
+                        // COPY --from=stage: copy from another stage's rootfs
+                        let source_rootfs =
+                            self.stage_outputs.get(stage_name).ok_or_else(|| {
+                                BuildError::InstructionFailed {
+                                    instruction: "COPY --from".to_string(),
+                                    details: format!("Stage '{}' not found", stage_name),
+                                }
+                            })?;
+
+                        // Copy files on the host side before VM execution
+                        for source in sources {
+                            let src_path = source_rootfs.join(source.trim_start_matches('/'));
+                            if src_path.exists() {
+                                let base_rootfs = self.base_rootfs.as_ref().unwrap();
+                                let dest_full = base_rootfs.join(dest_path.trim_start_matches('/'));
+
+                                // Create parent directory, not dest itself
+                                if let Some(parent) = dest_full.parent() {
+                                    std::fs::create_dir_all(parent)?;
+                                }
+
+                                if src_path.is_dir() {
+                                    // Use rsync to properly copy directory contents
+                                    // rsync -a src/ dest/ copies contents of src INTO dest
+                                    let status = std::process::Command::new("rsync")
+                                        .args([
+                                            "-a",
+                                            &format!("{}/", src_path.to_str().unwrap()),
+                                            &format!("{}/", dest_full.to_str().unwrap()),
+                                        ])
+                                        .status()
+                                        .map_err(|e| BuildError::IoError {
+                                            path: src_path.clone(),
+                                            source: e,
+                                        })?;
+                                    if !status.success() {
+                                        return Err(BuildError::InstructionFailed {
+                                            instruction: "COPY --from".to_string(),
+                                            details: format!(
+                                                "Failed to copy {} from stage {}",
+                                                source, stage_name
+                                            ),
+                                        });
+                                    }
+                                } else {
+                                    // For files, if dest_path looks like a directory (ends with / or dest_full is a dir),
+                                    // copy to dest_full/filename, otherwise copy directly to dest_full
+                                    let final_dest = if dest_full.is_dir() || dest_path.ends_with('/') {
+                                        std::fs::create_dir_all(&dest_full)?;
+                                        dest_full.join(src_path.file_name().unwrap())
+                                    } else {
+                                        dest_full.clone()
+                                    };
+                                    std::fs::copy(&src_path, &final_dest)?;
+                                }
+                                info!("COPY --from={}: {} -> {}", stage_name, source, dest_path);
+                            } else {
+                                return Err(BuildError::InstructionFailed {
+                                    instruction: "COPY --from".to_string(),
+                                    details: format!(
+                                        "Source '{}' not found in stage '{}' (looked in {})",
+                                        source, stage_name, src_path.display()
+                                    ),
+                                });
+                            }
+                        }
                     } else {
-                        // Remove leading "./" if present
-                        let clean_dest = destination.strip_prefix("./").unwrap_or(destination);
-                        format!("{}/{}", self.workdir.trim_end_matches('/'), clean_dest)
-                    };
-
-                    // Create destination and copy files (cd to /context first so globs expand)
-                    let source_list = sources.join(" ");
-                    let copy_cmd = format!(
-                        "mkdir -p {} && cd /context && cp -r {} {}/ 2>/dev/null || true",
-                        dest_path, source_list, dest_path
-                    );
-
-                    build_steps.push(crate::builder::BuildStep::Run {
-                        command: copy_cmd,
-                        workdir: self.workdir.clone(),
-                    });
+                        // Regular COPY from build context
+                        // Build a robust copy command that checks file existence and reports errors
+                        let source_list = sources.join(" ");
+                        let copy_cmd = format!(
+                            "mkdir -p {} && cd /context && for src in {}; do if [ -e \"$src\" ]; then cp -r \"$src\" {}/; else echo \"COPY ERROR: $src not found in /context\" >&2; exit 1; fi; done",
+                            dest_path, source_list, dest_path
+                        );
+                        build_steps.push(crate::builder::BuildStep::Run {
+                            command: copy_cmd,
+                            workdir: self.workdir.clone(),
+                        });
+                    }
                 }
                 Instruction::Workdir { path } => {
                     self.workdir = path.clone();
                     self.config.workdir = Some(path.clone());
+                    if let Some(ref base) = self.base_rootfs {
+                        std::fs::create_dir_all(base.join(path.trim_start_matches('/')))?;
+                    }
                 }
                 Instruction::Env { vars } => {
                     for (k, v) in vars {
@@ -1656,48 +2195,65 @@ impl BuildExecutor for MacOsVmBuilder {
                         }
                     }
                 }
+                Instruction::User { user } => {
+                    self.config.user = Some(user.clone());
+                }
+                Instruction::Label { labels } => {
+                    self.config.labels.extend(labels.clone());
+                }
+                Instruction::Volume { paths } => {
+                    self.config.volumes.extend(paths.clone());
+                }
                 _ => {} // Skip other instructions
             }
         }
 
-        // PHASE 3: Execute ALL build steps in ONE VM
-        let mut final_layers: Vec<PathBuf> = Vec::new();
-        if !build_steps.is_empty() {
-            info!("Executing {} build steps in one VM", build_steps.len());
-            let output_dir = self.work_dir.join("layers");
-            std::fs::create_dir_all(&output_dir)?;
-            let context_dir = self.work_dir.join("context");
-            std::fs::create_dir_all(&context_dir)?;
+        // Execute build steps in VM if any
+        let stage_rootfs = self.work_dir.join(format!("rootfs-stage{}", stage_idx));
+        std::fs::create_dir_all(&stage_rootfs)?;
 
-            // Copy build context files into context_dir so they're available in the VM
-            info!(
-                "Copying build context from {} to {}",
-                context.context_path.display(),
-                context_dir.display()
-            );
+        // Start with base rootfs
+        if let Some(base_path) = &self.base_rootfs {
             let status = std::process::Command::new("rsync")
                 .args([
                     "-a",
-                    &format!("{}/", context.context_path.to_str().unwrap()),
-                    context_dir.to_str().unwrap(),
+                    &format!("{}/", base_path.to_str().unwrap()),
+                    stage_rootfs.to_str().unwrap(),
                 ])
                 .status()
-                .map_err(|e| BuildError::IoError {
-                    path: context.context_path.clone(),
-                    source: e,
-                })?;
+                .map_err(|e| BuildError::IoError { path: base_path.clone(), source: e })?;
             if !status.success() {
                 return Err(BuildError::InstructionFailed {
-                    instruction: "Copy build context".to_string(),
-                    details: "Failed to copy build context files".into(),
+                    instruction: "Copy base rootfs".to_string(),
+                    details: "Failed to copy base image files".into(),
                 });
             }
+        }
+
+        // Log what we collected for this stage
+        info!("Stage {} collected {} build steps (RUN/COPY)", stage_idx, build_steps.len());
+        for (i, step) in build_steps.iter().enumerate() {
+            match step {
+                crate::builder::BuildStep::Run { command, workdir } => {
+                    let preview = if command.len() > 60 { &command[..60] } else { command };
+                    info!("  Step {}: RUN {} (workdir: {})", i + 1, preview, workdir);
+                }
+                crate::builder::BuildStep::Finalize { layer_id } => {
+                    info!("  Step {}: FINALIZE {}", i + 1, layer_id);
+                }
+            }
+        }
+
+        if !build_steps.is_empty() {
+            info!("Executing {} build steps for stage {} in VM...", build_steps.len(), stage_idx);
+            let output_dir = self.work_dir.join(format!("layers-stage{}", stage_idx));
+            std::fs::create_dir_all(&output_dir)?;
 
             let _layer_infos = self
                 .vm_builder
                 .execute_all_steps(
                     build_steps,
-                    &context_dir,
+                    context_dir,
                     &output_dir,
                     self.base_rootfs.as_deref(),
                 )
@@ -1707,112 +2263,39 @@ impl BuildExecutor for MacOsVmBuilder {
                     details: e.to_string(),
                 })?;
 
-            // Find the layer tarballs in output_dir
-            for entry in std::fs::read_dir(&output_dir)
-                .map_err(|e| BuildError::IoError { path: output_dir.clone(), source: e })?
-            {
-                let entry = entry
-                    .map_err(|e| BuildError::IoError { path: output_dir.clone(), source: e })?;
+            // Extract layer tarballs into stage rootfs
+            for entry in std::fs::read_dir(&output_dir)? {
+                let entry = entry?;
                 let path = entry.path();
                 if path.extension().and_then(|s| s.to_str()) == Some("tar") {
-                    final_layers.push(path);
+                    debug!("Extracting layer: {}", path.display());
+                    let status = std::process::Command::new("tar")
+                        .args(["-xf", path.to_str().unwrap(), "-C", stage_rootfs.to_str().unwrap()])
+                        .status()
+                        .map_err(|e| BuildError::IoError { path: path.clone(), source: e })?;
+                    if !status.success() {
+                        return Err(BuildError::LayerExtractionFailed {
+                            path,
+                            reason: "tar extraction failed".into(),
+                        });
+                    }
                 }
             }
-
-            info!("Found {} layer tarball(s)", final_layers.len());
         }
 
-        // PHASE 4: Create final rootfs + squashfs
-        let final_rootfs = self.work_dir.join("rootfs");
-        std::fs::create_dir_all(&final_rootfs)
-            .map_err(|e| BuildError::IoError { path: final_rootfs.clone(), source: e })?;
+        Ok(stage_rootfs)
+    }
 
-        // First, copy base image rootfs if it exists
-        if let Some(base_path) = &self.base_rootfs {
-            info!("Copying base image from {}", base_path.display());
-            // Use rsync for cross-platform compatibility
-            let status = std::process::Command::new("rsync")
-                .args([
-                    "-a",
-                    &format!("{}/", base_path.to_str().unwrap()),
-                    final_rootfs.to_str().unwrap(),
-                ])
-                .status()
-                .map_err(|e| BuildError::IoError { path: base_path.clone(), source: e })?;
-
-            if !status.success() {
-                return Err(BuildError::InstructionFailed {
-                    instruction: "Copy base rootfs".to_string(),
-                    details: "Failed to copy base image files".into(),
-                });
-            }
+    /// Normalize a destination path relative to current workdir
+    fn normalize_path(&self, destination: &str) -> String {
+        if destination.starts_with('/') {
+            destination.to_string()
+        } else if destination == "." || destination == "./" {
+            self.workdir.clone()
+        } else {
+            let clean_dest = destination.strip_prefix("./").unwrap_or(destination);
+            format!("{}/{}", self.workdir.trim_end_matches('/'), clean_dest)
         }
-
-        // Then extract layer tarballs on top
-        info!("Extracting {} layer(s) into final rootfs", final_layers.len());
-        for layer in &final_layers {
-            debug!("Extracting layer: {}", layer.display());
-            let status = std::process::Command::new("tar")
-                .args(["-xf", layer.to_str().unwrap(), "-C", final_rootfs.to_str().unwrap()])
-                .status()
-                .map_err(|e| BuildError::IoError { path: layer.clone(), source: e })?;
-
-            if !status.success() {
-                return Err(BuildError::LayerExtractionFailed {
-                    path: layer.clone(),
-                    reason: "tar extraction failed".into(),
-                });
-            }
-        }
-
-        // Create SquashFS from final rootfs
-        info!("Creating SquashFS image");
-        let squashfs_path = self.work_dir.join("final.squashfs");
-        let status = std::process::Command::new("mksquashfs")
-            .args([
-                final_rootfs.to_str().unwrap(),
-                squashfs_path.to_str().unwrap(),
-                "-noappend",
-                "-comp",
-                "zstd",
-            ])
-            .status()
-            .map_err(|e| BuildError::IoError { path: squashfs_path.clone(), source: e })?;
-
-        if !status.success() {
-            return Err(BuildError::ContextError("mksquashfs failed".into()));
-        }
-
-        // Generate manifest
-        let manifest = ImageManifest {
-            name: "built-image".to_string(),
-            tag: "latest".to_string(),
-            config: self.config.clone(),
-            created: chrono::Utc::now().to_rfc3339(),
-            architecture: "x86_64".to_string(),
-            os: "linux".to_string(),
-        };
-
-        // Compute image ID (SHA256 of manifest)
-        let manifest_json = serde_json::to_string(&manifest).map_err(|e| {
-            BuildError::ContextError(format!("Failed to serialize manifest: {}", e))
-        })?;
-        use sha2::Digest;
-        let image_id = format!("{:x}", sha2::Sha256::digest(manifest_json.as_bytes()));
-
-        info!("Build complete: {}", image_id);
-
-        Ok(BuildOutput {
-            image_id,
-            rootfs_path: squashfs_path,
-            manifest,
-            stats: BuildStats {
-                duration_secs: 0.0,
-                layer_count: final_layers.len(),
-                cached_layers: 0,
-                total_size: 0,
-            },
-        })
     }
 }
 

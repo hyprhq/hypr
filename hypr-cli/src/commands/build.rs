@@ -1,15 +1,17 @@
 //! Build command implementation for HYPR CLI.
 //!
-//! Builds HYPR images from Dockerfiles with progress bars and caching.
+//! Builds HYPR images from Dockerfiles with a premium progress UI.
 
 use anyhow::{Context, Result};
-use colored::Colorize;
+use console::style;
 use hypr_core::builder::parser::parse_dockerfile;
 use hypr_core::builder::{create_builder, BuildContext, BuildGraph, CacheManager};
 use hypr_core::state::StateManager;
 use hypr_core::types::Image;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use std::fs;
+
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
 
@@ -38,7 +40,7 @@ pub async fn build(
         anyhow::bail!("Build context not found: {}", context_path);
     }
 
-    // Canonicalize to get absolute path (so "." becomes "/full/path/to/current/dir")
+    // Canonicalize to get absolute path
     let context_dir_abs = context_dir
         .canonicalize()
         .with_context(|| format!("Failed to resolve build context path: {}", context_path))?;
@@ -48,19 +50,29 @@ pub async fn build(
         anyhow::bail!("Dockerfile not found: {}", dockerfile_path.display());
     }
 
-    // Parse tag (use directory name if not provided)
-    // Extract directory name from absolute path (e.g., "/path/to/frontend" -> "frontend")
+    // Parse tag
     let default_name = context_dir_abs.file_name().and_then(|n| n.to_str()).unwrap_or("image");
     let (image_name, image_tag) = parse_tag(tag, default_name)?;
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // PREMIUM BUILD UI - Header
+    // ═══════════════════════════════════════════════════════════════════════
+    println!();
+    println!("{}", style("━".repeat(60)).cyan());
     println!(
-        "{} Building image {}:{}",
-        "[1/4]".bold().blue(),
-        image_name.green(),
-        image_tag.cyan()
+        "  {} Building {}:{}",
+        style("🚀").bold(),
+        style(&image_name).green().bold(),
+        style(&image_tag).cyan()
     );
+    println!("{}", style("━".repeat(60)).cyan());
+    println!();
 
-    // Read and parse Dockerfile
+    // ═══════════════════════════════════════════════════════════════════════
+    // Phase 1: Parse Dockerfile
+    // ═══════════════════════════════════════════════════════════════════════
+    let spinner = create_spinner("Parsing Dockerfile...");
+
     let dockerfile_content = fs::read_to_string(&dockerfile_path)
         .with_context(|| format!("Failed to read Dockerfile: {}", dockerfile_path.display()))?;
 
@@ -71,30 +83,44 @@ pub async fn build(
     let total_instructions: usize =
         parsed_dockerfile.stages.iter().map(|s| s.instructions.len()).sum();
 
-    println!(
-        "  {} stages, {} instructions",
-        num_stages.to_string().yellow(),
-        total_instructions.to_string().yellow()
-    );
+    spinner.finish_with_message(format!(
+        "{} Parsed {} stages, {} instructions",
+        style("✓").green(),
+        style(num_stages).yellow(),
+        style(total_instructions).yellow()
+    ));
 
-    // Build graph
-    println!("{} Constructing build graph", "[2/4]".bold().blue());
+    // ═══════════════════════════════════════════════════════════════════════
+    // Phase 2: Build graph
+    // ═══════════════════════════════════════════════════════════════════════
+    let spinner = create_spinner("Constructing build graph...");
+
     let graph = BuildGraph::from_dockerfile(&parsed_dockerfile)
         .with_context(|| "Failed to construct build graph")?;
 
     let execution_order = graph.topological_sort().with_context(|| "Failed to sort build graph")?;
 
-    println!("  {} steps in execution order", execution_order.len().to_string().yellow());
+    spinner.finish_with_message(format!(
+        "{} Build graph ready ({} steps)",
+        style("✓").green(),
+        style(execution_order.len()).yellow()
+    ));
 
-    // Initialize cache
-    println!("{} Initializing cache", "[3/4]".bold().blue());
+    // ═══════════════════════════════════════════════════════════════════════
+    // Phase 3: Initialize cache
+    // ═══════════════════════════════════════════════════════════════════════
+    let spinner = create_spinner("Initializing cache...");
+
     let mut cache = CacheManager::new().with_context(|| "Failed to initialize cache manager")?;
 
-    if no_cache {
-        println!("  {}", "Cache disabled".yellow());
+    let cache_status = if no_cache {
+        format!("{} Cache disabled", style("⚠").yellow())
     } else {
-        println!("  {}", "Cache enabled".green());
-    }
+        format!("{} Cache enabled", style("✓").green())
+    };
+    spinner.finish_with_message(cache_status);
+
+    println!();
 
     // Build context
     let mut build_args_map = HashMap::new();
@@ -110,8 +136,10 @@ pub async fn build(
         no_cache,
     };
 
-    // Execute build
-    println!("{} Executing build", "[4/4]".bold().blue());
+    // ═══════════════════════════════════════════════════════════════════════
+    // Phase 4: Execute build
+    // ═══════════════════════════════════════════════════════════════════════
+    println!("  {} {}", style("▶").cyan().bold(), style("Executing build").bold());
     println!();
 
     let mut builder = create_builder().with_context(|| "Failed to create builder")?;
@@ -120,36 +148,58 @@ pub async fn build(
     let output =
         builder.execute(&graph, &context, &mut cache).await.with_context(|| "Build failed")?;
 
-    // Print results
+    // ═══════════════════════════════════════════════════════════════════════
+    // Build Complete - Premium Results Display
+    // ═══════════════════════════════════════════════════════════════════════
     let duration = start_time.elapsed();
     let duration_str = format_duration(duration.as_secs_f64());
+    let size_mb = output.stats.total_size as f64 / 1024.0 / 1024.0;
 
     println!();
-    println!("{}", "Build completed successfully!".green().bold());
+    println!("{}", style("━".repeat(60)).green());
+    println!("  {} {}", style("✅").bold(), style("Build completed successfully!").green().bold());
+    println!("{}", style("━".repeat(60)).green());
     println!();
-    println!("  Image ID:    {}", output.image_id.cyan());
-    println!("  Name:        {}:{}", image_name.green(), image_tag.cyan());
-    println!("  Rootfs:      {}", output.rootfs_path.display().to_string().yellow());
-    println!("  Layers:      {} ({} cached)", output.stats.layer_count, output.stats.cached_layers);
-    println!("  Total size:  {:.1} MB", output.stats.total_size as f64 / 1024.0 / 1024.0);
-    println!("  Duration:    {}", duration_str.yellow());
+    println!("  {}  {}", style("📦").bold(), style("Image Details").bold());
+    println!("  {} ID:       {}", style("│").dim(), style(&output.image_id).cyan().bold());
+    println!(
+        "  {} Name:     {}:{}",
+        style("│").dim(),
+        style(&image_name).green(),
+        style(&image_tag).cyan()
+    );
+    println!(
+        "  {} Size:     {} MB",
+        style("│").dim(),
+        style(format!("{:.1}", size_mb)).yellow()
+    );
+    println!();
+    println!("  {}  {}", style("⏱️").bold(), style("Performance").bold());
+    println!("  {} Duration: {}", style("│").dim(), style(&duration_str).yellow());
+    println!(
+        "  {} Layers:   {} total, {} cached",
+        style("│").dim(),
+        output.stats.layer_count,
+        output.stats.cached_layers
+    );
 
     if output.stats.cached_layers > 0 {
         let cache_pct =
             (output.stats.cached_layers as f64 / output.stats.layer_count as f64) * 100.0;
-        println!("  Cache hit:   {:.0}%", cache_pct);
+        println!(
+            "  {} Cache:    {:.0}% hit rate",
+            style("│").dim(),
+            style(format!("{:.0}%", cache_pct)).green()
+        );
     }
 
     println!();
-    println!("{} Registering image", "»".bold().blue());
 
-    // Move rootfs to permanent location
-    let images_dir = if cfg!(target_os = "linux") {
-        PathBuf::from("/var/lib/hypr/images")
-    } else {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(format!("{}/.hypr/images", home))
-    };
+    // Registering image with spinner
+    let spinner = create_spinner("Registering image...");
+
+    // Move rootfs to permanent location (uses centralized paths)
+    let images_dir = hypr_core::paths::images_dir();
     let image_dir = images_dir.join(&output.image_id);
 
     // Create image directory
@@ -167,15 +217,10 @@ pub async fn build(
         )
     })?;
 
-    println!("  Moved rootfs to {}", permanent_rootfs.display().to_string().yellow());
+    // Rootfs moved silently - spinner will show success
 
-    // Register image in database
-    let state_db_path = if cfg!(target_os = "linux") {
-        PathBuf::from("/var/lib/hypr/hypr.db")
-    } else {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(format!("{}/.hypr/hypr.db", home))
-    };
+    // Register image in database (uses centralized paths)
+    let state_db_path = hypr_core::paths::db_path();
     let state = StateManager::new(state_db_path.to_str().unwrap())
         .await
         .with_context(|| "Failed to connect to state database")?;
@@ -227,12 +272,29 @@ pub async fn build(
 
     state.insert_image(&image).await.with_context(|| "Failed to register image in database")?;
 
-    println!("  Registered image: {}:{}", image_name.green(), image_tag.cyan());
+    spinner.finish_with_message(format!("{} Image registered", style("✓").green()));
+
+    // Final success message
     println!();
-    println!("{}", "✓ Image ready to use!".green().bold());
-    println!("  Run with: {}", format!("hypr run {}:{}", image_name, image_tag).cyan());
+    println!(
+        "  {} Run with: {}",
+        style("➜").cyan().bold(),
+        style(format!("hypr run {}:{}", image_name, image_tag)).cyan()
+    );
+    println!();
 
     Ok(())
+}
+
+/// Create a premium spinner with consistent styling.
+fn create_spinner(message: &str) -> ProgressBar {
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::with_template("  {spinner:.cyan} {msg}").unwrap().tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
+    );
+    spinner.set_message(message.to_string());
+    spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+    spinner
 }
 
 /// Parses an image tag into (name, tag) components.

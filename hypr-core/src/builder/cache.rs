@@ -10,9 +10,6 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 
-/// Default cache directory: `~/.hypr/cache/layers/`
-const DEFAULT_CACHE_DIR: &str = ".hypr/cache/layers";
-
 /// Default cache size limit: 50GB
 const DEFAULT_CACHE_SIZE_LIMIT: u64 = 50 * 1024 * 1024 * 1024; // 50GB in bytes
 
@@ -75,7 +72,7 @@ pub enum CacheError {
 impl CacheManager {
     /// Creates a new cache manager with default settings.
     ///
-    /// Cache directory: `~/.hypr/cache/layers/`
+    /// Cache directory: `<data_dir>/cache/layers/` (see `crate::paths`)
     /// Size limit: 50GB
     pub fn new() -> Result<Self, CacheError> {
         let cache_dir = Self::default_cache_dir()?;
@@ -330,11 +327,7 @@ impl CacheManager {
 
     /// Returns the default cache directory.
     fn default_cache_dir() -> Result<PathBuf, CacheError> {
-        let home = dirs::home_dir().ok_or_else(|| {
-            CacheError::CacheDirectoryError("Could not determine home directory".into())
-        })?;
-
-        Ok(home.join(DEFAULT_CACHE_DIR))
+        Ok(crate::paths::cache_dir().join("layers"))
     }
 
     /// Returns the current Unix timestamp.

@@ -49,7 +49,7 @@ impl NetworkManager {
     ///
     /// ## Port Forwarding
     /// - **Linux**: Attempts eBPF (10+ Gbps), falls back to userspace proxy (1 Gbps) if:
-    ///   - eBPF programs not found at /usr/local/lib/hypr/
+    ///   - eBPF programs not found at <data_dir>/ (see hypr_core::paths)
     ///   - Missing CAP_BPF capability or root privileges
     ///   - Network bridge interface (vbr0) not found
     /// - **macOS/Other**: Uses userspace proxy (1 Gbps, no special permissions)
@@ -189,15 +189,17 @@ impl NetworkManager {
 fn try_ebpf_forwarder() -> Result<EbpfForwarder> {
     // Paths to compiled eBPF programs
     // TODO: Make these configurable or embed in binary
-    let ingress = PathBuf::from("/usr/local/lib/hypr/drift_l4_ingress.o");
-    let egress = PathBuf::from("/usr/local/lib/hypr/drift_l4_egress.o");
+    let ebpf_dir = hypr_core::paths::ebpf_dir();
+    let ingress = ebpf_dir.join("drift_l4_ingress.o");
+    let egress = ebpf_dir.join("drift_l4_egress.o");
 
     // Check if eBPF programs exist
     if !ingress.exists() {
         return Err(hypr_core::error::HyprError::InvalidConfig {
             reason: format!(
-                "eBPF ingress program not found at {}. Run 'make' in hypr-core/ebpf/ and install to /usr/local/lib/hypr/",
-                ingress.display()
+                "eBPF ingress program not found at {}. Run 'make' in hypr-core/ebpf/ and install to {}",
+                ingress.display(),
+                ebpf_dir.display()
             ),
         });
     }
@@ -205,8 +207,9 @@ fn try_ebpf_forwarder() -> Result<EbpfForwarder> {
     if !egress.exists() {
         return Err(hypr_core::error::HyprError::InvalidConfig {
             reason: format!(
-                "eBPF egress program not found at {}. Run 'make' in hypr-core/ebpf/ and install to /usr/local/lib/hypr/",
-                egress.display()
+                "eBPF egress program not found at {}. Run 'make' in hypr-core/ebpf/ and install to {}",
+                egress.display(),
+                ebpf_dir.display()
             ),
         });
     }
@@ -276,8 +279,7 @@ mod tests {
         let vm_ip = mgr.allocate_ip(&vm_name).await.unwrap();
 
         // Add port forward
-        let result =
-            mgr.add_port_forward(18082, vm_ip, 80, Protocol::Tcp, vm_name.clone()).await;
+        let result = mgr.add_port_forward(18082, vm_ip, 80, Protocol::Tcp, vm_name.clone()).await;
         assert!(result.is_ok());
 
         // Remove port forward
@@ -325,13 +327,9 @@ mod tests {
         let vm_ip = mgr.allocate_ip(&vm_name).await.unwrap();
 
         // Add multiple port forwards
-        mgr.add_port_forward(18083, vm_ip, 80, Protocol::Tcp, vm_name.clone())
-            .await
-            .unwrap();
+        mgr.add_port_forward(18083, vm_ip, 80, Protocol::Tcp, vm_name.clone()).await.unwrap();
 
-        mgr.add_port_forward(18084, vm_ip, 443, Protocol::Tcp, vm_name.clone())
-            .await
-            .unwrap();
+        mgr.add_port_forward(18084, vm_ip, 443, Protocol::Tcp, vm_name.clone()).await.unwrap();
 
         // Remove all for VM
         mgr.remove_vm_port_forwards(&vm_name).await.unwrap();

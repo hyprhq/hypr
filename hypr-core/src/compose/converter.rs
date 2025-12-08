@@ -4,6 +4,8 @@
 //! handling service-to-VM mapping, dependency ordering, and resource allocation.
 
 use super::types::*;
+use crate::builder::parser::parse_dockerfile;
+use crate::builder::{create_builder, BuildContext, BuildGraph, CacheManager};
 use crate::error::{HyprError, Result};
 use crate::types::{
     DiskConfig, DiskFormat, NetworkConfig, NetworkStackConfig, PortMapping, Protocol,
@@ -18,6 +20,7 @@ pub struct ComposeConverter;
 
 impl ComposeConverter {
     /// Convert a compose file to a stack configuration.
+    /// This synchronous version does not build images - use `convert_async` for full build support.
     #[instrument(skip(compose), fields(stack_name = %stack_name.as_ref().unwrap_or(&"default".to_string())))]
     pub fn convert(compose: ComposeFile, stack_name: Option<String>) -> Result<StackConfig> {
         info!("Converting compose file to stack config");
@@ -25,7 +28,7 @@ impl ComposeConverter {
         let name = stack_name.unwrap_or_else(|| "default".to_string());
 
         // Convert services to VM configs
-        let services = Self::convert_services(&compose.services)?;
+        let services = Self::convert_services(&compose.services, &HashMap::new())?;
 
         // Convert volumes
         let volumes = Self::convert_volumes(&compose.volumes, &compose.services);
@@ -42,13 +45,427 @@ impl ComposeConverter {
         Ok(StackConfig { name, services, volumes, network })
     }
 
+    /// Convert a compose file to a stack configuration, building images as needed.
+    ///
+    /// This async version will build any services that have a `build` configuration
+    /// before converting them to VM configs.
+    #[instrument(skip(compose, compose_dir), fields(stack_name = %stack_name.as_ref().unwrap_or(&"default".to_string())))]
+    pub async fn convert_async(
+        compose: ComposeFile,
+        stack_name: Option<String>,
+        compose_dir: PathBuf,
+    ) -> Result<StackConfig> {
+        info!("Converting compose file to stack config (async with build support)");
+
+        let name = stack_name.unwrap_or_else(|| "default".to_string());
+
+        // Build images for services with build config
+        let built_images = Self::build_service_images(&compose.services, &compose_dir).await?;
+
+        // Convert services to VM configs, using built images where available
+        let services = Self::convert_services(&compose.services, &built_images)?;
+
+        // Convert volumes
+        let volumes = Self::convert_volumes(&compose.volumes, &compose.services);
+
+        // Create network config
+        let network = NetworkStackConfig {
+            name: format!("{}_network", name),
+            subnet: "100.64.0.0/10".to_string(),
+        };
+
+        // Validate dependency graph (no cycles)
+        Self::validate_dependencies(&services)?;
+
+        Ok(StackConfig { name, services, volumes, network })
+    }
+
+    /// Build images for services that have build configurations.
+    /// Returns a map of service name -> built image path.
+    ///
+    /// Supports parallel builds for services without dependencies on each other.
+    #[instrument(skip(services, compose_dir))]
+    async fn build_service_images(
+        services: &HashMap<String, Service>,
+        compose_dir: &PathBuf,
+    ) -> Result<HashMap<String, PathBuf>> {
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        // Collect services that need building
+        let mut build_tasks: Vec<(String, BuildSpec, Vec<String>)> = Vec::new();
+
+        for (name, service) in services {
+            if let Some(build_spec) = &service.build {
+                // Get depends_on for ordering (services that must be built first)
+                let deps: Vec<String> = service
+                    .depends_on
+                    .iter()
+                    .filter(|dep| services.get(*dep).map(|s| s.build.is_some()).unwrap_or(false))
+                    .cloned()
+                    .collect();
+                build_tasks.push((name.clone(), build_spec.clone(), deps));
+            }
+        }
+
+        if build_tasks.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        // Sort by dependencies (simple topological sort)
+        let mut ordered_tasks = Vec::new();
+        let mut completed: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        while ordered_tasks.len() < build_tasks.len() {
+            let mut progress = false;
+            for (name, spec, deps) in &build_tasks {
+                if completed.contains(name) {
+                    continue;
+                }
+                if deps.iter().all(|d| completed.contains(d)) {
+                    ordered_tasks.push((name.clone(), spec.clone()));
+                    completed.insert(name.clone());
+                    progress = true;
+                }
+            }
+            if !progress {
+                // Circular dependency or missing dependency - just add remaining
+                for (name, spec, _) in &build_tasks {
+                    if !completed.contains(name) {
+                        ordered_tasks.push((name.clone(), spec.clone()));
+                        completed.insert(name.clone());
+                    }
+                }
+                break;
+            }
+        }
+
+        // Find batches that can run in parallel (services with same dependency depth)
+        // For now, keep it simple: build sequentially but with parallel potential
+        let built_images = Arc::new(Mutex::new(HashMap::new()));
+
+        // Group tasks by dependency depth for potential parallel execution
+        let mut batches: Vec<Vec<(String, BuildSpec)>> = Vec::new();
+        let mut batch_completed: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
+        for (name, spec) in ordered_tasks {
+            // Check if this can be in the current batch (all deps in batch_completed)
+            let deps: Vec<String> = build_tasks
+                .iter()
+                .find(|(n, _, _)| n == &name)
+                .map(|(_, _, d)| d.clone())
+                .unwrap_or_default();
+
+            let can_be_parallel = deps.iter().all(|d| batch_completed.contains(d));
+
+            if batches.is_empty() || !can_be_parallel {
+                // Start new batch
+                for task in batches.last().unwrap_or(&vec![]) {
+                    batch_completed.insert(task.0.clone());
+                }
+                batches.push(vec![(name, spec)]);
+            } else {
+                // Add to current batch (can run in parallel)
+                batches.last_mut().unwrap().push((name, spec));
+            }
+        }
+
+        // Execute batches
+        for batch in batches {
+            if batch.len() == 1 {
+                // Single task - run directly
+                let (name, spec) = &batch[0];
+                let (context_path, dockerfile, build_args, target, cache_from) =
+                    Self::extract_build_config(spec, compose_dir);
+
+                info!("Building image for service: {}", name);
+                let image_path = Self::build_image(
+                    name,
+                    &context_path,
+                    &dockerfile,
+                    build_args,
+                    target,
+                    cache_from,
+                )
+                .await?;
+
+                built_images.lock().await.insert(name.clone(), image_path);
+            } else {
+                // Multiple tasks - run in parallel
+                info!(
+                    "Building {} services in parallel: {:?}",
+                    batch.len(),
+                    batch.iter().map(|(n, _)| n).collect::<Vec<_>>()
+                );
+
+                let mut handles = Vec::new();
+                for (name, spec) in batch {
+                    let name = name.clone();
+                    let compose_dir = compose_dir.clone();
+                    let built_images = Arc::clone(&built_images);
+                    let (context_path, dockerfile, build_args, target, cache_from) =
+                        Self::extract_build_config(&spec, &compose_dir);
+
+                    let handle = tokio::spawn(async move {
+                        let result = Self::build_image(
+                            &name,
+                            &context_path,
+                            &dockerfile,
+                            build_args,
+                            target,
+                            cache_from,
+                        )
+                        .await;
+
+                        match result {
+                            Ok(path) => {
+                                built_images.lock().await.insert(name.clone(), path);
+                                Ok(())
+                            }
+                            Err(e) => Err(e),
+                        }
+                    });
+                    handles.push(handle);
+                }
+
+                // Wait for all parallel builds
+                for handle in handles {
+                    handle.await.map_err(|e| HyprError::BuildFailed {
+                        reason: format!("Parallel build task failed: {}", e),
+                    })??;
+                }
+            }
+        }
+
+        Ok(Arc::try_unwrap(built_images).unwrap().into_inner())
+    }
+
+    /// Extract build configuration from BuildSpec.
+    fn extract_build_config(
+        spec: &BuildSpec,
+        compose_dir: &PathBuf,
+    ) -> (PathBuf, String, HashMap<String, String>, Option<String>, Vec<String>) {
+        match spec {
+            BuildSpec::Path(path) => {
+                let context = compose_dir.join(path);
+                (context, "Dockerfile".to_string(), HashMap::new(), None, Vec::new())
+            }
+            BuildSpec::Full(config) => {
+                let context = compose_dir.join(&config.context);
+                (
+                    context,
+                    config.dockerfile.clone(),
+                    config.args.to_map(),
+                    config.target.clone(),
+                    config.cache_from.clone(),
+                )
+            }
+        }
+    }
+
+    /// Build a single image using the hypr build system.
+    #[instrument(skip(build_args, cache_from))]
+    async fn build_image(
+        service_name: &str,
+        context_path: &PathBuf,
+        dockerfile: &str,
+        build_args: HashMap<String, String>,
+        target: Option<String>,
+        cache_from: Vec<String>,
+    ) -> Result<PathBuf> {
+        info!("Building image for service {} from {:?}", service_name, context_path);
+
+        // Read the Dockerfile
+        let dockerfile_path = context_path.join(dockerfile);
+        let dockerfile_content =
+            std::fs::read_to_string(&dockerfile_path).map_err(|e| HyprError::FileReadError {
+                path: dockerfile_path.to_string_lossy().to_string(),
+                source: e,
+            })?;
+
+        // Parse the Dockerfile
+        let parsed_dockerfile = parse_dockerfile(&dockerfile_content).map_err(|e| {
+            HyprError::InvalidDockerfile { path: dockerfile_path.clone(), reason: e.to_string() }
+        })?;
+
+        // Build the graph
+        let graph = BuildGraph::from_dockerfile(&parsed_dockerfile).map_err(|e| {
+            HyprError::BuildFailed { reason: format!("Failed to construct build graph: {}", e) }
+        })?;
+
+        // Create build context
+        let context = BuildContext {
+            context_path: context_path.clone(),
+            dockerfile_path: PathBuf::from(dockerfile),
+            build_args,
+            target,
+            no_cache: false,
+        };
+
+        // Initialize cache manager
+        let mut cache = CacheManager::new().map_err(|e| HyprError::BuildFailed {
+            reason: format!("Failed to initialize cache: {}", e),
+        })?;
+
+        // Handle cache_from: import layers from specified images as cache sources
+        if !cache_from.is_empty() {
+            info!("Processing cache_from sources: {:?}", cache_from);
+            for cache_image in &cache_from {
+                match Self::import_cache_from_image(&mut cache, cache_image).await {
+                    Ok(layers) => {
+                        info!("Imported {} cached layers from {}", layers, cache_image);
+                    }
+                    Err(e) => {
+                        // cache_from failures are non-fatal - just log and continue
+                        warn!("Failed to import cache from {}: {}", cache_image, e);
+                    }
+                }
+            }
+        }
+
+        // Create and run the builder
+        let mut builder = create_builder().map_err(|e| HyprError::BuildFailed {
+            reason: format!("Failed to create builder: {}", e),
+        })?;
+
+        let output = builder
+            .execute(&graph, &context, &mut cache)
+            .await
+            .map_err(|e| HyprError::BuildFailed { reason: format!("Build failed: {}", e) })?;
+
+        // Move the rootfs to the images directory (similar to CLI)
+        let images_dir = crate::paths::images_dir();
+        let image_dir = images_dir.join(&output.image_id);
+
+        std::fs::create_dir_all(&image_dir)
+            .map_err(|e| HyprError::IoError { path: image_dir.clone(), source: e })?;
+
+        let permanent_rootfs = image_dir.join("rootfs.squashfs");
+
+        std::fs::rename(&output.rootfs_path, &permanent_rootfs)
+            .map_err(|e| HyprError::IoError { path: permanent_rootfs.clone(), source: e })?;
+
+        info!("Built image {} for service {}", output.image_id, service_name);
+
+        // Return the path to the squashfs image
+        Ok(permanent_rootfs)
+    }
+
+    /// Import layers from a cache_from image into the cache manager.
+    /// This allows reusing layers from previously built images.
+    ///
+    /// Returns the number of layers imported.
+    #[instrument(skip(cache))]
+    async fn import_cache_from_image(cache: &mut CacheManager, image_ref: &str) -> Result<usize> {
+        use crate::builder::oci::OciClient;
+
+        info!("Attempting to import cache from image: {}", image_ref);
+
+        // Check if it's a local image first (in our images directory)
+        let images_dir = crate::paths::images_dir();
+
+        // Try to find a local image with this name
+        // Format could be "name:tag" or just "name" (defaults to latest)
+        let name = if image_ref.contains(':') {
+            image_ref.splitn(2, ':').next().unwrap_or(image_ref)
+        } else {
+            image_ref
+        };
+
+        // Look for the image in the local images directory
+        // First check if there's a directory matching the image name
+        let local_image_dir = images_dir.join(name);
+        if local_image_dir.exists() {
+            // Found local image - import its layers into cache
+            let layers_imported = Self::import_local_image_cache(cache, &local_image_dir)?;
+            return Ok(layers_imported);
+        }
+
+        // Try to pull the image and extract layers
+        // Create a temporary directory for the pulled image
+        let temp_dir =
+            std::env::temp_dir().join(format!("hypr-cache-from-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir)
+            .map_err(|e| HyprError::IoError { path: temp_dir.clone(), source: e })?;
+
+        // Pull the image
+        let mut oci_client = OciClient::new().map_err(|e| HyprError::BuildFailed {
+            reason: format!("Failed to create OCI client: {}", e),
+        })?;
+
+        match oci_client.pull_image(image_ref, &temp_dir).await {
+            Ok(_) => {
+                let layers_imported = Self::import_local_image_cache(cache, &temp_dir)?;
+                // Clean up temp directory
+                let _ = std::fs::remove_dir_all(&temp_dir);
+                Ok(layers_imported)
+            }
+            Err(e) => {
+                // Clean up temp directory
+                let _ = std::fs::remove_dir_all(&temp_dir);
+                Err(HyprError::BuildFailed {
+                    reason: format!("Failed to pull cache_from image {}: {}", image_ref, e),
+                })
+            }
+        }
+    }
+
+    /// Import layers from a local image directory into the cache.
+    fn import_local_image_cache(cache: &mut CacheManager, image_dir: &PathBuf) -> Result<usize> {
+        let mut layers_imported = 0;
+
+        // Look for layer files in the image directory
+        // Typically these would be .tar files or a layers/ subdirectory
+        let layers_dir = image_dir.join("layers");
+
+        if layers_dir.exists() {
+            for entry in std::fs::read_dir(&layers_dir)
+                .map_err(|e| HyprError::IoError { path: layers_dir.clone(), source: e })?
+            {
+                let entry = entry
+                    .map_err(|e| HyprError::IoError { path: layers_dir.clone(), source: e })?;
+                let path = entry.path();
+
+                if path.extension().and_then(|s| s.to_str()) == Some("tar") {
+                    // Generate a cache key from the layer filename
+                    let cache_key = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+
+                    // Read the layer data
+                    match std::fs::read(&path) {
+                        Ok(data) => {
+                            let description =
+                                format!("Imported from cache_from: {}", path.display());
+                            if cache.insert(cache_key, &data, description, 0).is_ok() {
+                                layers_imported += 1;
+                            }
+                        }
+                        Err(_) => continue, // Skip unreadable layers
+                    }
+                }
+            }
+        }
+
+        // Also check for a manifest that might list layer digests
+        let manifest_path = image_dir.join("manifest.json");
+        if manifest_path.exists() {
+            // Could parse manifest and import layers based on digests
+            // For now, this is handled by the layers directory approach above
+        }
+
+        Ok(layers_imported)
+    }
+
     /// Convert compose services to service configurations.
-    #[instrument(skip(services))]
-    fn convert_services(services: &HashMap<String, Service>) -> Result<Vec<ServiceConfig>> {
+    #[instrument(skip(services, built_images))]
+    fn convert_services(
+        services: &HashMap<String, Service>,
+        built_images: &HashMap<String, PathBuf>,
+    ) -> Result<Vec<ServiceConfig>> {
         let mut configs = Vec::new();
 
         for (name, service) in services {
-            let vm_config = Self::service_to_vm_config(name, service)?;
+            let vm_config = Self::service_to_vm_config(name, service, built_images.get(name))?;
 
             let config = ServiceConfig {
                 name: name.clone(),
@@ -64,8 +481,12 @@ impl ComposeConverter {
     }
 
     /// Convert a single service to a VM configuration.
-    #[instrument(skip(service), fields(name = %name))]
-    fn service_to_vm_config(name: &str, service: &Service) -> Result<VmConfig> {
+    #[instrument(skip(service, built_image_path), fields(name = %name))]
+    fn service_to_vm_config(
+        name: &str,
+        service: &Service,
+        built_image_path: Option<&PathBuf>,
+    ) -> Result<VmConfig> {
         info!("Converting service to VM config");
 
         // Parse resources
@@ -78,11 +499,20 @@ impl ComposeConverter {
         let env = service.environment.to_map();
 
         // Create disk config for rootfs
-        let rootfs = DiskConfig {
-            path: PathBuf::from(format!("/var/lib/hypr/images/{}/rootfs.squashfs", service.image)),
-            readonly: true,
-            format: DiskFormat::Squashfs,
+        // Use built image path if available, otherwise use pre-built image
+        let rootfs_path = if let Some(built_path) = built_image_path {
+            // Use the built image
+            built_path.clone()
+        } else if !service.image.is_empty() {
+            // Use a pre-built image from the images directory
+            crate::paths::images_dir().join(&service.image).join("rootfs.squashfs")
+        } else {
+            return Err(HyprError::ComposeParseError {
+                reason: format!("Service '{}' has no image and was not built", name),
+            });
         };
+
+        let rootfs = DiskConfig { path: rootfs_path, readonly: true, format: DiskFormat::Squashfs };
 
         // Parse volume mounts (as disks for now)
         let mut disks = vec![rootfs];

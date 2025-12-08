@@ -5,12 +5,11 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
 use hypr_core::state::StateManager;
-use std::path::PathBuf;
 use tabled::{Table, Tabled};
 
 /// Lists all images in the HYPR image registry.
 pub async fn images() -> Result<()> {
-    let state_db_path = PathBuf::from("/var/lib/hypr/hypr.db");
+    let state_db_path = hypr_core::paths::db_path();
     let state = StateManager::new(state_db_path.to_str().unwrap())
         .await
         .with_context(|| "Failed to connect to state database")?;

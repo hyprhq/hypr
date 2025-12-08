@@ -213,8 +213,7 @@ mod tests {
             dns: vec!["8.8.8.8".to_string()],
         };
 
-        let manifest = RuntimeManifest::new(vec!["/usr/bin/bun".to_string()])
-            .with_network(network);
+        let manifest = RuntimeManifest::new(vec!["/usr/bin/bun".to_string()]).with_network(network);
 
         let json = serde_json::to_string(&manifest).unwrap();
         let deserialized: RuntimeManifest = serde_json::from_str(&json).unwrap();

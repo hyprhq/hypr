@@ -49,7 +49,7 @@ impl CloudHypervisorAdapter {
         let binary_path = Self::find_binary("cloud-hypervisor")?;
         let virtiofsd_binary = Self::find_binary("virtiofsd")?;
         let runtime_dir = PathBuf::from("/run/hypr/ch");
-        let kernel_path = PathBuf::from("/usr/lib/hypr/vmlinux");
+        let kernel_path = crate::paths::kernel_path();
 
         Ok(Self {
             binary_path,
@@ -77,6 +77,19 @@ impl CloudHypervisorAdapter {
         }
 
         Err(HyprError::HypervisorNotFound { hypervisor: name.to_string() })
+    }
+
+    /// Get the log file path for a VM.
+    ///
+    /// Uses centralized paths module for consistency.
+    fn get_vm_log_path(vm_id: &str) -> Result<PathBuf> {
+        let log_dir = crate::paths::logs_dir();
+
+        // Create log directory if it doesn't exist
+        std::fs::create_dir_all(&log_dir)
+            .map_err(|e| HyprError::IoError { path: log_dir.clone(), source: e })?;
+
+        Ok(log_dir.join(format!("{}.log", vm_id)))
     }
 
     /// Start virtiofsd daemons for virtio-fs mounts.
@@ -184,6 +197,7 @@ impl CloudHypervisorAdapter {
         &self,
         config: &VmConfig,
         virtiofsd_daemons: &[VirtiofsdDaemon],
+        log_path: Option<&std::path::Path>,
     ) -> Result<Vec<String>> {
         let mut args = Vec::new();
 
@@ -205,10 +219,27 @@ impl CloudHypervisorAdapter {
         args.push("--kernel".to_string());
         args.push(kernel.to_string_lossy().to_string());
 
-        // Kernel cmdline
-        if !config.kernel_args.is_empty() {
+        // Kernel cmdline - build with network parameters if IP is assigned
+        let mut kernel_cmdline_parts: Vec<String> = config.kernel_args.clone();
+
+        // Enable serial console output (cloud-hypervisor uses legacy serial which maps to ttyS0)
+        kernel_cmdline_parts.push("console=ttyS0".to_string());
+
+        // Inject network configuration into kernel cmdline for runtime VMs
+        if config.network_enabled {
+            if let Some(ip) = &config.network.ip_address {
+                kernel_cmdline_parts.push(format!("ip={}", ip));
+                // Linux uses 100.64.0.0/10 subnet (CGNAT range)
+                kernel_cmdline_parts.push("netmask=255.192.0.0".to_string());
+                kernel_cmdline_parts.push("gateway=100.64.0.1".to_string());
+                kernel_cmdline_parts.push("mode=runtime".to_string());
+                debug!("Injected network config: ip={} netmask=255.192.0.0 gateway=100.64.0.1", ip);
+            }
+        }
+
+        if !kernel_cmdline_parts.is_empty() {
             args.push("--cmdline".to_string());
-            args.push(config.kernel_args.join(" "));
+            args.push(kernel_cmdline_parts.join(" "));
         }
 
         // Initramfs (for minimal boot environments like builder VMs)
@@ -255,9 +286,13 @@ impl CloudHypervisorAdapter {
             ));
         }
 
-        // Serial console (build VM stdout/stderr visible on host)
+        // Serial console - redirect to log file if provided, otherwise tty
         args.push("--serial".to_string());
-        args.push("tty".to_string());
+        if let Some(path) = log_path {
+            args.push(format!("file={}", path.display()));
+        } else {
+            args.push("tty".to_string());
+        }
 
         // Console mode
         args.push("--console".to_string());
@@ -326,8 +361,8 @@ impl VmmAdapter for CloudHypervisorAdapter {
             Vec::new()
         };
 
-        // Build arguments with virtiofsd socket paths
-        let args = self.build_args(config, &virtiofsd_daemons)?;
+        // Build arguments with virtiofsd socket paths (no log file for command spec)
+        let args = self.build_args(config, &virtiofsd_daemons, None)?;
 
         Ok(CommandSpec {
             program: self.binary_path.to_string_lossy().to_string(),
@@ -362,16 +397,28 @@ impl VmmAdapter for CloudHypervisorAdapter {
             Vec::new()
         };
 
-        // Build arguments (using virtiofsd daemon socket paths)
+        // Create log file path for VM output
+        let log_path = Self::get_vm_log_path(&config.id)?;
+
+        // Build arguments (using virtiofsd daemon socket paths and log path for serial)
         let args = {
             let _span = span!(Level::DEBUG, "build_ch_args").entered();
-            self.build_args(config, &virtiofsd_daemons)?
+            self.build_args(config, &virtiofsd_daemons, Some(&log_path))?
         };
+        let log_file = std::fs::File::create(&log_path)
+            .map_err(|e| HyprError::IoError { path: log_path.clone(), source: e })?;
+        let log_file_err = log_file
+            .try_clone()
+            .map_err(|e| HyprError::IoError { path: log_path.clone(), source: e })?;
 
-        // Spawn cloud-hypervisor process
+        info!("VM logs will be written to: {}", log_path.display());
+
+        // Spawn cloud-hypervisor process with stdout/stderr redirected to log file
         let start = Instant::now();
         let child = Command::new(&self.binary_path)
             .args(&args)
+            .stdout(std::process::Stdio::from(log_file))
+            .stderr(std::process::Stdio::from(log_file_err))
             .spawn()
             .map_err(|e| {
                 // Clean up virtiofsd daemons on failure

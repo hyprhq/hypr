@@ -253,10 +253,10 @@ impl VmBuilder {
         use crate::types::vm::VmResources;
 
         let config = VmConfig {
-            network_enabled: false, // CRITICAL: No network for hermetic builds
+            network_enabled: true, // Enable network for package downloads (bun install, etc.)
             id: vm_id.clone(),
             name: vm_id.clone(),
-            resources: VmResources { cpus: 2, memory_mb: 1024 },
+            resources: VmResources { cpus: 4, memory_mb: 4096 }, // More memory for npm/bun/turbopack
             kernel_path: Some(self.kernel_path.clone()),
             kernel_args: vec![
                 "init=/init".to_string(),
@@ -280,9 +280,16 @@ impl VmBuilder {
         })?;
 
         // Create log file for VM stdout/stderr
-        let log_path = PathBuf::from(format!("/tmp/hypr-vm-{}.log", vm_id));
+        // Use centralized paths so streaming can find the log
+        let log_path = crate::paths::vm_log_path(&vm_id);
+        // Ensure logs directory exists
+        if let Some(parent) = log_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| HyprError::BuildFailed {
+                reason: format!("Failed to create logs directory: {}", e),
+            })?;
+        }
         let log_file = std::fs::File::create(&log_path).map_err(|e| HyprError::BuildFailed {
-            reason: format!("Failed to create log file: {}", e),
+            reason: format!("Failed to create log file at {}: {}", log_path.display(), e),
         })?;
 
         // Spawn VM process with stdout/stderr redirected to log file
@@ -381,7 +388,8 @@ impl VmBuilder {
         let (vm, mut child) = self.spawn_builder_vm(context_dir, output_dir, base_rootfs).await?;
 
         // Stream logs in real-time WHILE VM runs
-        let log_path = PathBuf::from(format!("/tmp/hypr-vm-{}.log", vm.id));
+        // Use the virtio-serial log path where kestrel writes its output
+        let log_path = crate::paths::vm_log_path(&vm.id);
 
         // Run streaming and VM concurrently
         let stream_task = tokio::spawn({
@@ -395,7 +403,8 @@ impl VmBuilder {
         // Wait for VM to finish OR handle Ctrl+C
         let _vm_result = tokio::select! {
             result = child.wait() => {
-                result.map_err(|e| HyprError::BuildFailed { reason: format!("VM wait failed: {}", e) })?
+                let status = result.map_err(|e| HyprError::BuildFailed { reason: format!("VM wait failed: {}", e) })?;
+                status
             }
             _ = tokio::signal::ctrl_c() => {
                 // User pressed Ctrl+C - kill the VM and clean up
@@ -415,9 +424,22 @@ impl VmBuilder {
         };
 
         // Wait for streaming to complete (should finish shortly after VM exits)
-        let _results = stream_task.await.map_err(|e| HyprError::BuildFailed {
+        let results = stream_task.await.map_err(|e| HyprError::BuildFailed {
             reason: format!("Stream task failed: {}", e),
         })??;
+
+        // Check if any build step failed (non-zero exit code)
+        for (idx, result) in results.iter().enumerate() {
+            if result.exit_code != 0 {
+                return Err(HyprError::BuildFailed {
+                    reason: format!(
+                        "Build step {} failed with exit code {}. Check the build output above for details.",
+                        idx + 1,
+                        result.exit_code
+                    ),
+                });
+            }
+        }
 
         // Check if layer tarball was created
         if !layer_path.exists() {

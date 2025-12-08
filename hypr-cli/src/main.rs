@@ -99,6 +99,20 @@ enum Commands {
     /// List images
     Images,
 
+    /// Stream logs from a VM
+    Logs {
+        /// VM ID or name
+        vm: String,
+
+        /// Follow log output (like tail -f)
+        #[arg(short, long)]
+        follow: bool,
+
+        /// Number of lines to show from end (default: all)
+        #[arg(short, long, default_value = "0")]
+        tail: u32,
+    },
+
     /// Check daemon health
     Health,
 
@@ -247,6 +261,10 @@ async fn main() -> Result<()> {
 
         Commands::Images => {
             commands::images().await?;
+        }
+
+        Commands::Logs { vm, follow, tail } => {
+            commands::logs(&vm, follow, tail).await?;
         }
 
         Commands::Health => {

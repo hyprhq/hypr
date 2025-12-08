@@ -85,7 +85,7 @@ pub struct VolumeConfig {
 /// Volume source type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum VolumeSource {
-    /// Named volume (stored in /var/lib/hypr/volumes/)
+    /// Named volume (stored in <data_dir>/volumes/)
     Named(String),
 
     /// Host path bind mount

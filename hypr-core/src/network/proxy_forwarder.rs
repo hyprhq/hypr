@@ -241,40 +241,48 @@ impl BpfPortMap for ProxyForwarder {
                     // Start TCP proxy in this task
                     let listen_addr = SocketAddr::from(([127, 0, 0, 1], host_port));
 
-                    if let Ok(listener) = TcpListener::bind(listen_addr).await {
-                        info!(
-                            "TCP proxy listening on localhost:{} -> {}:{}",
-                            host_port, vm_ip, vm_port
-                        );
+                    match TcpListener::bind(listen_addr).await {
+                        Ok(listener) => {
+                            info!(
+                                "TCP proxy listening on localhost:{} -> {}:{}",
+                                host_port, vm_ip, vm_port
+                            );
 
-                        loop {
-                            match listener.accept().await {
-                                Ok((client_stream, client_addr)) => {
-                                    debug!("TCP proxy: accepted connection from {}", client_addr);
+                            loop {
+                                match listener.accept().await {
+                                    Ok((client_stream, client_addr)) => {
+                                        debug!(
+                                            "TCP proxy: accepted connection from {}",
+                                            client_addr
+                                        );
 
-                                    // Connect to VM
-                                    let vm_addr = SocketAddr::from((vm_ip, vm_port));
-                                    match TcpStream::connect(vm_addr).await {
-                                        Ok(vm_stream) => {
-                                            // Spawn bidirectional relay
-                                            tokio::spawn(Self::relay_tcp_static(
-                                                client_stream,
-                                                vm_stream,
-                                            ));
-                                        }
-                                        Err(e) => {
-                                            warn!(
-                                                "TCP proxy: failed to connect to {}:{}: {}",
-                                                vm_ip, vm_port, e
-                                            );
+                                        // Connect to VM
+                                        let vm_addr = SocketAddr::from((vm_ip, vm_port));
+                                        match TcpStream::connect(vm_addr).await {
+                                            Ok(vm_stream) => {
+                                                // Spawn bidirectional relay
+                                                tokio::spawn(Self::relay_tcp_static(
+                                                    client_stream,
+                                                    vm_stream,
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                warn!(
+                                                    "TCP proxy: failed to connect to {}:{}: {}",
+                                                    vm_ip, vm_port, e
+                                                );
+                                            }
                                         }
                                     }
-                                }
-                                Err(e) => {
-                                    error!("TCP proxy: accept error: {}", e);
-                                    break;
+                                    Err(e) => {
+                                        error!("TCP proxy: accept error: {}", e);
+                                        break;
+                                    }
                                 }
                             }
+                        }
+                        Err(e) => {
+                            error!("TCP proxy: failed to bind localhost:{}: {} (try a port >= 1024 or run with sudo)", host_port, e);
                         }
                     }
                 }
@@ -282,31 +290,36 @@ impl BpfPortMap for ProxyForwarder {
                     // Start UDP proxy in this task
                     let listen_addr = SocketAddr::from(([127, 0, 0, 1], host_port));
 
-                    if let Ok(socket) = UdpSocket::bind(listen_addr).await {
-                        info!(
-                            "UDP proxy listening on localhost:{} -> {}:{}",
-                            host_port, vm_ip, vm_port
-                        );
+                    match UdpSocket::bind(listen_addr).await {
+                        Ok(socket) => {
+                            info!(
+                                "UDP proxy listening on localhost:{} -> {}:{}",
+                                host_port, vm_ip, vm_port
+                            );
 
-                        let mut buf = vec![0u8; 65536];
-                        loop {
-                            match socket.recv_from(&mut buf).await {
-                                Ok((n, _client_addr)) => {
-                                    debug!("UDP proxy: received {} bytes", n);
+                            let mut buf = vec![0u8; 65536];
+                            loop {
+                                match socket.recv_from(&mut buf).await {
+                                    Ok((n, _client_addr)) => {
+                                        debug!("UDP proxy: received {} bytes", n);
 
-                                    let vm_addr = SocketAddr::from((vm_ip, vm_port));
-                                    if let Err(e) = socket.send_to(&buf[..n], vm_addr).await {
-                                        warn!(
-                                            "UDP proxy: failed to forward to {}:{}: {}",
-                                            vm_ip, vm_port, e
-                                        );
+                                        let vm_addr = SocketAddr::from((vm_ip, vm_port));
+                                        if let Err(e) = socket.send_to(&buf[..n], vm_addr).await {
+                                            warn!(
+                                                "UDP proxy: failed to forward to {}:{}: {}",
+                                                vm_ip, vm_port, e
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("UDP proxy: recv error: {}", e);
+                                        break;
                                     }
                                 }
-                                Err(e) => {
-                                    error!("UDP proxy: recv error: {}", e);
-                                    break;
-                                }
                             }
+                        }
+                        Err(e) => {
+                            error!("UDP proxy: failed to bind localhost:{}: {} (try a port >= 1024 or run with sudo)", host_port, e);
                         }
                     }
                 }

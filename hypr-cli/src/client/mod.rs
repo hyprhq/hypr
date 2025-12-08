@@ -186,4 +186,22 @@ impl HyprClient {
 
         Ok(stack.try_into()?)
     }
+
+    /// Stream logs from a VM
+    pub async fn stream_logs(
+        &mut self,
+        vm_id: &str,
+        follow: bool,
+        tail: u32,
+    ) -> Result<tonic::Streaming<LogEntry>> {
+        let request = tonic::Request::new(StreamLogsRequest {
+            vm_id: vm_id.to_string(),
+            follow,
+            tail,
+            since: None,
+        });
+
+        let response = self.client.stream_logs(request).await?;
+        Ok(response.into_inner())
+    }
 }
