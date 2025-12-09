@@ -48,7 +48,8 @@ jobs:
             libncurses-dev \
             cpio \
             rsync \
-            bsdmainutils
+            bsdmainutils \
+            lz4
 
       - name: Download mainline kernel
         run: |
