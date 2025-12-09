@@ -94,20 +94,16 @@ pub fn ensure_kernel() -> std::io::Result<PathBuf> {
     tracing::info!("Downloading HYPR kernel from: {}", url);
 
     // Download kernel
-    let response = reqwest::blocking::get(url).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::Other, format!("Download failed: {}", e))
-    })?;
+    let response = reqwest::blocking::get(url)
+        .map_err(|e| std::io::Error::other(format!("Download failed: {}", e)))?;
 
     if !response.status().is_success() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Download failed: HTTP {}", response.status()),
-        ));
+        return Err(std::io::Error::other(format!("Download failed: HTTP {}", response.status())));
     }
 
-    let kernel_bytes = response.bytes().map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to read response: {}", e))
-    })?;
+    let kernel_bytes = response
+        .bytes()
+        .map_err(|e| std::io::Error::other(format!("Failed to read response: {}", e)))?;
 
     std::fs::write(&path, kernel_bytes)?;
 
@@ -143,7 +139,7 @@ pub fn runtime_dir() -> PathBuf {
     // Linux uses /run, macOS uses /tmp
     #[cfg(target_os = "linux")]
     {
-        return PathBuf::from("/run/hypr");
+        PathBuf::from("/run/hypr")
     }
 
     #[cfg(not(target_os = "linux"))]

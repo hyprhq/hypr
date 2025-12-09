@@ -41,9 +41,7 @@ pub fn init() -> Result<(), Box<dyn std::error::Error>> {
     if otlp_enabled() {
         let endpoint = otlp_endpoint();
 
-        let exporter = opentelemetry_otlp::new_exporter()
-            .tonic()
-            .with_endpoint(&endpoint);
+        let exporter = opentelemetry_otlp::new_exporter().tonic().with_endpoint(&endpoint);
 
         let tracer = opentelemetry_otlp::new_pipeline()
             .tracing()
@@ -64,7 +62,9 @@ pub fn init() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("Observability initialized with OTLP tracing (endpoint: {})", endpoint);
     } else {
         subscriber.init();
-        tracing::info!("Observability initialized (OTLP disabled - set HYPR_OTLP_ENABLED=1 to enable)");
+        tracing::info!(
+            "Observability initialized (OTLP disabled - set HYPR_OTLP_ENABLED=1 to enable)"
+        );
     }
 
     // Set up Prometheus metrics exporter

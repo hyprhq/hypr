@@ -64,8 +64,7 @@ fn extract_embedded_initramfs(arch: &str) -> BuildResult<PathBuf> {
     fs::create_dir_all(&runtime_dir)
         .map_err(|e| BuildError::IoError { path: runtime_dir.clone(), source: e })?;
 
-    let initramfs_path =
-        runtime_dir.join(format!("initramfs-{}.cpio", uuid::Uuid::new_v4()));
+    let initramfs_path = runtime_dir.join(format!("initramfs-{}.cpio", uuid::Uuid::new_v4()));
 
     {
         let mut f = File::create(&initramfs_path)
