@@ -69,16 +69,13 @@ jobs:
       - name: Configure kernel with minimal virtio config
         working-directory: kernel
         run: |
-          # Start with defconfig, then aggressively trim for size
-          # ARM64 cloud-hypervisor has ~32MB kernel size limit
+          # Start with defconfig for both architectures
+          # Then apply aggressive size reduction to stay under 32MB for ARM64 UEFI
           if [ "${{ matrix.arch }}" = "x86_64" ]; then
             make x86_64_defconfig
           else
-            # Use tinyconfig as base for ARM64 to minimize size
-            make tinyconfig
-            # Enable 64-bit
-            ./scripts/config --enable CONFIG_64BIT
-            ./scripts/config --enable CONFIG_ARM64
+            # Use defconfig (not tinyconfig - it's too minimal, missing BLOCK support)
+            make defconfig
           fi
 
           # Enable KVM guest support and PVH boot (required for cloud-hypervisor)
@@ -125,6 +122,94 @@ jobs:
           ./scripts/config --disable CONFIG_RFKILL
           ./scripts/config --disable CONFIG_INPUT_MOUSE
           ./scripts/config --disable CONFIG_INPUT_KEYBOARD
+
+          # === SIZE REDUCTION: Disable more unused subsystems ===
+          ./scripts/config --disable CONFIG_HWMON
+          ./scripts/config --disable CONFIG_THERMAL
+          ./scripts/config --disable CONFIG_PCMCIA
+          ./scripts/config --disable CONFIG_PCCARD
+          ./scripts/config --disable CONFIG_I2C
+          ./scripts/config --disable CONFIG_SPI
+          ./scripts/config --disable CONFIG_GPIO_SYSFS
+          ./scripts/config --disable CONFIG_WATCHDOG
+          ./scripts/config --disable CONFIG_MEDIA_SUPPORT
+          ./scripts/config --disable CONFIG_RC_CORE
+          ./scripts/config --disable CONFIG_CAN
+          ./scripts/config --disable CONFIG_PARPORT
+          ./scripts/config --disable CONFIG_NFC
+          ./scripts/config --disable CONFIG_GNSS
+
+          # === SIZE REDUCTION: Disable unused filesystems ===
+          ./scripts/config --disable CONFIG_XFS_FS
+          ./scripts/config --disable CONFIG_BTRFS_FS
+          ./scripts/config --disable CONFIG_F2FS_FS
+          ./scripts/config --disable CONFIG_JFS_FS
+          ./scripts/config --disable CONFIG_REISERFS_FS
+          ./scripts/config --disable CONFIG_GFS2_FS
+          ./scripts/config --disable CONFIG_OCFS2_FS
+          ./scripts/config --disable CONFIG_NILFS2_FS
+          ./scripts/config --disable CONFIG_NTFS_FS
+          ./scripts/config --disable CONFIG_NTFS3_FS
+          ./scripts/config --disable CONFIG_HFS_FS
+          ./scripts/config --disable CONFIG_HFSPLUS_FS
+          ./scripts/config --disable CONFIG_UDF_FS
+          ./scripts/config --disable CONFIG_ISO9660_FS
+          ./scripts/config --disable CONFIG_NFS_FS
+          ./scripts/config --disable CONFIG_NFSD
+          ./scripts/config --disable CONFIG_CIFS
+          ./scripts/config --disable CONFIG_CEPH_FS
+          ./scripts/config --disable CONFIG_EXFAT_FS
+          ./scripts/config --disable CONFIG_VFAT_FS
+          ./scripts/config --disable CONFIG_FAT_FS
+
+          # === SIZE REDUCTION: Disable unused networking ===
+          ./scripts/config --disable CONFIG_IPV6
+          ./scripts/config --disable CONFIG_NETFILTER_NETLINK_LOG
+          ./scripts/config --disable CONFIG_NF_CONNTRACK_FTP
+          ./scripts/config --disable CONFIG_NF_CONNTRACK_IRC
+          ./scripts/config --disable CONFIG_NF_CONNTRACK_TFTP
+          ./scripts/config --disable CONFIG_IP_SCTP
+          ./scripts/config --disable CONFIG_IP_DCCP
+          ./scripts/config --disable CONFIG_TIPC
+          ./scripts/config --disable CONFIG_ATM
+          ./scripts/config --disable CONFIG_L2TP
+          ./scripts/config --disable CONFIG_DECNET
+          ./scripts/config --disable CONFIG_LLC2
+          ./scripts/config --disable CONFIG_ATALK
+          ./scripts/config --disable CONFIG_X25
+          ./scripts/config --disable CONFIG_LAPB
+          ./scripts/config --disable CONFIG_PHONET
+          ./scripts/config --disable CONFIG_6LOWPAN
+          ./scripts/config --disable CONFIG_IEEE802154
+
+          # === SIZE REDUCTION: Disable unused block devices ===
+          ./scripts/config --disable CONFIG_BLK_DEV_FD
+          ./scripts/config --disable CONFIG_BLK_DEV_SR
+          ./scripts/config --disable CONFIG_BLK_DEV_MD
+          ./scripts/config --disable CONFIG_BLK_DEV_DM
+          ./scripts/config --disable CONFIG_BLK_DEV_NVME
+          ./scripts/config --disable CONFIG_BLK_DEV_RBD
+
+          # === SIZE REDUCTION: Disable crypto algorithms we don't need ===
+          ./scripts/config --disable CONFIG_CRYPTO_USER
+          ./scripts/config --disable CONFIG_CRYPTO_PCRYPT
+          ./scripts/config --disable CONFIG_CRYPTO_CRYPTD
+          ./scripts/config --disable CONFIG_CRYPTO_TEST
+
+          # === SIZE REDUCTION: Disable modules (build everything builtin) ===
+          ./scripts/config --disable CONFIG_MODULES
+
+          # === SIZE REDUCTION: Optimize for size ===
+          ./scripts/config --enable CONFIG_CC_OPTIMIZE_FOR_SIZE
+          ./scripts/config --enable CONFIG_SLUB_TINY
+
+          # === SIZE REDUCTION: Use LZ4 compression for kernel ===
+          ./scripts/config --enable CONFIG_KERNEL_LZ4
+          ./scripts/config --disable CONFIG_KERNEL_GZIP
+          ./scripts/config --disable CONFIG_KERNEL_XZ
+          ./scripts/config --disable CONFIG_KERNEL_LZMA
+          ./scripts/config --disable CONFIG_KERNEL_LZO
+          ./scripts/config --disable CONFIG_KERNEL_ZSTD
 
           # Display initial config info
           echo "Initial config:"
