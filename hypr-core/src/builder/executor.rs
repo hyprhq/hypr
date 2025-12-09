@@ -2264,7 +2264,7 @@ mod tests {
         // May fail in CI without root permissions to create /var/lib/hypr
         match builder {
             Ok(_) => {}
-            Err(BuildError::IoError { .. }) => {
+            Err(BuildError::Io(ref e)) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                 println!("Skipping: cannot create directories without root");
             }
             Err(BuildError::ContextError(msg)) if msg.contains("I/O error") => {
