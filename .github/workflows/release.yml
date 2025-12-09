@@ -57,7 +57,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config protobuf-compiler libelf-dev zlib1g-dev clang libbpf-dev linux-tools-common linux-tools-generic || true
+          sudo apt-get install -y pkg-config protobuf-compiler libelf-dev zlib1g-dev clang libbpf-dev libssl-dev linux-tools-common linux-tools-generic || true
           # Install bpftool from kernel tools (for vmlinux.h generation)
           # The package name varies by distro, try multiple
           sudo apt-get install -y bpftool 2>/dev/null || sudo apt-get install -y linux-tools-$(uname -r) 2>/dev/null || true

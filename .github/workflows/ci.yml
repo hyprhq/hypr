@@ -31,7 +31,7 @@ jobs:
             brew install protobuf
           elif [ "$RUNNER_OS" == "Linux" ]; then
             sudo apt-get update
-            sudo apt-get install -y protobuf-compiler libelf-dev zlib1g-dev clang libbpf-dev
+            sudo apt-get install -y protobuf-compiler libelf-dev zlib1g-dev clang libbpf-dev libssl-dev pkg-config
             # Try to install bpftool for eBPF compilation (optional, will use placeholders if unavailable)
             sudo apt-get install -y linux-tools-common linux-tools-generic bpftool 2>/dev/null || true
           fi
