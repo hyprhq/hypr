@@ -69,11 +69,16 @@ jobs:
       - name: Configure kernel with minimal virtio config
         working-directory: kernel
         run: |
-          # Start with minimal config for x86_64 or arm64
+          # Start with MINIMAL config to keep kernel small
+          # ARM64 cloud-hypervisor has ~32MB kernel size limit
           if [ "${{ matrix.arch }}" = "x86_64" ]; then
             make x86_64_defconfig
           else
-            make defconfig
+            # Use tinyconfig as base for ARM64 to minimize size
+            make tinyconfig
+            # Enable 64-bit
+            ./scripts/config --enable CONFIG_64BIT
+            ./scripts/config --enable CONFIG_ARM64
           fi
 
           # Enable KVM guest support and PVH boot (required for cloud-hypervisor)
@@ -81,6 +86,22 @@ jobs:
           ./scripts/config --enable CONFIG_KVM_GUEST
           ./scripts/config --enable CONFIG_PARAVIRT
           ./scripts/config --enable CONFIG_PVH
+
+          # Disable debug info to reduce size
+          ./scripts/config --disable CONFIG_DEBUG_INFO
+          ./scripts/config --disable CONFIG_DEBUG_INFO_DWARF4
+          ./scripts/config --disable CONFIG_DEBUG_INFO_DWARF5
+          ./scripts/config --disable CONFIG_DEBUG_INFO_BTF
+          ./scripts/config --disable CONFIG_GDB_SCRIPTS
+          ./scripts/config --set-val CONFIG_DEBUG_INFO_NONE y
+
+          # Disable unnecessary features to reduce size
+          ./scripts/config --disable CONFIG_KPROBES
+          ./scripts/config --disable CONFIG_FTRACE
+          ./scripts/config --disable CONFIG_KALLSYMS
+          ./scripts/config --disable CONFIG_KALLSYMS_ALL
+          ./scripts/config --disable CONFIG_BPF_SYSCALL
+          ./scripts/config --disable CONFIG_MODULES
 
           # Display initial config info
           echo "Initial config:"
