@@ -305,8 +305,11 @@ impl CloudHypervisorAdapter {
                 .mac_address
                 .clone()
                 .unwrap_or_else(Self::generate_mac_address);
+            // TAP device names are limited to 15 chars (IFNAMSIZ-1 on Linux)
+            // Use "tap" prefix (3 chars) + truncated ID (12 chars max)
+            let tap_name = format!("tap{}", &config.id[..config.id.len().min(12)]);
             args.push("--net".to_string());
-            args.push(format!("tap=tap{},mac={}", config.id, mac));
+            args.push(format!("tap={},mac={}", tap_name, mac));
         }
 
         // Serial console - redirect to log file if provided, otherwise tty
