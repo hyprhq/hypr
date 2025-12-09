@@ -71,8 +71,8 @@ jobs:
       - name: Configure kernel with minimal virtio config
         working-directory: kernel
         run: |
-          # x86_64: Use defconfig (plenty of room)
-          # ARM64: Use allnoconfig + minimal additions to stay under 32MB UEFI limit
+          # Both architectures use defconfig as base
+          # Direct-kernel boot on ARM64 has no size limit (no UEFI involved)
           if [ "${{ matrix.arch }}" = "x86_64" ]; then
             make x86_64_defconfig
 
@@ -82,48 +82,24 @@ jobs:
             ./scripts/config --enable CONFIG_PARAVIRT
             ./scripts/config --enable CONFIG_PVH
           else
-            # ARM64: Start from allnoconfig for minimal size
-            make allnoconfig
+            # ARM64: Use defconfig (direct-kernel boot has no size limit)
+            make defconfig
 
-            # === CORE: Absolutely required ===
-            ./scripts/config --enable CONFIG_64BIT
-            ./scripts/config --enable CONFIG_ARM64
-            ./scripts/config --enable CONFIG_PRINTK
-            ./scripts/config --enable CONFIG_BUG
-            ./scripts/config --enable CONFIG_SMP
-            ./scripts/config --enable CONFIG_SCHED_MC
-
-            # === MEMORY MANAGEMENT ===
-            ./scripts/config --enable CONFIG_MMU
-            ./scripts/config --enable CONFIG_FLATMEM
-            ./scripts/config --enable CONFIG_SPARSEMEM_VMEMMAP
-
-            # === TTY/CONSOLE ===
-            ./scripts/config --enable CONFIG_TTY
-            ./scripts/config --enable CONFIG_VT
-            ./scripts/config --enable CONFIG_SERIAL_EARLYCON
-            ./scripts/config --enable CONFIG_SERIAL_AMBA_PL011
-            ./scripts/config --enable CONFIG_SERIAL_AMBA_PL011_CONSOLE
-
-            # === DIRECT KERNEL BOOT (no UEFI, no size limit!) ===
+            # === DIRECT KERNEL BOOT (no UEFI) ===
             # Disable EFI so cloud-hypervisor uses direct-kernel boot
             ./scripts/config --disable CONFIG_EFI
             ./scripts/config --disable CONFIG_EFI_STUB
-
-            # Enable FDT for device tree based boot
-            ./scripts/config --enable CONFIG_OF
-            ./scripts/config --enable CONFIG_OF_EARLY_FLATTREE
           fi
 
           # === SIZE REDUCTION: Disable debug info ===
           ./scripts/config --disable CONFIG_DEBUG_INFO
+          ./scripts/config --disable CONFIG_DEBUG_INFO_DWARF4
+          ./scripts/config --disable CONFIG_DEBUG_INFO_DWARF5
+          ./scripts/config --disable CONFIG_DEBUG_INFO_BTF
           ./scripts/config --enable CONFIG_DEBUG_INFO_NONE
 
           # === SIZE REDUCTION: Disable modules ===
           ./scripts/config --disable CONFIG_MODULES
-
-          # === SIZE REDUCTION: Optimize for size ===
-          ./scripts/config --enable CONFIG_CC_OPTIMIZE_FOR_SIZE
 
           # Display initial config info
           echo "Initial config:"
