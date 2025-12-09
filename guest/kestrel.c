@@ -45,6 +45,8 @@
 #include <sys/reboot.h>
 #include <netinet/in.h>
 #include <dirent.h>
+#include <sys/inotify.h>
+#include <limits.h>  // NAME_MAX
 
 // ===== MAKEDEV (self-contained) =====
 #ifndef makedev
@@ -770,6 +772,9 @@ write_result:
     // Exit code already sent via stdout markers - no result files needed
 }
 
+// Buffer size for inotify events
+#define INOTIFY_BUF_LEN (10 * (sizeof(struct inotify_event) + NAME_MAX + 1))
+
 static void run_build_mode(void) {
     LOG("Starting build mode");
 
@@ -787,31 +792,366 @@ static void run_build_mode(void) {
     printf("[kestrel] READY\n");
     fflush(stdout);
 
-    // Command loop: watch for command files in /context/.hypr/commands/
+    // Ensure command directory exists
+    mkdir(COMMAND_DIR, 0755);
+
+    // Try to set up inotify (may not work on virtio-fs, will fallback to polling)
+    int inotify_fd = inotify_init1(IN_NONBLOCK);
+    int watch_fd = -1;
+    int use_inotify = 0;
+
+    if (inotify_fd >= 0) {
+        watch_fd = inotify_add_watch(inotify_fd, COMMAND_DIR,
+            IN_CREATE | IN_MOVED_TO | IN_CLOSE_WRITE);
+        if (watch_fd >= 0) {
+            use_inotify = 1;
+            LOG("Using inotify for command directory watch");
+        } else {
+            LOG("inotify_add_watch failed: %s, falling back to polling", strerror(errno));
+            close(inotify_fd);
+            inotify_fd = -1;
+        }
+    } else {
+        LOG("inotify_init failed: %s, using polling", strerror(errno));
+    }
+
+    char inotify_buf[INOTIFY_BUF_LEN];
     int cmd_count = 0;
+    int poll_count = 0;
+
+    // Command loop: watch for command files in /context/.hypr/commands/
     for (;;) {
+        // First, check for any existing command files
         char *cmd_path = scan_for_command();
 
-        if (!cmd_path) {
-            // No command found, sleep and retry
-            usleep(100000); // 100ms
+        if (cmd_path) {
+            cmd_count++;
+            LOG("Found command %d: %s", cmd_count, cmd_path);
+            log_disk_space("before cmd");
+
+            // Execute command
+            handle_command_file(cmd_path);
+            log_disk_space("after cmd");
+
+            LOG("Completed command %d, deleting %s", cmd_count, cmd_path);
+
+            // Delete command file (signal completion to host)
+            unlink(cmd_path);
+            free(cmd_path);
+            poll_count = 0;  // Reset poll counter after successful command
             continue;
         }
 
-        cmd_count++;
-        LOG("Found command %d: %s", cmd_count, cmd_path);
-        log_disk_space("before cmd");
+        // No command found, wait for new files
+        if (use_inotify) {
+            // Use inotify with timeout
+            fd_set fds;
+            FD_ZERO(&fds);
+            FD_SET(inotify_fd, &fds);
 
-        // Execute command
-        handle_command_file(cmd_path);
-        log_disk_space("after cmd");
+            struct timeval tv;
+            tv.tv_sec = 0;
+            tv.tv_usec = 500000;  // 500ms timeout (inotify may not work on virtio-fs)
 
-        LOG("Completed command %d, deleting %s", cmd_count, cmd_path);
-
-        // Delete command file (signal completion to host)
-        unlink(cmd_path);
-        free(cmd_path);
+            int ret = select(inotify_fd + 1, &fds, NULL, NULL, &tv);
+            if (ret > 0 && FD_ISSET(inotify_fd, &fds)) {
+                // Read and discard inotify events (we'll re-scan the directory)
+                ssize_t len = read(inotify_fd, inotify_buf, sizeof(inotify_buf));
+                if (len > 0) {
+                    LOG("inotify: received %zd bytes of events", len);
+                }
+            } else if (ret == 0) {
+                // Timeout - do a poll anyway (virtio-fs may not trigger inotify)
+                poll_count++;
+                if (poll_count > 10) {
+                    // After 5 seconds without inotify events, disable it
+                    LOG("inotify appears unreliable on virtio-fs, switching to polling");
+                    use_inotify = 0;
+                    close(inotify_fd);
+                    inotify_fd = -1;
+                }
+            }
+        } else {
+            // Pure polling fallback
+            usleep(100000);  // 100ms
+        }
     }
+
+    // Cleanup (never reached in normal operation)
+    if (inotify_fd >= 0) {
+        if (watch_fd >= 0) inotify_rm_watch(inotify_fd, watch_fd);
+        close(inotify_fd);
+    }
+}
+
+// ============================================================================
+// JSON PARSING (minimal implementation for RuntimeManifest)
+// ============================================================================
+
+// Extract a string value from JSON by key (returns malloc'd string or NULL)
+// Only handles simple cases: {"key": "value"} or nested {"key": {"subkey": "value"}}
+static char* json_get_string(const char *json, const char *key) {
+    if (!json || !key) return NULL;
+
+    // Build search pattern: "key":
+    char pattern[256];
+    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
+
+    const char *pos = strstr(json, pattern);
+    if (!pos) return NULL;
+
+    // Skip to value
+    pos += strlen(pattern);
+    while (*pos && (*pos == ' ' || *pos == '\t' || *pos == '\n')) pos++;
+
+    if (*pos != '"') return NULL;  // Not a string value
+    pos++;  // Skip opening quote
+
+    // Find closing quote (handle escaped quotes)
+    const char *end = pos;
+    while (*end && *end != '"') {
+        if (*end == '\\' && *(end + 1)) end++;  // Skip escaped char
+        end++;
+    }
+
+    if (!*end) return NULL;
+
+    size_t len = end - pos;
+    char *result = malloc(len + 1);
+    if (!result) return NULL;
+
+    memcpy(result, pos, len);
+    result[len] = '\0';
+    return result;
+}
+
+// Extract array of strings from JSON by key (returns malloc'd array, sets count)
+// Only handles: "key": ["val1", "val2"]
+static char** json_get_string_array(const char *json, const char *key, int *count) {
+    if (!json || !key || !count) return NULL;
+    *count = 0;
+
+    char pattern[256];
+    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
+
+    const char *pos = strstr(json, pattern);
+    if (!pos) return NULL;
+
+    pos += strlen(pattern);
+    while (*pos && (*pos == ' ' || *pos == '\t' || *pos == '\n')) pos++;
+
+    if (*pos != '[') return NULL;  // Not an array
+    pos++;  // Skip [
+
+    // Count elements first
+    int n = 0;
+    const char *scan = pos;
+    int depth = 0;
+    while (*scan && !(*scan == ']' && depth == 0)) {
+        if (*scan == '"') {
+            n++;
+            scan++;
+            while (*scan && *scan != '"') {
+                if (*scan == '\\' && *(scan + 1)) scan++;
+                scan++;
+            }
+        }
+        if (*scan == '[') depth++;
+        if (*scan == ']') depth--;
+        if (*scan) scan++;
+    }
+
+    if (n == 0) return NULL;
+
+    char **result = malloc(sizeof(char*) * (n + 1));
+    if (!result) return NULL;
+
+    // Extract elements
+    int i = 0;
+    scan = pos;
+    while (*scan && *scan != ']' && i < n) {
+        while (*scan && *scan != '"' && *scan != ']') scan++;
+        if (*scan != '"') break;
+        scan++;  // Skip opening quote
+
+        const char *end = scan;
+        while (*end && *end != '"') {
+            if (*end == '\\' && *(end + 1)) end++;
+            end++;
+        }
+
+        size_t len = end - scan;
+        result[i] = malloc(len + 1);
+        if (result[i]) {
+            memcpy(result[i], scan, len);
+            result[i][len] = '\0';
+            i++;
+        }
+
+        scan = end + 1;
+    }
+
+    result[i] = NULL;
+    *count = i;
+    return result;
+}
+
+// Free string array
+static void free_string_array(char **arr, int count) {
+    if (!arr) return;
+    for (int i = 0; i < count; i++) {
+        if (arr[i]) free(arr[i]);
+    }
+    free(arr);
+}
+
+// Get nested JSON object as string (returns malloc'd string or NULL)
+static char* json_get_object(const char *json, const char *key) {
+    if (!json || !key) return NULL;
+
+    char pattern[256];
+    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
+
+    const char *pos = strstr(json, pattern);
+    if (!pos) return NULL;
+
+    pos += strlen(pattern);
+    while (*pos && (*pos == ' ' || *pos == '\t' || *pos == '\n')) pos++;
+
+    if (*pos != '{') return NULL;
+
+    // Find matching closing brace
+    int depth = 1;
+    const char *start = pos;
+    pos++;
+    while (*pos && depth > 0) {
+        if (*pos == '{') depth++;
+        else if (*pos == '}') depth--;
+        else if (*pos == '"') {
+            // Skip string content
+            pos++;
+            while (*pos && *pos != '"') {
+                if (*pos == '\\' && *(pos + 1)) pos++;
+                pos++;
+            }
+        }
+        if (*pos) pos++;
+    }
+
+    size_t len = pos - start;
+    char *result = malloc(len + 1);
+    if (!result) return NULL;
+
+    memcpy(result, start, len);
+    result[len] = '\0';
+    return result;
+}
+
+// ============================================================================
+// USER/GROUP SWITCHING
+// ============================================================================
+
+#include <pwd.h>
+#include <grp.h>
+
+// Parse user spec: "username", "uid", "uid:gid", "username:group"
+// Returns 0 on success, -1 on error
+static int parse_user_spec(const char *spec, uid_t *uid, gid_t *gid) {
+    if (!spec || !uid || !gid) return -1;
+
+    *uid = 0;
+    *gid = 0;
+
+    // Check for colon (uid:gid or user:group format)
+    const char *colon = strchr(spec, ':');
+
+    char user_part[256] = {0};
+    char group_part[256] = {0};
+
+    if (colon) {
+        size_t user_len = colon - spec;
+        if (user_len >= sizeof(user_part)) return -1;
+        memcpy(user_part, spec, user_len);
+        user_part[user_len] = '\0';
+        strncpy(group_part, colon + 1, sizeof(group_part) - 1);
+    } else {
+        strncpy(user_part, spec, sizeof(user_part) - 1);
+    }
+
+    // Parse user part (numeric or name)
+    char *endptr;
+    long user_num = strtol(user_part, &endptr, 10);
+    if (*endptr == '\0' && user_part[0] != '\0') {
+        // Numeric UID
+        *uid = (uid_t)user_num;
+    } else {
+        // Username - look up in /etc/passwd
+        struct passwd *pw = getpwnam(user_part);
+        if (!pw) {
+            LOG("User not found: %s", user_part);
+            return -1;
+        }
+        *uid = pw->pw_uid;
+        *gid = pw->pw_gid;  // Use primary group from passwd
+    }
+
+    // Parse group part if specified
+    if (group_part[0] != '\0') {
+        long group_num = strtol(group_part, &endptr, 10);
+        if (*endptr == '\0') {
+            // Numeric GID
+            *gid = (gid_t)group_num;
+        } else {
+            // Group name - look up in /etc/group
+            struct group *gr = getgrnam(group_part);
+            if (!gr) {
+                LOG("Group not found: %s", group_part);
+                return -1;
+            }
+            *gid = gr->gr_gid;
+        }
+    }
+
+    return 0;
+}
+
+// Switch to user/group, returns 0 on success
+static int switch_user(uid_t uid, gid_t gid) {
+    if (uid == 0 && gid == 0) {
+        return 0;  // Already root, nothing to do
+    }
+
+    // Set supplementary groups (clear them for security)
+    if (setgroups(0, NULL) < 0 && errno != EPERM) {
+        LOG("Warning: setgroups failed: %s", strerror(errno));
+    }
+
+    // Set GID first (before dropping root)
+    if (gid != 0) {
+        if (setgid(gid) < 0) {
+            LOG("Failed to setgid(%d): %s", gid, strerror(errno));
+            return -1;
+        }
+        if (setegid(gid) < 0) {
+            LOG("Failed to setegid(%d): %s", gid, strerror(errno));
+            return -1;
+        }
+    }
+
+    // Set UID last
+    if (uid != 0) {
+        if (setuid(uid) < 0) {
+            LOG("Failed to setuid(%d): %s", uid, strerror(errno));
+            return -1;
+        }
+        if (seteuid(uid) < 0) {
+            LOG("Failed to seteuid(%d): %s", uid, strerror(errno));
+            return -1;
+        }
+    }
+
+    LOG("Switched to uid=%d gid=%d", uid, gid);
+    return 0;
 }
 
 // ============================================================================
@@ -1091,13 +1431,69 @@ static void run_runtime_mode(void) {
 
     LOG("Kernel cmdline: %s", cmdline);
 
-    // Parse network parameters
-    char *ip_str = parse_cmdline_param(cmdline, "ip");
-    char *netmask_str = parse_cmdline_param(cmdline, "netmask");
-    char *gateway_str = parse_cmdline_param(cmdline, "gateway");
-
     // Bring up loopback first
     bring_up_loopback();
+
+    // Try to parse RuntimeManifest first (new format)
+    char *manifest_b64 = parse_cmdline_param(cmdline, "manifest");
+    char *manifest_json = NULL;
+    char *workload_obj = NULL;
+    char *network_obj = NULL;
+
+    // Parsed manifest fields
+    char **entrypoint = NULL;
+    int entrypoint_count = 0;
+    char **env_vars = NULL;
+    int env_count = 0;
+    char *workdir = NULL;
+    char *user_spec = NULL;
+    char *ip_str = NULL;
+    char *netmask_str = NULL;
+    char *gateway_str = NULL;
+
+    if (manifest_b64) {
+        // Decode base64 manifest
+        size_t manifest_len;
+        manifest_json = base64_decode(manifest_b64, &manifest_len);
+        free(manifest_b64);
+
+        if (manifest_json && manifest_len > 0) {
+            LOG("Parsed RuntimeManifest (%zu bytes)", manifest_len);
+
+            // Extract workload object
+            workload_obj = json_get_object(manifest_json, "workload");
+            if (workload_obj) {
+                entrypoint = json_get_string_array(workload_obj, "entrypoint", &entrypoint_count);
+                env_vars = json_get_string_array(workload_obj, "env", &env_count);
+                workdir = json_get_string(workload_obj, "workdir");
+                user_spec = json_get_string(workload_obj, "user");
+
+                LOG("Workload: entrypoint=%d args, env=%d vars, workdir=%s, user=%s",
+                    entrypoint_count, env_count,
+                    workdir ? workdir : "(none)",
+                    user_spec ? user_spec : "(root)");
+            }
+
+            // Extract network object
+            network_obj = json_get_object(manifest_json, "network");
+            if (network_obj) {
+                ip_str = json_get_string(network_obj, "ip");
+                netmask_str = json_get_string(network_obj, "netmask");
+                gateway_str = json_get_string(network_obj, "gateway");
+
+                LOG("Network: ip=%s netmask=%s gateway=%s",
+                    ip_str ? ip_str : "(none)",
+                    netmask_str ? netmask_str : "(none)",
+                    gateway_str ? gateway_str : "(none)");
+            }
+        }
+    } else {
+        // Fallback to legacy format (cmd=, workdir=, ip=, etc.)
+        LOG("No manifest= found, using legacy format");
+        ip_str = parse_cmdline_param(cmdline, "ip");
+        netmask_str = parse_cmdline_param(cmdline, "netmask");
+        gateway_str = parse_cmdline_param(cmdline, "gateway");
+    }
 
     // Configure network if IP was provided
     if (ip_str) {
@@ -1105,9 +1501,6 @@ static void run_runtime_mode(void) {
 
         if (parse_ipv4(ip_str, &ip) < 0) {
             LOG("Invalid IP address: %s", ip_str);
-            free(ip_str);
-            if (netmask_str) free(netmask_str);
-            if (gateway_str) free(gateway_str);
             FATAL("Invalid IP address");
         }
 
@@ -1146,12 +1539,8 @@ static void run_runtime_mode(void) {
                 }
             }
         }
-
-        free(ip_str);
-        if (netmask_str) free(netmask_str);
-        if (gateway_str) free(gateway_str);
     } else {
-        LOG("No IP address in cmdline, skipping network configuration");
+        LOG("No IP address, skipping network configuration");
     }
 
     // Mount rootfs
@@ -1172,51 +1561,114 @@ static void run_runtime_mode(void) {
     printf("[kestrel] RUNTIME_READY\n");
     fflush(stdout);
 
-    // Parse cmd= from cmdline (base64-encoded command)
-    char *cmd_b64 = parse_cmdline_param(cmdline, "cmd");
-    char *workdir = parse_cmdline_param(cmdline, "workdir");
+    // Determine command to execute
+    char *cmd = NULL;
 
-    if (cmd_b64) {
-        // Decode base64 command
-        size_t cmd_len;
-        char *cmd = base64_decode(cmd_b64, &cmd_len);
-        free(cmd_b64);
-
-        if (cmd && cmd_len > 0) {
-            LOG("Executing workload: %s", cmd);
-
-            // Change to workdir if specified
-            if (workdir && workdir[0] != '\0') {
-                if (chdir(workdir) < 0) {
-                    LOG("Warning: chdir to %s failed: %s", workdir, strerror(errno));
+    if (entrypoint && entrypoint_count > 0) {
+        // Build command from entrypoint array
+        size_t total_len = 0;
+        for (int i = 0; i < entrypoint_count; i++) {
+            total_len += strlen(entrypoint[i]) + 3;  // quotes + space
+        }
+        cmd = malloc(total_len + 1);
+        if (cmd) {
+            cmd[0] = '\0';
+            for (int i = 0; i < entrypoint_count; i++) {
+                if (i > 0) strcat(cmd, " ");
+                // Quote if needed
+                if (strchr(entrypoint[i], ' ') || strchr(entrypoint[i], ';')) {
+                    strcat(cmd, "\"");
+                    strcat(cmd, entrypoint[i]);
+                    strcat(cmd, "\"");
                 } else {
-                    LOG("Changed to workdir: %s", workdir);
+                    strcat(cmd, entrypoint[i]);
+                }
+            }
+        }
+    } else {
+        // Fallback to legacy cmd= parameter
+        char *cmd_b64 = parse_cmdline_param(cmdline, "cmd");
+        if (cmd_b64) {
+            size_t cmd_len;
+            cmd = base64_decode(cmd_b64, &cmd_len);
+            free(cmd_b64);
+        }
+
+        // Legacy workdir
+        if (!workdir) {
+            workdir = parse_cmdline_param(cmdline, "workdir");
+        }
+    }
+
+    if (cmd) {
+        LOG("Executing workload: %s", cmd);
+
+        // Change to workdir if specified
+        if (workdir && workdir[0] != '\0') {
+            if (chdir(workdir) < 0) {
+                LOG("Warning: chdir to %s failed: %s", workdir, strerror(errno));
+            } else {
+                LOG("Changed to workdir: %s", workdir);
+            }
+        }
+
+        // Fork and exec the workload
+        pid_t child_pid = fork();
+        if (child_pid < 0) {
+            LOG("Fork failed: %s", strerror(errno));
+        } else if (child_pid == 0) {
+            // Child process
+
+            // Set environment variables
+            if (env_vars && env_count > 0) {
+                for (int i = 0; i < env_count; i++) {
+                    if (env_vars[i]) {
+                        putenv(env_vars[i]);  // Note: putenv doesn't copy, but we're about to exec
+                    }
+                }
+                LOG("Set %d environment variables", env_count);
+            }
+
+            // Switch user/group if specified
+            if (user_spec) {
+                uid_t uid;
+                gid_t gid;
+                if (parse_user_spec(user_spec, &uid, &gid) == 0) {
+                    if (switch_user(uid, gid) < 0) {
+                        LOG("Warning: failed to switch user, continuing as root");
+                    }
+                } else {
+                    LOG("Warning: failed to parse user spec '%s'", user_spec);
                 }
             }
 
-            // Fork and exec the workload
-            pid_t child_pid = fork();
-            if (child_pid < 0) {
-                LOG("Fork failed: %s", strerror(errno));
-            } else if (child_pid == 0) {
-                // Child process - exec the command
-                execl("/bin/sh", "sh", "-c", cmd, NULL);
-                // If exec fails, try busybox sh
-                execl("/bin/busybox", "sh", "-c", cmd, NULL);
-                fprintf(stderr, "[kestrel] exec failed: %s\n", strerror(errno));
-                _exit(127);
-            } else {
-                // Parent - workload is running
-                LOG("Workload started with PID %d", child_pid);
-            }
-
-            free(cmd);
+            // Exec the command
+            execl("/bin/sh", "sh", "-c", cmd, NULL);
+            // If exec fails, try busybox sh
+            execl("/bin/busybox", "sh", "-c", cmd, NULL);
+            fprintf(stderr, "[kestrel] exec failed: %s\n", strerror(errno));
+            _exit(127);
+        } else {
+            // Parent - workload is running
+            LOG("Workload started with PID %d", child_pid);
         }
 
-        if (workdir) free(workdir);
+        free(cmd);
     } else {
-        LOG("No cmd= in cmdline, idling");
+        LOG("No command to execute, idling");
     }
+
+    // Cleanup
+    if (workdir) free(workdir);
+    if (user_spec) free(user_spec);
+    if (ip_str) free(ip_str);
+    if (netmask_str) free(netmask_str);
+    if (gateway_str) free(gateway_str);
+    if (workload_obj) free(workload_obj);
+    if (network_obj) free(network_obj);
+    if (manifest_json) free(manifest_json);
+    free_string_array(entrypoint, entrypoint_count);
+    // Note: env_vars are used by putenv, don't free them
 
     // Main loop: reap zombies, wait for shutdown
     for (;;) {

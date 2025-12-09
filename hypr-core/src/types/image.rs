@@ -60,6 +60,10 @@ pub struct ImageManifest {
     /// Working directory
     pub workdir: String,
 
+    /// User to run as (e.g., "nginx", "1000", "1000:1000")
+    #[serde(default)]
+    pub user: Option<String>,
+
     /// Exposed ports
     pub exposed_ports: Vec<u16>,
 

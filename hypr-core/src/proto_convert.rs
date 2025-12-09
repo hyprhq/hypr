@@ -365,6 +365,7 @@ impl From<ImageManifest> for ProtoImageManifest {
             exposed_ports: manifest.exposed_ports.into_iter().map(|p| p as u32).collect(),
             runtime: Some(manifest.runtime.into()),
             health: manifest.health.map(|h| h.into()),
+            user: manifest.user,
         }
     }
 }
@@ -390,6 +391,7 @@ impl TryFrom<ProtoImageManifest> for ImageManifest {
             cmd: proto.cmd,
             env: proto.env,
             workdir: proto.workdir,
+            user: proto.user,
             exposed_ports: proto.exposed_ports.into_iter().map(|p| p as u16).collect(),
             runtime,
             health: proto.health.map(|h| h.try_into()).transpose()?,

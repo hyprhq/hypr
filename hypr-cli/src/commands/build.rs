@@ -231,6 +231,7 @@ pub async fn build(
         cmd: output.manifest.config.cmd.unwrap_or_default(),
         env: output.manifest.config.env.clone(),
         workdir: output.manifest.config.workdir.unwrap_or_else(|| "/".to_string()),
+        user: output.manifest.config.user.clone(),
         exposed_ports: output
             .manifest
             .config

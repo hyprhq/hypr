@@ -182,6 +182,29 @@ impl RuntimeManifest {
         self.restart = restart;
         self
     }
+
+    /// Set user to run as
+    pub fn with_user(mut self, user: String) -> Self {
+        self.workload.user = Some(user);
+        self
+    }
+
+    /// Encode manifest as base64 string for kernel cmdline.
+    ///
+    /// This produces the value for `manifest=<encoded>` kernel argument.
+    /// Uses URL-safe base64 encoding without padding (same format kestrel expects).
+    pub fn encode(&self) -> Result<String, std::io::Error> {
+        use base64::Engine;
+
+        // Serialize to JSON (compact, no pretty printing)
+        let json = serde_json::to_string(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        // Base64 encode (URL-safe, no padding)
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json.as_bytes());
+
+        Ok(encoded)
+    }
 }
 
 #[cfg(test)]

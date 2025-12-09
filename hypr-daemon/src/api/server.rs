@@ -70,47 +70,7 @@ impl HyprService for HyprServiceImpl {
             .await
             .map_err(|e| Status::not_found(format!("Image not found: {}", e)))?;
 
-        // Build RuntimeManifest from image manifest
-        let mut entrypoint = image.manifest.entrypoint.clone();
-        if entrypoint.is_empty() {
-            entrypoint = image.manifest.cmd.clone();
-        } else if !image.manifest.cmd.is_empty() {
-            // Entrypoint + cmd as args (Docker behavior)
-            entrypoint.extend(image.manifest.cmd.clone());
-        }
-
-        if !entrypoint.is_empty() {
-            // Pass command directly via kernel cmdline (simpler than full manifest)
-            // Format: cmd=<base64-encoded-command>
-            // Shell-quote arguments that contain spaces or special characters
-            let cmd_str = entrypoint
-                .iter()
-                .map(|arg| {
-                    if arg.contains(' ')
-                        || arg.contains(';')
-                        || arg.contains('&')
-                        || arg.contains('|')
-                    {
-                        format!("\"{}\"", arg.replace('"', "\\\""))
-                    } else {
-                        arg.clone()
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            let cmd_b64 =
-                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(cmd_str.as_bytes());
-            vm_config.kernel_args.push(format!("cmd={}", cmd_b64));
-
-            // Pass workdir if specified
-            if !image.manifest.workdir.is_empty() {
-                vm_config.kernel_args.push(format!("workdir={}", image.manifest.workdir));
-            }
-
-            info!("Injected cmd into kernel cmdline: {}", cmd_str);
-        }
-
-        // 1. Allocate IP for VM
+        // 1. Allocate IP for VM (needed before building manifest)
         let vm_ip = self
             .network_mgr
             .allocate_ip(&vm_config.id)
@@ -122,11 +82,79 @@ impl HyprService for HyprServiceImpl {
         // Store IP in config for adapter
         vm_config.network.ip_address = Some(vm_ip);
 
-        // Create VM via adapter
+        // 2. Build RuntimeManifest from image manifest
+        let mut entrypoint = image.manifest.entrypoint.clone();
+        if entrypoint.is_empty() {
+            entrypoint = image.manifest.cmd.clone();
+        } else if !image.manifest.cmd.is_empty() {
+            // Entrypoint + cmd as args (Docker behavior)
+            entrypoint.extend(image.manifest.cmd.clone());
+        }
+
+        if !entrypoint.is_empty() {
+            use hypr_core::manifest::runtime_manifest::{NetworkConfig as ManifestNetworkConfig, RuntimeManifest};
+
+            // Build environment variables (merge image env with config env)
+            let mut env_vars: Vec<String> = image
+                .manifest
+                .env
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect();
+            // Add/override with config env vars
+            for (k, v) in &vm_config.env {
+                env_vars.push(format!("{}={}", k, v));
+            }
+
+            // Build the manifest
+            let mut manifest = RuntimeManifest::new(entrypoint.clone())
+                .with_env(env_vars);
+
+            // Set workdir if specified
+            if !image.manifest.workdir.is_empty() {
+                manifest = manifest.with_workdir(image.manifest.workdir.clone());
+            }
+
+            // Set user if specified in image
+            if let Some(ref user) = image.manifest.user {
+                manifest = manifest.with_user(user.clone());
+            }
+
+            // Set network configuration
+            // Gateway is platform-specific (same as IPAM)
+            #[cfg(target_os = "linux")]
+            let gateway = "10.88.0.1";
+            #[cfg(target_os = "macos")]
+            let gateway = "192.168.64.1";
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            let gateway = "10.88.0.1";
+
+            manifest = manifest.with_network(ManifestNetworkConfig {
+                ip: vm_ip.to_string(),
+                netmask: "255.255.255.0".to_string(),
+                gateway: gateway.to_string(),
+                dns: vec!["8.8.8.8".to_string(), "1.1.1.1".to_string()],
+            });
+
+            // Encode manifest and add to kernel args
+            match manifest.encode() {
+                Ok(encoded) => {
+                    vm_config.kernel_args.push(format!("manifest={}", encoded));
+                    info!("Injected RuntimeManifest into kernel cmdline (entrypoint: {:?})", entrypoint);
+                }
+                Err(e) => {
+                    // Cleanup: release IP
+                    let _ = self.network_mgr.release_ip(&vm_config.id).await;
+                    return Err(Status::internal(format!("Failed to encode manifest: {}", e)));
+                }
+            }
+        }
+
+        // 3. Create VM via adapter
         let handle =
             self.adapter.create(&vm_config).await.map_err(|e| Status::internal(e.to_string()))?;
 
-        // 2. Setup port forwarding for each exposed port
+        // 4. Setup port forwarding for each exposed port
         for port_cfg in &vm_config.ports {
             if let Err(e) = self
                 .network_mgr
@@ -152,7 +180,7 @@ impl HyprService for HyprServiceImpl {
             );
         }
 
-        // 3. Register service in DNS (use VM name or ID)
+        // 5. Register service in DNS (use VM name or ID)
         let service_name =
             if !vm_config.name.is_empty() { vm_config.name.clone() } else { vm_config.id.clone() };
 

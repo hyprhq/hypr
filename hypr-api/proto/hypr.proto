@@ -131,6 +131,7 @@ message ImageManifest {
   repeated uint32 exposed_ports = 10;
   RuntimeConfig runtime = 11;
   optional HealthCheckConfig health = 12;
+  optional string user = 13; // User to run as (e.g., "nginx", "1000:1000")
 }
 
 message RuntimeConfig {
