@@ -13,11 +13,14 @@ env:
 jobs:
   test:
     name: Test
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        rust: [stable]
+        include:
+          - runner: [self-hosted, Linux, X64]
+            rust: stable
+          - runner: macos-latest
+            rust: stable
 
     steps:
       - uses: actions/checkout@v4
