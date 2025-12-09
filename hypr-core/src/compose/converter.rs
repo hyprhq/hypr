@@ -12,7 +12,7 @@ use crate::types::{
     ServiceConfig, StackConfig, VmConfig, VmResources, VolumeConfig, VolumeMount, VolumeSource,
 };
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{info, instrument, warn};
 
 /// Converter for docker-compose files to HYPR stack configurations.
@@ -87,7 +87,7 @@ impl ComposeConverter {
     #[instrument(skip(services, compose_dir))]
     async fn build_service_images(
         services: &HashMap<String, Service>,
-        compose_dir: &PathBuf,
+        compose_dir: &Path,
     ) -> Result<HashMap<String, PathBuf>> {
         use std::sync::Arc;
         use tokio::sync::Mutex;
@@ -202,7 +202,7 @@ impl ComposeConverter {
                 let mut handles = Vec::new();
                 for (name, spec) in batch {
                     let name = name.clone();
-                    let compose_dir = compose_dir.clone();
+                    let compose_dir = compose_dir.to_path_buf();
                     let built_images = Arc::clone(&built_images);
                     let (context_path, dockerfile, build_args, target, cache_from) =
                         Self::extract_build_config(&spec, &compose_dir);
@@ -244,7 +244,7 @@ impl ComposeConverter {
     /// Extract build configuration from BuildSpec.
     fn extract_build_config(
         spec: &BuildSpec,
-        compose_dir: &PathBuf,
+        compose_dir: &Path,
     ) -> (PathBuf, String, HashMap<String, String>, Option<String>, Vec<String>) {
         match spec {
             BuildSpec::Path(path) => {
@@ -368,7 +368,7 @@ impl ComposeConverter {
         // Try to find a local image with this name
         // Format could be "name:tag" or just "name" (defaults to latest)
         let name = if image_ref.contains(':') {
-            image_ref.splitn(2, ':').next().unwrap_or(image_ref)
+            image_ref.split(':').next().unwrap_or(image_ref)
         } else {
             image_ref
         };
@@ -412,7 +412,7 @@ impl ComposeConverter {
     }
 
     /// Import layers from a local image directory into the cache.
-    fn import_local_image_cache(cache: &mut CacheManager, image_dir: &PathBuf) -> Result<usize> {
+    fn import_local_image_cache(cache: &mut CacheManager, image_dir: &Path) -> Result<usize> {
         let mut layers_imported = 0;
 
         // Look for layer files in the image directory
