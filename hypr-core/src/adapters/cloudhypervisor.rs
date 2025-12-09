@@ -46,7 +46,8 @@ struct VirtiofsdDaemon {
 impl CloudHypervisorAdapter {
     /// Create a new CloudHypervisor adapter.
     pub fn new() -> Result<Self> {
-        let binary_path = Self::find_binary("cloud-hypervisor")?;
+        // Use embedded cloud-hypervisor binary (extracted at runtime)
+        let binary_path = crate::embedded::get_cloud_hypervisor_path()?;
         let virtiofsd_binary = Self::find_binary("virtiofsd")?;
         let runtime_dir = PathBuf::from("/run/hypr/ch");
         let kernel_path = crate::paths::kernel_path();
