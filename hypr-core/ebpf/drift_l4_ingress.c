@@ -92,6 +92,32 @@ struct conntrack_value {
 };
 
 // Conntrack table (LRU evicts oldest entries automatically)
+//
+// IMPORTANT: LRU Eviction Behavior & Risks
+// -----------------------------------------
+// This map uses BPF_MAP_TYPE_LRU_HASH which automatically evicts the least-recently-used
+// entries when the map reaches capacity. While this prevents memory exhaustion, it has
+// implications for connection tracking:
+//
+// 1. **Connection Drop Risk**: Under heavy load with many unique 5-tuples, legitimate
+//    connections may be evicted before they complete. This is particularly problematic
+//    for long-lived TCP connections or bursty workloads that create many short connections.
+//
+// 2. **TCP State Machine**: This implementation is "stateless-ish" - it doesn't track
+//    TCP state transitions (SYN/ACK/FIN/RST). A proper conntrack would track state
+//    and handle FIN/RST races properly. The current approach may:
+//    - Keep entries for connections that have already closed (until LRU eviction)
+//    - Evict entries for connections that are still active
+//
+// 3. **Sizing Considerations**: The 65536 entry limit should be tuned based on expected
+//    concurrent connection count. For high-throughput scenarios, consider:
+//    - Increasing max_entries (costs more memory in kernel space)
+//    - Implementing active expiration based on last_seen timestamp
+//    - Adding per-CPU maps to reduce contention
+//
+// 4. **Failure Mode**: When an entry is evicted prematurely, return traffic will not
+//    be correctly SNATed on egress, causing asymmetric routing that breaks the connection.
+//
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__uint(max_entries, 65536);

@@ -105,15 +105,49 @@ mkdir -p /var/lib/hypr/logs
 mkdir -p /var/lib/hypr/images
 mkdir -p /var/lib/hypr/cache
 
-# Make data directory writable by all users so CLI can register images
-chmod 777 /var/lib/hypr
-chmod 777 /var/lib/hypr/logs
-chmod 777 /var/lib/hypr/images
-chmod 777 /var/lib/hypr/cache
+# SECURITY: Create a dedicated 'hypr' group for access control
+# This is safer than world-writable permissions (777/666)
+echo -e "${YELLOW}Setting up hypr group for secure access...${NC}"
+if ! dscl . -read /Groups/hypr &>/dev/null; then
+    # Find next available GID (starting from 500)
+    NEXT_GID=500
+    while dscl . -list /Groups PrimaryGroupID | awk '{print $2}' | grep -q "^${NEXT_GID}$"; do
+        NEXT_GID=$((NEXT_GID + 1))
+    done
 
-# Create database file with open permissions (before daemon starts)
+    # Create the hypr group
+    dscl . -create /Groups/hypr
+    dscl . -create /Groups/hypr PrimaryGroupID "$NEXT_GID"
+    dscl . -create /Groups/hypr RealName "HYPR Users"
+    echo "  Created 'hypr' group with GID $NEXT_GID"
+fi
+
+# Add current user to hypr group (if SUDO_USER is set, use that; otherwise use current user)
+HYPR_USER="${SUDO_USER:-$(whoami)}"
+if [ "$HYPR_USER" != "root" ]; then
+    if ! dscl . -read /Groups/hypr GroupMembership 2>/dev/null | grep -q "\b${HYPR_USER}\b"; then
+        dseditgroup -o edit -a "$HYPR_USER" -t user hypr
+        echo "  Added user '$HYPR_USER' to 'hypr' group"
+        echo -e "${YELLOW}  Note: You may need to log out and back in for group changes to take effect${NC}"
+    fi
+fi
+
+# Set ownership and permissions for data directories
+# root:hypr with 770 allows daemon (root) and hypr group members to access
+chown -R root:hypr /var/lib/hypr
+chmod 770 /var/lib/hypr
+chmod 770 /var/lib/hypr/logs
+chmod 770 /var/lib/hypr/images
+chmod 770 /var/lib/hypr/cache
+
+# Create database file with secure permissions (before daemon starts)
 touch /var/lib/hypr/hypr.db
-chmod 666 /var/lib/hypr/hypr.db
+chown root:hypr /var/lib/hypr/hypr.db
+chmod 660 /var/lib/hypr/hypr.db
+
+# Log directory - also restricted to hypr group
+chown -R root:hypr /var/log/hypr
+chmod 770 /var/log/hypr
 
 echo -e "${YELLOW}Loading LaunchDaemon...${NC}"
 # Stop existing service if running

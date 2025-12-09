@@ -81,14 +81,15 @@ impl ServiceRegistry {
     ) -> Result<()> {
         let service_info = ServiceInfo::new(name.clone(), ip, ports, labels);
 
-        // Update in-memory cache
+        // Persist to database FIRST to ensure consistency
+        // If DB write fails, we don't want stale data in the cache
+        self.persist_service(&service_info).await?;
+
+        // Update in-memory cache only after successful DB persist
         {
             let mut services = self.services.write().await;
             services.insert(name.clone(), service_info.clone());
         }
-
-        // Persist to database
-        self.persist_service(&service_info).await?;
 
         counter!("hypr.registry.register").increment(1);
         info!("Registered service: {}", name);

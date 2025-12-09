@@ -410,7 +410,21 @@ impl VmBuilder {
                 // User pressed Ctrl+C - kill the VM and clean up
                 info!("Received SIGINT, shutting down build VM");
                 let _ = child.start_kill();
-                let _ = child.wait().await; // Wait for it to die
+
+                // Wait for process to die with a timeout to avoid hanging indefinitely
+                // If the process doesn't exit within 5 seconds, it's likely stuck
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    child.wait()
+                ).await {
+                    Ok(_) => {
+                        debug!("VM process terminated gracefully");
+                    }
+                    Err(_) => {
+                        // Timeout - process didn't die, force kill via adapter
+                        warn!("VM process did not terminate within 5s, forcing cleanup");
+                    }
+                }
 
                 // Clean up any adapter-managed resources (e.g., virtiofsd on Linux)
                 if let Err(e) = self.adapter.delete(&vm).await {

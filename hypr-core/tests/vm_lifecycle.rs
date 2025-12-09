@@ -22,15 +22,18 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use tempfile::TempDir;
 
 /// Mock adapter for testing (doesn't require actual hypervisor).
 #[derive(Clone)]
 struct MockAdapter {
     capabilities: AdapterCapabilities,
+    /// Temp directory for socket paths (avoids hardcoded /tmp paths)
+    temp_dir: PathBuf,
 }
 
 impl MockAdapter {
-    fn new() -> Self {
+    fn new(temp_dir: &TempDir) -> Self {
         Self {
             capabilities: AdapterCapabilities {
                 gpu_passthrough: false,
@@ -38,6 +41,7 @@ impl MockAdapter {
                 hotplug_devices: false,
                 metadata: HashMap::new(),
             },
+            temp_dir: temp_dir.path().to_path_buf(),
         }
     }
 }
@@ -54,7 +58,7 @@ impl VmmAdapter for MockAdapter {
         Ok(VmHandle {
             id: config.id.clone(),
             pid: Some(12345),
-            socket_path: Some(PathBuf::from("/tmp/mock.sock")),
+            socket_path: Some(self.temp_dir.join("mock.sock")),
         })
     }
 
@@ -102,7 +106,7 @@ impl VmmAdapter for MockAdapter {
     }
 
     fn vsock_path(&self, handle: &VmHandle) -> PathBuf {
-        PathBuf::from(format!("/tmp/mock-{}.vsock", handle.id))
+        self.temp_dir.join(format!("mock-{}.vsock", handle.id))
     }
 
     fn capabilities(&self) -> AdapterCapabilities {
@@ -116,10 +120,13 @@ impl VmmAdapter for MockAdapter {
 
 #[tokio::test]
 async fn test_vm_lifecycle_create_start_stop_delete() {
+    // Create temp directory for test artifacts (avoids /tmp collisions in CI)
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+
     // Initialize state manager with in-memory database
     let state = StateManager::new_in_memory().await.expect("Failed to create state manager");
 
-    let adapter = Arc::new(MockAdapter::new());
+    let adapter = Arc::new(MockAdapter::new(&temp_dir));
 
     // Create VM configuration
     let config = VmConfig {
@@ -127,7 +134,7 @@ async fn test_vm_lifecycle_create_start_stop_delete() {
         id: "test-vm-1".to_string(),
         name: "test-vm".to_string(),
         resources: VmResources { cpus: 2, memory_mb: 512 },
-        kernel_path: Some(PathBuf::from("/tmp/vmlinux")),
+        kernel_path: Some(temp_dir.path().join("vmlinux")),
         kernel_args: vec!["console=ttyS0".to_string()],
         initramfs_path: None,
         disks: vec![],
@@ -203,22 +210,20 @@ async fn test_vm_lifecycle_create_start_stop_delete() {
 
 #[tokio::test]
 async fn test_state_persistence_across_sessions() {
-    // Create temporary database file
-    let db_path = "/tmp/hypr-test-persistence.db";
-
-    // Clean up old test database if exists
-    let _ = std::fs::remove_file(db_path);
+    // Create temp directory for test artifacts
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let db_path = temp_dir.path().join("hypr-test-persistence.db");
 
     // Session 1: Create VM and persist
     {
-        let state = StateManager::new(db_path).await.expect("Failed to create state manager");
+        let state = StateManager::new(&db_path).await.expect("Failed to create state manager");
 
         let config = VmConfig {
             network_enabled: true,
             id: "persistent-vm".to_string(),
             name: "test-persistent".to_string(),
             resources: VmResources { cpus: 1, memory_mb: 256 },
-            kernel_path: Some(PathBuf::from("/tmp/vmlinux")),
+            kernel_path: Some(temp_dir.path().join("vmlinux")),
             kernel_args: vec![],
             initramfs_path: None,
             disks: vec![],
@@ -258,7 +263,7 @@ async fn test_state_persistence_across_sessions() {
 
     // Session 2: Reopen database and verify VM still exists
     {
-        let state = StateManager::new(db_path).await.expect("Failed to reopen state manager");
+        let state = StateManager::new(&db_path).await.expect("Failed to reopen state manager");
 
         // VM should still exist
         let vm = state.get_vm("persistent-vm").await.expect("VM should persist across sessions");
@@ -278,15 +283,17 @@ async fn test_state_persistence_across_sessions() {
         state.delete_vm("persistent-vm").await.expect("Failed to delete VM");
     }
 
-    // Clean up test database
-    let _ = std::fs::remove_file(db_path);
+    // temp_dir is automatically cleaned up when it goes out of scope
 }
 
 #[tokio::test]
 async fn test_multiple_vms_concurrent_operations() {
+    // Create temp directory for test artifacts
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+
     let state = StateManager::new_in_memory().await.expect("Failed to create state manager");
 
-    let adapter = Arc::new(MockAdapter::new());
+    let adapter = Arc::new(MockAdapter::new(&temp_dir));
 
     // Create multiple VMs
     let vm_ids = vec!["vm-1", "vm-2", "vm-3"];
@@ -297,7 +304,7 @@ async fn test_multiple_vms_concurrent_operations() {
             id: vm_id.to_string(),
             name: format!("test-{}", vm_id),
             resources: VmResources { cpus: 1, memory_mb: 128 },
-            kernel_path: Some(PathBuf::from("/tmp/vmlinux")),
+            kernel_path: Some(temp_dir.path().join("vmlinux")),
             kernel_args: vec![],
             initramfs_path: None,
             disks: vec![],

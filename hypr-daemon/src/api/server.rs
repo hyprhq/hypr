@@ -603,10 +603,40 @@ pub async fn start_api_server(
     let uds = UnixListener::bind(socket_path)
         .map_err(|e| HyprError::Internal(format!("Failed to bind socket: {}", e)))?;
 
-    // Make socket accessible to all users (so CLI works without sudo even when daemon runs as root)
+    // SECURITY: Socket permissions control who can communicate with the daemon.
+    // Using 0o660 restricts access to owner (root) and the 'hypr' group.
+    // Users who need to use `hypr` CLI without sudo should be added to the 'hypr' group:
+    //   sudo groupadd hypr && sudo usermod -aG hypr $USER
+    //
+    // Note: 0o666 (world-writable) was previously used but is a security risk because
+    // anyone on the system could control VMs or mount host directories.
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o666))
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))
         .map_err(|e| HyprError::Internal(format!("Failed to set socket permissions: {}", e)))?;
+
+    // Try to set group ownership to 'hypr' group if it exists
+    // This allows non-root users in the hypr group to use the CLI
+    {
+        use std::ffi::CString;
+        if let Ok(socket_cstr) = CString::new(socket_path) {
+            // Try to get the 'hypr' group ID
+            let hypr_group = CString::new("hypr").unwrap();
+            unsafe {
+                let grp = libc::getgrnam(hypr_group.as_ptr());
+                if !grp.is_null() {
+                    let gid = (*grp).gr_gid;
+                    // chown socket to root:hypr
+                    if libc::chown(socket_cstr.as_ptr(), 0, gid) == 0 {
+                        info!("Socket ownership set to root:hypr");
+                    } else {
+                        warn!("Failed to set socket group to 'hypr', users may need sudo");
+                    }
+                } else {
+                    warn!("Group 'hypr' not found, users may need sudo. Create it with: sudo groupadd hypr");
+                }
+            }
+        }
+    }
 
     let uds_stream = UnixListenerStream::new(uds);
 

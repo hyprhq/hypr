@@ -38,9 +38,9 @@ pub async fn build(
     let (context_dir, dockerfile_name) = resolve_build_paths(context_path, dockerfile)?;
 
     // Canonicalize to get absolute path
-    let context_dir_abs = context_dir
-        .canonicalize()
-        .with_context(|| format!("Failed to resolve build context path: {}", context_dir.display()))?;
+    let context_dir_abs = context_dir.canonicalize().with_context(|| {
+        format!("Failed to resolve build context path: {}", context_dir.display())
+    })?;
 
     let dockerfile_path = context_dir.join(&dockerfile_name);
     if !dockerfile_path.exists() {
@@ -293,9 +293,7 @@ fn resolve_build_paths(context_path: &str, dockerfile: &str) -> Result<(PathBuf,
     if path.is_file() {
         // User passed a Dockerfile path, extract directory and filename
         let parent = path.parent().unwrap_or(Path::new("."));
-        let filename = path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("Dockerfile");
+        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("Dockerfile");
         return Ok((parent.to_path_buf(), filename.to_string()));
     }
 
@@ -306,10 +304,9 @@ fn resolve_build_paths(context_path: &str, dockerfile: &str) -> Result<(PathBuf,
         let path = PathBuf::from(context_path);
         if let Some(parent) = path.parent() {
             if parent.exists() || parent == Path::new("") || parent == Path::new(".") {
-                let parent_dir = if parent == Path::new("") { PathBuf::from(".") } else { parent.to_path_buf() };
-                let filename = path.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("Dockerfile");
+                let parent_dir =
+                    if parent == Path::new("") { PathBuf::from(".") } else { parent.to_path_buf() };
+                let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("Dockerfile");
                 return Ok((parent_dir, filename.to_string()));
             }
         }
