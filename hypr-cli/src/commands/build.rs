@@ -168,11 +168,7 @@ pub async fn build(
         style(&image_name).green(),
         style(&image_tag).cyan()
     );
-    println!(
-        "  {} Size:     {} MB",
-        style("│").dim(),
-        style(format!("{:.1}", size_mb)).yellow()
-    );
+    println!("  {} Size:     {} MB", style("│").dim(), style(format!("{:.1}", size_mb)).yellow());
     println!();
     println!("  {}  {}", style("⏱️").bold(), style("Performance").bold());
     println!("  {} Duration: {}", style("│").dim(), style(&duration_str).yellow());

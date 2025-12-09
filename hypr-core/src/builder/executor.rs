@@ -1271,12 +1271,15 @@ impl BuildExecutor for LinuxVmBuilder {
             .clone();
 
         // Create SquashFS from final rootfs
-        info!("Creating SquashFS from {} -> {}", final_rootfs.display(), self.work_dir.join("final.squashfs").display());
+        info!(
+            "Creating SquashFS from {} -> {}",
+            final_rootfs.display(),
+            self.work_dir.join("final.squashfs").display()
+        );
 
         // Log the size of final_rootfs directory before compression
-        if let Ok(output) = std::process::Command::new("du")
-            .args(["-sh", final_rootfs.to_str().unwrap()])
-            .output()
+        if let Ok(output) =
+            std::process::Command::new("du").args(["-sh", final_rootfs.to_str().unwrap()]).output()
         {
             let du_output = String::from_utf8_lossy(&output.stdout);
             info!("Final rootfs size (before compression): {}", du_output.trim());
@@ -1486,12 +1489,13 @@ impl LinuxVmBuilder {
                                     }
                                 } else {
                                     // For files, if dest_path looks like a directory, copy to dest_full/filename
-                                    let final_dest = if dest_full.is_dir() || dest_path.ends_with('/') {
-                                        std::fs::create_dir_all(&dest_full)?;
-                                        dest_full.join(src_path.file_name().unwrap())
-                                    } else {
-                                        dest_full.clone()
-                                    };
+                                    let final_dest =
+                                        if dest_full.is_dir() || dest_path.ends_with('/') {
+                                            std::fs::create_dir_all(&dest_full)?;
+                                            dest_full.join(src_path.file_name().unwrap())
+                                        } else {
+                                            dest_full.clone()
+                                        };
                                     std::fs::copy(&src_path, &final_dest)?;
                                 }
                                 info!("COPY --from={}: {} -> {}", stage_name, source, dest_path);
@@ -1500,7 +1504,9 @@ impl LinuxVmBuilder {
                                     instruction: "COPY --from".to_string(),
                                     details: format!(
                                         "Source '{}' not found in stage '{}' (looked in {})",
-                                        source, stage_name, src_path.display()
+                                        source,
+                                        stage_name,
+                                        src_path.display()
                                     ),
                                 });
                             }
@@ -1881,12 +1887,15 @@ impl BuildExecutor for MacOsVmBuilder {
             .clone();
 
         // Create SquashFS from final rootfs
-        info!("Creating SquashFS from {} -> {}", final_rootfs.display(), self.work_dir.join("final.squashfs").display());
+        info!(
+            "Creating SquashFS from {} -> {}",
+            final_rootfs.display(),
+            self.work_dir.join("final.squashfs").display()
+        );
 
         // Log the size of final_rootfs directory before compression
-        if let Ok(output) = std::process::Command::new("du")
-            .args(["-sh", final_rootfs.to_str().unwrap()])
-            .output()
+        if let Ok(output) =
+            std::process::Command::new("du").args(["-sh", final_rootfs.to_str().unwrap()]).output()
         {
             let du_output = String::from_utf8_lossy(&output.stdout);
             info!("Final rootfs size (before compression): {}", du_output.trim());
@@ -1940,7 +1949,12 @@ impl BuildExecutor for MacOsVmBuilder {
         let total_size = match std::fs::metadata(&squashfs_path) {
             Ok(m) => {
                 let size = m.len();
-                info!("Squashfs file {} size: {} bytes ({:.2} MB)", squashfs_path.display(), size, size as f64 / 1024.0 / 1024.0);
+                info!(
+                    "Squashfs file {} size: {} bytes ({:.2} MB)",
+                    squashfs_path.display(),
+                    size,
+                    size as f64 / 1024.0 / 1024.0
+                );
                 size
             }
             Err(e) => {
@@ -2108,12 +2122,13 @@ impl MacOsVmBuilder {
                                 } else {
                                     // For files, if dest_path looks like a directory (ends with / or dest_full is a dir),
                                     // copy to dest_full/filename, otherwise copy directly to dest_full
-                                    let final_dest = if dest_full.is_dir() || dest_path.ends_with('/') {
-                                        std::fs::create_dir_all(&dest_full)?;
-                                        dest_full.join(src_path.file_name().unwrap())
-                                    } else {
-                                        dest_full.clone()
-                                    };
+                                    let final_dest =
+                                        if dest_full.is_dir() || dest_path.ends_with('/') {
+                                            std::fs::create_dir_all(&dest_full)?;
+                                            dest_full.join(src_path.file_name().unwrap())
+                                        } else {
+                                            dest_full.clone()
+                                        };
                                     std::fs::copy(&src_path, &final_dest)?;
                                 }
                                 info!("COPY --from={}: {} -> {}", stage_name, source, dest_path);
@@ -2122,7 +2137,9 @@ impl MacOsVmBuilder {
                                     instruction: "COPY --from".to_string(),
                                     details: format!(
                                         "Source '{}' not found in stage '{}' (looked in {})",
-                                        source, stage_name, src_path.display()
+                                        source,
+                                        stage_name,
+                                        src_path.display()
                                     ),
                                 });
                             }

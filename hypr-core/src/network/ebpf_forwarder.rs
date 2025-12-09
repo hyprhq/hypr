@@ -54,9 +54,7 @@ impl EbpfForwarder {
 
         let drift = DriftManager::new(ingress_path, egress_path, interface)?;
 
-        Ok(Self {
-            drift: Mutex::new(SendSyncDrift(drift))
-        })
+        Ok(Self { drift: Mutex::new(SendSyncDrift(drift)) })
     }
 
     /// Attach eBPF programs to the network interface.
