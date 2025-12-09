@@ -92,23 +92,20 @@ impl HyprService for HyprServiceImpl {
         }
 
         if !entrypoint.is_empty() {
-            use hypr_core::manifest::runtime_manifest::{NetworkConfig as ManifestNetworkConfig, RuntimeManifest};
+            use hypr_core::manifest::runtime_manifest::{
+                NetworkConfig as ManifestNetworkConfig, RuntimeManifest,
+            };
 
             // Build environment variables (merge image env with config env)
-            let mut env_vars: Vec<String> = image
-                .manifest
-                .env
-                .iter()
-                .map(|(k, v)| format!("{}={}", k, v))
-                .collect();
+            let mut env_vars: Vec<String> =
+                image.manifest.env.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
             // Add/override with config env vars
             for (k, v) in &vm_config.env {
                 env_vars.push(format!("{}={}", k, v));
             }
 
             // Build the manifest
-            let mut manifest = RuntimeManifest::new(entrypoint.clone())
-                .with_env(env_vars);
+            let mut manifest = RuntimeManifest::new(entrypoint.clone()).with_env(env_vars);
 
             // Set workdir if specified
             if !image.manifest.workdir.is_empty() {
@@ -140,7 +137,10 @@ impl HyprService for HyprServiceImpl {
             match manifest.encode() {
                 Ok(encoded) => {
                     vm_config.kernel_args.push(format!("manifest={}", encoded));
-                    info!("Injected RuntimeManifest into kernel cmdline (entrypoint: {:?})", entrypoint);
+                    info!(
+                        "Injected RuntimeManifest into kernel cmdline (entrypoint: {:?})",
+                        entrypoint
+                    );
                 }
                 Err(e) => {
                     // Cleanup: release IP
