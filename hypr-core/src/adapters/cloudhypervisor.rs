@@ -297,8 +297,13 @@ impl CloudHypervisorAdapter {
         // Kernel cmdline - build with network parameters if IP is assigned
         let mut kernel_cmdline_parts: Vec<String> = config.kernel_args.clone();
 
-        // Enable serial console output (cloud-hypervisor uses legacy serial which maps to ttyS0)
+        // Enable serial console output
+        // x86_64: uses 8250 serial (ttyS0)
+        // aarch64: uses PL011 UART (ttyAMA0)
+        #[cfg(target_arch = "x86_64")]
         kernel_cmdline_parts.push("console=ttyS0".to_string());
+        #[cfg(target_arch = "aarch64")]
+        kernel_cmdline_parts.push("console=ttyAMA0".to_string());
 
         // Inject network configuration into kernel cmdline for runtime VMs
         if config.network_enabled {
