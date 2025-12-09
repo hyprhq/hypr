@@ -17,9 +17,6 @@ use tracing::{info, instrument};
 use hypr_core::network::EbpfForwarder;
 
 #[cfg(target_os = "linux")]
-use std::path::PathBuf;
-
-#[cfg(target_os = "linux")]
 use tracing::warn;
 
 /// Network manager coordinates all networking subsystems.
@@ -223,9 +220,7 @@ fn try_ebpf_forwarder() -> Result<EbpfForwarder> {
     let forwarder = EbpfForwarder::new(ingress, egress, interface)?;
 
     // Attach to TC hooks (requires CAP_BPF or root)
-    // Note: This is a sync function called from async context, but attach() is async
-    // We use block_in_place to safely run async code in sync context
-    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(forwarder.attach()))?;
+    forwarder.attach()?;
 
     Ok(forwarder)
 }
