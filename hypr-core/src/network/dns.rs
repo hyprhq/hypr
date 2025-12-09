@@ -35,7 +35,7 @@ use tracing::{debug, error, info, instrument, warn};
 
 /// DNS server for HYPR service discovery.
 pub struct DnsServer {
-    /// Address to bind to (e.g., 100.64.0.1:53)
+    /// Address to bind to (e.g., 10.88.0.1:53)
     bind_addr: SocketAddr,
     /// Service registry for resolving *.hypr domains
     registry: Arc<ServiceRegistry>,

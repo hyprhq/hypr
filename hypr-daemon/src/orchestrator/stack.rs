@@ -67,8 +67,8 @@ struct SimpleIpAllocator {
 
 impl SimpleIpAllocator {
     fn new() -> Self {
-        // Start from 100.64.0.2 (100.64.0.1 is gateway)
-        Self { next_ip: 0x64400002, allocated: HashMap::new() }
+        // Start from 10.88.0.2 (10.88.0.1 is gateway)
+        Self { next_ip: 0x0A580002, allocated: HashMap::new() }
     }
 
     fn allocate(&mut self, vm_id: String) -> IpAddr {

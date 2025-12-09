@@ -36,7 +36,7 @@ impl ComposeConverter {
         // Create network config
         let network = NetworkStackConfig {
             name: format!("{}_network", name),
-            subnet: "100.64.0.0/10".to_string(),
+            subnet: "10.88.0.0/16".to_string(),
         };
 
         // Validate dependency graph (no cycles)
@@ -71,7 +71,7 @@ impl ComposeConverter {
         // Create network config
         let network = NetworkStackConfig {
             name: format!("{}_network", name),
-            subnet: "100.64.0.0/10".to_string(),
+            subnet: "10.88.0.0/16".to_string(),
         };
 
         // Validate dependency graph (no cycles)

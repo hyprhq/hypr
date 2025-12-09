@@ -41,7 +41,7 @@ impl NetworkManager {
     /// # Platform-specific behavior
     ///
     /// ## IP Allocation
-    /// - **Linux**: Uses 100.64.0.0/10 IP pool (gateway: 100.64.0.1)
+    /// - **Linux**: Uses 10.88.0.0/16 IP pool (gateway: 10.88.0.1)
     /// - **macOS**: Uses 192.168.64.0/24 IP pool (gateway: 192.168.64.1, vmnet default)
     ///
     /// ## Port Forwarding

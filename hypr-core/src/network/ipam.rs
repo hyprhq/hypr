@@ -1,7 +1,7 @@
 //! IP Address Management (IPAM) for VM networking.
 //!
 //! Manages allocation of IP addresses with platform-specific ranges:
-//! - **Linux**: 100.64.0.0/10 (CGNAT range, for vbr0 bridge)
+//! - **Linux**: 10.88.0.0/16 (private range, avoids Tailscale conflict)
 //! - **macOS**: 192.168.64.0/24 (vmnet default range)
 
 use crate::error::{HyprError, Result};
@@ -13,7 +13,7 @@ use tracing::{info, instrument};
 /// IP address allocator for VMs.
 ///
 /// Allocates IPs from platform-specific ranges with persistent tracking:
-/// - Linux: 100.64.0.0/10 (CGNAT)
+/// - Linux: 10.88.0.0/16 (private range)
 /// - macOS: 192.168.64.0/24 (vmnet)
 pub struct IpAllocator {
     state: Arc<StateManager>,
@@ -27,7 +27,7 @@ impl IpAllocator {
     ///
     /// # Platform-specific behavior
     ///
-    /// - **Linux**: Uses 100.64.0.0/10 (CGNAT range, 4M addresses)
+    /// - **Linux**: Uses 10.88.0.0/16 (private range, 65K addresses)
     /// - **macOS**: Uses 192.168.64.0/24 (vmnet default, 254 addresses)
     ///
     /// # Arguments
@@ -37,12 +37,12 @@ impl IpAllocator {
     pub fn new(state: Arc<StateManager>) -> Self {
         #[cfg(target_os = "linux")]
         {
-            info!("Creating IP allocator (pool: 100.64.0.2 - 103.255.255.254)");
+            info!("Creating IP allocator (pool: 10.88.0.2 - 10.88.255.254)");
             Self {
                 state,
-                pool_start: Ipv4Addr::new(100, 64, 0, 2), // Reserve .1 for gateway
-                pool_end: Ipv4Addr::new(103, 255, 255, 254),
-                gateway: Ipv4Addr::new(100, 64, 0, 1),
+                pool_start: Ipv4Addr::new(10, 88, 0, 2), // Reserve .1 for gateway
+                pool_end: Ipv4Addr::new(10, 88, 255, 254),
+                gateway: Ipv4Addr::new(10, 88, 0, 1),
             }
         }
 
@@ -59,12 +59,12 @@ impl IpAllocator {
 
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            info!("Creating IP allocator (pool: 100.64.0.2 - 103.255.255.254)");
+            info!("Creating IP allocator (pool: 10.88.0.2 - 10.88.255.254)");
             Self {
                 state,
-                pool_start: Ipv4Addr::new(100, 64, 0, 2),
-                pool_end: Ipv4Addr::new(103, 255, 255, 254),
-                gateway: Ipv4Addr::new(100, 64, 0, 1),
+                pool_start: Ipv4Addr::new(10, 88, 0, 2),
+                pool_end: Ipv4Addr::new(10, 88, 255, 254),
+                gateway: Ipv4Addr::new(10, 88, 0, 1),
             }
         }
     }
@@ -156,9 +156,9 @@ impl IpAllocator {
 
     /// Get the total pool size.
     fn pool_size(&self) -> usize {
-        // 100.64.0.0/10 = 4,194,304 addresses
-        // Minus gateway = 4,194,303 available
-        4_194_303
+        // 10.88.0.0/16 = 65,536 addresses
+        // Minus network (.0) and gateway (.1) = 65,533 available
+        65_533
     }
 }
 
@@ -179,14 +179,14 @@ mod tests {
         // Allocate first IP (platform-specific)
         let ip1 = ipam.allocate("vm1").await.unwrap();
         #[cfg(target_os = "linux")]
-        assert_eq!(ip1, Ipv4Addr::new(100, 64, 0, 2));
+        assert_eq!(ip1, Ipv4Addr::new(10, 88, 0, 2));
         #[cfg(target_os = "macos")]
         assert_eq!(ip1, Ipv4Addr::new(192, 168, 64, 2));
 
         // Allocate second IP
         let ip2 = ipam.allocate("vm2").await.unwrap();
         #[cfg(target_os = "linux")]
-        assert_eq!(ip2, Ipv4Addr::new(100, 64, 0, 3));
+        assert_eq!(ip2, Ipv4Addr::new(10, 88, 0, 3));
         #[cfg(target_os = "macos")]
         assert_eq!(ip2, Ipv4Addr::new(192, 168, 64, 3));
 
@@ -219,7 +219,7 @@ mod tests {
         let ipam = IpAllocator::new(state);
 
         #[cfg(target_os = "linux")]
-        assert_eq!(ipam.gateway(), Ipv4Addr::new(100, 64, 0, 1));
+        assert_eq!(ipam.gateway(), Ipv4Addr::new(10, 88, 0, 1));
         #[cfg(target_os = "macos")]
         assert_eq!(ipam.gateway(), Ipv4Addr::new(192, 168, 64, 1));
     }
@@ -248,9 +248,9 @@ mod tests {
 
         #[cfg(target_os = "linux")]
         {
-            assert_eq!(ip1, Ipv4Addr::new(100, 64, 0, 2));
-            assert_eq!(ip2, Ipv4Addr::new(100, 64, 0, 3));
-            assert_eq!(ip3, Ipv4Addr::new(100, 64, 0, 4));
+            assert_eq!(ip1, Ipv4Addr::new(10, 88, 0, 2));
+            assert_eq!(ip2, Ipv4Addr::new(10, 88, 0, 3));
+            assert_eq!(ip3, Ipv4Addr::new(10, 88, 0, 4));
         }
         #[cfg(target_os = "macos")]
         {
@@ -265,7 +265,7 @@ mod tests {
         // Next allocation should reuse released IP
         let ip4 = ipam.allocate("vm4").await.unwrap();
         #[cfg(target_os = "linux")]
-        assert_eq!(ip4, Ipv4Addr::new(100, 64, 0, 3));
+        assert_eq!(ip4, Ipv4Addr::new(10, 88, 0, 3));
         #[cfg(target_os = "macos")]
         assert_eq!(ip4, Ipv4Addr::new(192, 168, 64, 3));
     }
@@ -275,6 +275,6 @@ mod tests {
         let state = create_test_state().await;
         let ipam = IpAllocator::new(state);
 
-        assert_eq!(ipam.pool_size(), 4_194_303);
+        assert_eq!(ipam.pool_size(), 65_533);
     }
 }

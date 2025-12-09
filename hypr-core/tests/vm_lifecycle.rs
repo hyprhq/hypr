@@ -241,7 +241,7 @@ async fn test_state_persistence_across_sessions() {
             image_id: "alpine:latest".to_string(),
             status: VmStatus::Running,
             config,
-            ip_address: Some("100.64.0.5".to_string()),
+            ip_address: Some("10.88.0.5".to_string()),
             pid: Some(99999),
             created_at: SystemTime::now(),
             started_at: Some(SystemTime::now()),
@@ -267,7 +267,7 @@ async fn test_state_persistence_across_sessions() {
         assert_eq!(vm.name, "test-persistent");
         assert_eq!(vm.image_id, "alpine:latest");
         assert_eq!(vm.status, VmStatus::Running);
-        assert_eq!(vm.ip_address, Some("100.64.0.5".to_string()));
+        assert_eq!(vm.ip_address, Some("10.88.0.5".to_string()));
 
         // List all VMs
         let vms = state.list_vms().await.expect("Failed to list VMs");

@@ -109,7 +109,7 @@ impl CloudHypervisorAdapter {
     /// Configure the host-side TAP device for VM networking.
     ///
     /// This sets up the TAP device with the gateway IP so the host can communicate with the VM.
-    /// Uses the 100.64.0.0/10 subnet (CGNAT range, RFC 6598).
+    /// Uses the 10.88.0.0/16 subnet (private range, avoids Tailscale conflict).
     fn configure_tap_device(tap_name: &str) -> Result<()> {
         use std::process::Command as StdCommand;
 
@@ -117,14 +117,14 @@ impl CloudHypervisorAdapter {
         let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1");
 
         // Configure TAP device with gateway IP
-        // The VM uses 100.64.0.x, gateway is 100.64.0.1
+        // The VM uses 10.88.0.x, gateway is 10.88.0.1
         let output = StdCommand::new("ip")
-            .args(["addr", "add", "100.64.0.1/10", "dev", tap_name])
+            .args(["addr", "add", "10.88.0.1/16", "dev", tap_name])
             .output();
 
         match output {
             Ok(o) if o.status.success() => {
-                debug!("Configured TAP {} with IP 100.64.0.1/10", tap_name);
+                debug!("Configured TAP {} with IP 10.88.0.1/16", tap_name);
             }
             Ok(o) => {
                 let stderr = String::from_utf8_lossy(&o.stderr);
@@ -310,13 +310,13 @@ impl CloudHypervisorAdapter {
             if let Some(ip) = &config.network.ip_address {
                 // Use proper kernel IP-Config format: ip=<client>:<server>:<gw>:<netmask>:<host>:<dev>:<autoconf>
                 // This ensures the kernel sets up networking correctly before init runs
-                // Format: ip=100.64.0.2::100.64.0.1:255.192.0.0:::off
-                kernel_cmdline_parts.push(format!("ip={}::100.64.0.1:255.192.0.0:::off", ip));
+                // Format: ip=10.88.0.2::10.88.0.1:255.255.0.0:::off
+                kernel_cmdline_parts.push(format!("ip={}::10.88.0.1:255.255.0.0:::off", ip));
                 // Also pass for kestrel's use (backwards compatibility)
-                kernel_cmdline_parts.push("netmask=255.192.0.0".to_string());
-                kernel_cmdline_parts.push("gateway=100.64.0.1".to_string());
+                kernel_cmdline_parts.push("netmask=255.255.0.0".to_string());
+                kernel_cmdline_parts.push("gateway=10.88.0.1".to_string());
                 kernel_cmdline_parts.push("mode=runtime".to_string());
-                debug!("Injected network config: ip={}::100.64.0.1:255.192.0.0:::off", ip);
+                debug!("Injected network config: ip={}::10.88.0.1:255.255.0.0:::off", ip);
             }
         }
 

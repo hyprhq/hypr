@@ -23,7 +23,7 @@ pub struct Vm {
     /// VM configuration
     pub config: VmConfig,
 
-    /// Assigned IP address (e.g., 100.64.0.5)
+    /// Assigned IP address (e.g., 10.88.0.5)
     pub ip_address: Option<String>,
 
     /// Hypervisor process PID

@@ -13,7 +13,7 @@ pub struct Network {
     /// Network name
     pub name: String,
 
-    /// CIDR (e.g., "100.64.0.0/10")
+    /// CIDR (e.g., "10.88.0.0/16")
     pub cidr: String,
 
     /// Bridge interface name (e.g., "vbr0")
