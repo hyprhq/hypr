@@ -308,12 +308,15 @@ impl CloudHypervisorAdapter {
         // Inject network configuration into kernel cmdline for runtime VMs
         if config.network_enabled {
             if let Some(ip) = &config.network.ip_address {
-                kernel_cmdline_parts.push(format!("ip={}", ip));
-                // Linux uses 100.64.0.0/10 subnet (CGNAT range)
+                // Use proper kernel IP-Config format: ip=<client>:<server>:<gw>:<netmask>:<host>:<dev>:<autoconf>
+                // This ensures the kernel sets up networking correctly before init runs
+                // Format: ip=100.64.0.2::100.64.0.1:255.192.0.0:::off
+                kernel_cmdline_parts.push(format!("ip={}::100.64.0.1:255.192.0.0:::off", ip));
+                // Also pass for kestrel's use (backwards compatibility)
                 kernel_cmdline_parts.push("netmask=255.192.0.0".to_string());
                 kernel_cmdline_parts.push("gateway=100.64.0.1".to_string());
                 kernel_cmdline_parts.push("mode=runtime".to_string());
-                debug!("Injected network config: ip={} netmask=255.192.0.0 gateway=100.64.0.1", ip);
+                debug!("Injected network config: ip={}::100.64.0.1:255.192.0.0:::off", ip);
             }
         }
 
