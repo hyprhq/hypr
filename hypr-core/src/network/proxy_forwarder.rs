@@ -54,15 +54,15 @@ impl ProxyForwarder {
         vm_ip: Ipv4Addr,
         vm_port: u16,
     ) -> Result<JoinHandle<()>> {
-        let listen_addr = SocketAddr::from(([127, 0, 0, 1], host_port));
+        // Bind to all interfaces for external access
+        let listen_addr = SocketAddr::from(([0, 0, 0, 0], host_port));
 
-        // Bind to localhost
         let listener = TcpListener::bind(listen_addr).await.map_err(|e| HyprError::IoError {
-            path: std::path::PathBuf::from(format!("localhost:{}", host_port)),
+            path: std::path::PathBuf::from(format!("0.0.0.0:{}", host_port)),
             source: e,
         })?;
 
-        info!("TCP proxy listening on localhost:{} -> {}:{}", host_port, vm_ip, vm_port);
+        info!("TCP proxy listening on 0.0.0.0:{} -> {}:{}", host_port, vm_ip, vm_port);
 
         // Spawn accept loop
         let handle = tokio::spawn(async move {
@@ -167,15 +167,15 @@ impl ProxyForwarder {
         vm_ip: Ipv4Addr,
         vm_port: u16,
     ) -> Result<JoinHandle<()>> {
-        let listen_addr = SocketAddr::from(([127, 0, 0, 1], host_port));
+        // Bind to all interfaces for external access
+        let listen_addr = SocketAddr::from(([0, 0, 0, 0], host_port));
 
-        // Bind to localhost
         let socket = UdpSocket::bind(listen_addr).await.map_err(|e| HyprError::IoError {
-            path: std::path::PathBuf::from(format!("localhost:{}", host_port)),
+            path: std::path::PathBuf::from(format!("0.0.0.0:{}", host_port)),
             source: e,
         })?;
 
-        info!("UDP proxy listening on localhost:{} -> {}:{}", host_port, vm_ip, vm_port);
+        info!("UDP proxy listening on 0.0.0.0:{} -> {}:{}", host_port, vm_ip, vm_port);
 
         // Spawn relay loop
         let handle = tokio::spawn(async move {
@@ -238,13 +238,13 @@ impl BpfPortMap for ProxyForwarder {
         let handle = tokio::spawn(async move {
             match protocol {
                 Protocol::Tcp => {
-                    // Start TCP proxy in this task
-                    let listen_addr = SocketAddr::from(([127, 0, 0, 1], host_port));
+                    // Start TCP proxy in this task - bind to all interfaces
+                    let listen_addr = SocketAddr::from(([0, 0, 0, 0], host_port));
 
                     match TcpListener::bind(listen_addr).await {
                         Ok(listener) => {
                             info!(
-                                "TCP proxy listening on localhost:{} -> {}:{}",
+                                "TCP proxy listening on 0.0.0.0:{} -> {}:{}",
                                 host_port, vm_ip, vm_port
                             );
 
@@ -282,18 +282,18 @@ impl BpfPortMap for ProxyForwarder {
                             }
                         }
                         Err(e) => {
-                            error!("TCP proxy: failed to bind localhost:{}: {} (try a port >= 1024 or run with sudo)", host_port, e);
+                            error!("TCP proxy: failed to bind 0.0.0.0:{}: {} (try a port >= 1024 or run with sudo)", host_port, e);
                         }
                     }
                 }
                 Protocol::Udp => {
-                    // Start UDP proxy in this task
-                    let listen_addr = SocketAddr::from(([127, 0, 0, 1], host_port));
+                    // Start UDP proxy in this task - bind to all interfaces
+                    let listen_addr = SocketAddr::from(([0, 0, 0, 0], host_port));
 
                     match UdpSocket::bind(listen_addr).await {
                         Ok(socket) => {
                             info!(
-                                "UDP proxy listening on localhost:{} -> {}:{}",
+                                "UDP proxy listening on 0.0.0.0:{} -> {}:{}",
                                 host_port, vm_ip, vm_port
                             );
 
@@ -319,7 +319,7 @@ impl BpfPortMap for ProxyForwarder {
                             }
                         }
                         Err(e) => {
-                            error!("UDP proxy: failed to bind localhost:{}: {} (try a port >= 1024 or run with sudo)", host_port, e);
+                            error!("UDP proxy: failed to bind 0.0.0.0:{}: {} (try a port >= 1024 or run with sudo)", host_port, e);
                         }
                     }
                 }

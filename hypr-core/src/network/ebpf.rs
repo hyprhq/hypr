@@ -293,6 +293,7 @@ impl DriftManager {
     /// Attach eBPF programs to TC hooks.
     ///
     /// This attaches the ingress and egress programs to the specified interface.
+    /// Before attaching, it cleans up any stale TC hooks from previous daemon runs.
     ///
     /// # Errors
     ///
@@ -321,6 +322,17 @@ impl DriftManager {
             error!("Failed to get interface index: {}", e);
             HyprError::EbpfAttachError(format!("Failed to get interface index: {}", e))
         })? as i32;
+
+        // Clean up any stale TC hooks from previous daemon runs
+        // This prevents "Exclusivity flag on, cannot modify" errors
+        debug!("Cleaning up stale TC hooks on interface {}", self.interface);
+        let mut cleanup_builder = TcHookBuilder::new(ingress_prog.as_fd());
+        cleanup_builder.ifindex(ifindex).replace(true).handle(1).priority(1);
+        let mut cleanup_hook = cleanup_builder.hook(TC_INGRESS);
+        // Try to destroy existing qdisc - ignore errors (it might not exist)
+        if let Err(e) = cleanup_hook.destroy() {
+            debug!("No existing TC qdisc to clean up ({})", e);
+        }
 
         let mut tc_builder = TcHookBuilder::new(ingress_prog.as_fd());
         tc_builder.ifindex(ifindex).replace(true).handle(1).priority(1);
