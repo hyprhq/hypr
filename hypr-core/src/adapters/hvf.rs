@@ -48,8 +48,11 @@ impl HvfAdapter {
     /// The initramfs is embedded in the binary at compile time, so this works
     /// for both development and distributed binaries.
     fn get_initramfs_path() -> Result<PathBuf> {
-        // Create temp file in /tmp
-        let temp_path = PathBuf::from("/tmp/hypr-kestrel-initramfs.cpio");
+        // Use centralized runtime directory
+        let runtime_dir = crate::paths::runtime_dir();
+        std::fs::create_dir_all(&runtime_dir)
+            .map_err(|e| HyprError::IoError { path: runtime_dir.clone(), source: e })?;
+        let temp_path = runtime_dir.join("kestrel-initramfs.cpio");
 
         // Only write if it doesn't exist or is outdated
         // (Check size to avoid rewriting on every VM)
@@ -110,7 +113,11 @@ impl HvfAdapter {
         let sector_size = 512u64;
         let padded_size = squashfs_size.div_ceil(sector_size) * sector_size;
 
-        // Create output path (cache in /tmp for reuse)
+        // Create output path in cache directory for reuse
+        let cache_dir = crate::paths::cache_dir();
+        std::fs::create_dir_all(&cache_dir)
+            .map_err(|e| HyprError::IoError { path: cache_dir.clone(), source: e })?;
+
         let hash = {
             use std::collections::hash_map::DefaultHasher;
             use std::hash::{Hash, Hasher};
@@ -119,7 +126,7 @@ impl HvfAdapter {
             squashfs_size.hash(&mut hasher);
             hasher.finish()
         };
-        let raw_path = PathBuf::from(format!("/tmp/hypr-rootfs-{:x}.raw", hash));
+        let raw_path = cache_dir.join(format!("rootfs-{:x}.raw", hash));
 
         // Check if already converted (same size means same content)
         if raw_path.exists() {

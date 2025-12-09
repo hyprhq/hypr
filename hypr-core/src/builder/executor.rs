@@ -202,8 +202,8 @@ impl NativeBuilder {
 
     /// Creates a temporary working directory for builds.
     fn create_work_dir() -> BuildResult<PathBuf> {
-        let temp = std::env::temp_dir();
-        let work_dir = temp.join(format!("hypr-build-{}", uuid::Uuid::new_v4()));
+        let cache_dir = crate::paths::cache_dir();
+        let work_dir = cache_dir.join(format!("build-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&work_dir)?;
         Ok(work_dir)
     }
@@ -1057,7 +1057,8 @@ impl LinuxVmBuilder {
     pub fn new() -> BuildResult<Self> {
         use crate::adapters::CloudHypervisorAdapter;
 
-        let work_dir = std::env::temp_dir().join(format!("hypr-build-{}", uuid::Uuid::new_v4()));
+        let cache_dir = crate::paths::cache_dir();
+        let work_dir = cache_dir.join(format!("build-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&work_dir)
             .map_err(|e| BuildError::IoError { path: work_dir.clone(), source: e })?;
 
@@ -1067,7 +1068,7 @@ impl LinuxVmBuilder {
         })?;
 
         // Placeholder: builder_rootfs will be replaced by on-the-fly initramfs
-        let builder_rootfs = PathBuf::from("/tmp/dummy-will-be-initramfs");
+        let builder_rootfs = crate::paths::runtime_dir().join("builder-initramfs.cpio");
 
         // Create VMM adapter for Linux (cloud-hypervisor)
         let adapter = CloudHypervisorAdapter::new().map_err(|e| {
@@ -1640,7 +1641,8 @@ impl MacOsVmBuilder {
     pub fn new() -> BuildResult<Self> {
         use crate::adapters::HvfAdapter;
 
-        let work_dir = std::env::temp_dir().join(format!("hypr-build-{}", uuid::Uuid::new_v4()));
+        let cache_dir = crate::paths::cache_dir();
+        let work_dir = cache_dir.join(format!("build-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&work_dir)
             .map_err(|e| BuildError::IoError { path: work_dir.clone(), source: e })?;
 
@@ -1650,8 +1652,7 @@ impl MacOsVmBuilder {
         })?;
 
         // Placeholder: builder_rootfs will be replaced by on-the-fly initramfs
-        // For now, use a dummy path (VmBuilder will be refactored to use initramfs)
-        let builder_rootfs = PathBuf::from("/tmp/dummy-will-be-initramfs");
+        let builder_rootfs = crate::paths::runtime_dir().join("builder-initramfs.cpio");
 
         // Create VMM adapter for macOS (HVF)
         let adapter = HvfAdapter::new().map_err(|e| {

@@ -1,30 +1,21 @@
 //! Centralized path configuration for HYPR.
 //!
-//! All data paths should go through this module to ensure consistency
-//! between daemon and CLI, whether running as user or system service.
+//! All paths should go through this module to ensure consistency.
+//! HYPR requires root privileges for VM operations, so paths are system-level.
 
 use std::path::PathBuf;
 
 /// Get the HYPR data directory.
 ///
 /// Resolution order:
-/// 1. `HYPR_DATA_DIR` environment variable
-/// 2. `/var/lib/hypr` if it exists (system install - LaunchDaemon)
-/// 3. `~/.hypr` for user-only installs
+/// 1. `HYPR_DATA_DIR` environment variable (for testing/custom installs)
+/// 2. `/var/lib/hypr` (standard system location)
 pub fn data_dir() -> PathBuf {
-    // Check environment variable first
     if let Ok(dir) = std::env::var("HYPR_DATA_DIR") {
         return PathBuf::from(dir);
     }
 
-    // Check if system install exists (LaunchDaemon mode)
-    let system_dir = PathBuf::from("/var/lib/hypr");
-    if system_dir.exists() {
-        return system_dir;
-    }
-
-    // Fall back to user home directory
-    dirs::home_dir().map(|h| h.join(".hypr")).unwrap_or(system_dir)
+    PathBuf::from("/var/lib/hypr")
 }
 
 /// Get the database path.
@@ -137,30 +128,28 @@ pub fn ebpf_dir() -> PathBuf {
 /// - API sockets
 /// - PID files
 /// - virtiofsd sockets
+/// - Extracted binaries (cloud-hypervisor)
+/// - Initramfs files
 ///
 /// Resolution order:
-/// 1. `HYPR_RUNTIME_DIR` environment variable
-/// 2. `$XDG_RUNTIME_DIR/hypr` if XDG_RUNTIME_DIR is set
-/// 3. `/run/hypr` if running as root
-/// 4. `/tmp/hypr-runtime` as fallback
+/// 1. `HYPR_RUNTIME_DIR` environment variable (for testing/custom installs)
+/// 2. `/run/hypr` (Linux standard)
+/// 3. `/tmp/hypr` (macOS fallback, no /run)
 pub fn runtime_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("HYPR_RUNTIME_DIR") {
         return PathBuf::from(dir);
     }
 
-    if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
-        return PathBuf::from(xdg).join("hypr");
-    }
-
-    // Check if running as root
-    #[cfg(unix)]
+    // Linux uses /run, macOS uses /tmp
+    #[cfg(target_os = "linux")]
     {
-        if unsafe { libc::geteuid() } == 0 {
-            return PathBuf::from("/run/hypr");
-        }
+        return PathBuf::from("/run/hypr");
     }
 
-    PathBuf::from("/tmp/hypr-runtime")
+    #[cfg(not(target_os = "linux"))]
+    {
+        PathBuf::from("/tmp/hypr")
+    }
 }
 
 #[cfg(test)]

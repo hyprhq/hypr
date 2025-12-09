@@ -154,7 +154,7 @@ impl VmmAdapter for KrunAdapter {
     }
 
     fn vsock_path(&self, handle: &VmHandle) -> PathBuf {
-        PathBuf::from(format!("/tmp/hypr-krun-{}.vsock", handle.id))
+        crate::paths::runtime_dir().join(format!("krun-{}.vsock", handle.id))
     }
 
     fn capabilities(&self) -> AdapterCapabilities {

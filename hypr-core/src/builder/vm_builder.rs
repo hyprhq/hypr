@@ -156,7 +156,7 @@ impl VmBuilder {
             self.spawn_builder_vm(context_dir, output_layer.parent().unwrap(), base_rootfs).await?;
 
         // Stream stdout using prettifier (pure presentation layer)
-        let log_path = PathBuf::from(format!("/tmp/hypr-vm-{}.log", vm.id));
+        let log_path = crate::paths::vm_log_path(&vm.id);
         let mut streamer = BuildOutputStream::new();
 
         info!("Streaming VM output from: {}", log_path.display());

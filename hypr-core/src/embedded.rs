@@ -25,7 +25,11 @@ const CLOUD_HYPERVISOR_BINARY: &[u8] =
 /// 3. Extracts the embedded binary if missing
 /// 4. Returns the path to the binary
 pub fn get_cloud_hypervisor_path() -> Result<PathBuf> {
-    let runtime_dir = get_runtime_dir()?;
+    // Use centralized paths module for consistency
+    let runtime_dir = crate::paths::runtime_dir();
+    fs::create_dir_all(&runtime_dir)
+        .map_err(|e| HyprError::IoError { path: runtime_dir.clone(), source: e })?;
+
     let binary_name = if cfg!(target_arch = "x86_64") {
         "cloud-hypervisor-static"
     } else if cfg!(target_arch = "aarch64") {
@@ -84,29 +88,6 @@ fn extract_cloud_hypervisor(dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Get the runtime directory for extracted binaries.
-///
-/// This is typically:
-/// - Linux: /tmp/hypr-runtime or $XDG_RUNTIME_DIR/hypr
-/// - macOS: /tmp/hypr-runtime
-fn get_runtime_dir() -> Result<PathBuf> {
-    let base = if cfg!(target_os = "linux") {
-        // Use XDG_RUNTIME_DIR if available, otherwise /tmp
-        std::env::var("XDG_RUNTIME_DIR")
-            .ok()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-    } else {
-        PathBuf::from("/tmp")
-    };
-
-    let runtime_dir = base.join("hypr-runtime");
-    fs::create_dir_all(&runtime_dir)
-        .map_err(|e| HyprError::IoError { path: runtime_dir.clone(), source: e })?;
-
-    Ok(runtime_dir)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,9 +99,9 @@ mod tests {
     }
 
     #[test]
-    fn test_get_runtime_dir() {
-        let runtime_dir = get_runtime_dir().unwrap();
-        assert!(runtime_dir.exists());
-        assert!(runtime_dir.is_dir());
+    fn test_runtime_dir() {
+        let runtime_dir = crate::paths::runtime_dir();
+        // Just verify the path is reasonable
+        assert!(!runtime_dir.as_os_str().is_empty());
     }
 }

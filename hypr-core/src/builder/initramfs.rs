@@ -59,21 +59,25 @@ fn extract_embedded_initramfs(arch: &str) -> BuildResult<PathBuf> {
 
     debug!("Extracting embedded initramfs ({} bytes)", initramfs_bytes.len());
 
-    // Write to temp file
-    let temp_path =
-        std::env::temp_dir().join(format!("hypr-initramfs-{}.cpio", uuid::Uuid::new_v4()));
+    // Use centralized runtime directory for consistency
+    let runtime_dir = crate::paths::runtime_dir();
+    fs::create_dir_all(&runtime_dir)
+        .map_err(|e| BuildError::IoError { path: runtime_dir.clone(), source: e })?;
+
+    let initramfs_path =
+        runtime_dir.join(format!("initramfs-{}.cpio", uuid::Uuid::new_v4()));
 
     {
-        let mut f = File::create(&temp_path)
-            .map_err(|e| BuildError::IoError { path: temp_path.clone(), source: e })?;
+        let mut f = File::create(&initramfs_path)
+            .map_err(|e| BuildError::IoError { path: initramfs_path.clone(), source: e })?;
         f.write_all(initramfs_bytes)
-            .map_err(|e| BuildError::IoError { path: temp_path.clone(), source: e })?;
-        f.flush().map_err(|e| BuildError::IoError { path: temp_path.clone(), source: e })?;
+            .map_err(|e| BuildError::IoError { path: initramfs_path.clone(), source: e })?;
+        f.flush().map_err(|e| BuildError::IoError { path: initramfs_path.clone(), source: e })?;
     }
 
-    debug!("Embedded initramfs extracted successfully: {}", temp_path.display());
+    debug!("Embedded initramfs extracted successfully: {}", initramfs_path.display());
 
-    Ok(temp_path)
+    Ok(initramfs_path)
 }
 
 /// Validate and copy override initramfs.
@@ -115,14 +119,18 @@ fn validate_and_copy_override(src: &std::path::Path) -> BuildResult<PathBuf> {
         )));
     }
 
-    // Copy to temp location (to match embedded behavior)
-    let temp_path =
-        std::env::temp_dir().join(format!("hypr-initramfs-override-{}.cpio", uuid::Uuid::new_v4()));
+    // Copy to runtime directory (to match embedded behavior)
+    let runtime_dir = crate::paths::runtime_dir();
+    fs::create_dir_all(&runtime_dir)
+        .map_err(|e| BuildError::IoError { path: runtime_dir.clone(), source: e })?;
 
-    fs::copy(src, &temp_path)
-        .map_err(|e| BuildError::IoError { path: temp_path.clone(), source: e })?;
+    let initramfs_path =
+        runtime_dir.join(format!("initramfs-override-{}.cpio", uuid::Uuid::new_v4()));
+
+    fs::copy(src, &initramfs_path)
+        .map_err(|e| BuildError::IoError { path: initramfs_path.clone(), source: e })?;
 
     debug!("Override initramfs copied successfully");
 
-    Ok(temp_path)
+    Ok(initramfs_path)
 }

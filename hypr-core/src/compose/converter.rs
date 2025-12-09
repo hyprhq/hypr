@@ -383,9 +383,9 @@ impl ComposeConverter {
         }
 
         // Try to pull the image and extract layers
-        // Create a temporary directory for the pulled image
-        let temp_dir =
-            std::env::temp_dir().join(format!("hypr-cache-from-{}", uuid::Uuid::new_v4()));
+        // Create a temporary directory for the pulled image in cache
+        let cache_dir = crate::paths::cache_dir();
+        let temp_dir = cache_dir.join(format!("cache-from-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir)
             .map_err(|e| HyprError::IoError { path: temp_dir.clone(), source: e })?;
 
