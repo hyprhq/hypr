@@ -18,6 +18,11 @@ use tracing::{debug, error, info, instrument, warn};
 // Embed kestrel initramfs directly in the binary (1.9MB)
 // This is built by hypr-core/build.rs during compilation
 // Works for both development and distributed binaries!
+#[cfg(target_arch = "x86_64")]
+static KESTREL_INITRAMFS: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/embedded/initramfs-linux-amd64.cpio"));
+
+#[cfg(target_arch = "aarch64")]
 static KESTREL_INITRAMFS: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/embedded/initramfs-linux-arm64.cpio"));
 
