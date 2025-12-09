@@ -259,15 +259,17 @@ impl CloudHypervisorAdapter {
             }
         }
 
+        // Initramfs (for minimal boot environments like builder VMs)
+        if let Some(initramfs) = &config.initramfs_path {
+            // Tell kernel to use init from initramfs instead of mounting root device
+            kernel_cmdline_parts.push("rdinit=/init".to_string());
+            args.push("--initramfs".to_string());
+            args.push(initramfs.to_string_lossy().to_string());
+        }
+
         if !kernel_cmdline_parts.is_empty() {
             args.push("--cmdline".to_string());
             args.push(kernel_cmdline_parts.join(" "));
-        }
-
-        // Initramfs (for minimal boot environments like builder VMs)
-        if let Some(initramfs) = &config.initramfs_path {
-            args.push("--initramfs".to_string());
-            args.push(initramfs.to_string_lossy().to_string());
         }
 
         // Disks
