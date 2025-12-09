@@ -63,6 +63,38 @@ pub fn ebpf_dir() -> PathBuf {
     data_dir()
 }
 
+/// Get the runtime directory for sockets, PIDs, etc.
+///
+/// This directory is used for ephemeral runtime files like:
+/// - API sockets
+/// - PID files
+/// - virtiofsd sockets
+///
+/// Resolution order:
+/// 1. `HYPR_RUNTIME_DIR` environment variable
+/// 2. `$XDG_RUNTIME_DIR/hypr` if XDG_RUNTIME_DIR is set
+/// 3. `/run/hypr` if running as root
+/// 4. `/tmp/hypr-runtime` as fallback
+pub fn runtime_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("HYPR_RUNTIME_DIR") {
+        return PathBuf::from(dir);
+    }
+
+    if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
+        return PathBuf::from(xdg).join("hypr");
+    }
+
+    // Check if running as root
+    #[cfg(unix)]
+    {
+        if unsafe { libc::geteuid() } == 0 {
+            return PathBuf::from("/run/hypr");
+        }
+    }
+
+    PathBuf::from("/tmp/hypr-runtime")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
