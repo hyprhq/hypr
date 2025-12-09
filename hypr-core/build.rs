@@ -183,7 +183,14 @@ fn compile_kestrel_to(src: &Path, output_path: &Path, zig_target: &str, arch_nam
         }
     };
 
+    // Set cache directory for zig (fixes "AppDataDirUnavailable" when running as root)
+    let zig_cache = std::env::temp_dir().join("zig-cache");
+    let _ = fs::create_dir_all(&zig_cache);
+
     let status = Command::new(&zig_bin)
+        .env("XDG_CACHE_HOME", &zig_cache)
+        .env("ZIG_LOCAL_CACHE_DIR", zig_cache.join("local"))
+        .env("ZIG_GLOBAL_CACHE_DIR", zig_cache.join("global"))
         .args([
             "cc",
             "-target",
