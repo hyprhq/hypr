@@ -1,0 +1,288 @@
+name: Build Linux Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: 'Kernel version (e.g., 6.12.8)'
+        required: true
+        default: '6.12.8'
+        type: string
+      ch_branch:
+        description: 'cloud-hypervisor/linux branch (e.g., ch-6.12.8)'
+        required: true
+        default: 'ch-6.12.8'
+        type: string
+
+env:
+  KERNEL_VERSION: ${{ inputs.kernel_version }}
+
+jobs:
+  build-kernel:
+    name: Build Kernel (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+            cross_compile: ""
+            image_name: vmlinux-x86_64
+
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            cross_compile: ""
+            image_name: vmlinux-aarch64
+
+    steps:
+      - name: Checkout hypr repo
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            bc \
+            bison \
+            flex \
+            libelf-dev \
+            libssl-dev \
+            libncurses-dev \
+            cpio \
+            rsync
+
+      - name: Clone cloud-hypervisor kernel
+        run: |
+          git clone --depth 1 --branch ${{ inputs.ch_branch }} \
+            https://github.com/cloud-hypervisor/linux.git kernel
+          cd kernel
+          echo "Kernel version: $(make kernelversion)"
+
+      - name: Configure kernel with cloud-hypervisor defaults
+        working-directory: kernel
+        run: |
+          # Start with cloud-hypervisor's minimal config
+          make ch_defconfig
+
+          # Display initial config info
+          echo "Initial config from ch_defconfig:"
+          grep -E "CONFIG_SQUASHFS|CONFIG_OVERLAY_FS|CONFIG_FUSE_FS|CONFIG_VIRTIO_FS" .config || true
+
+      - name: Enable additional kernel options for HYPR
+        working-directory: kernel
+        run: |
+          # Enable squashfs (required for OCI image rootfs)
+          ./scripts/config --enable CONFIG_SQUASHFS
+          ./scripts/config --enable CONFIG_SQUASHFS_ZLIB
+          ./scripts/config --enable CONFIG_SQUASHFS_LZO
+          ./scripts/config --enable CONFIG_SQUASHFS_XZ
+          ./scripts/config --enable CONFIG_SQUASHFS_ZSTD
+          ./scripts/config --enable CONFIG_SQUASHFS_LZ4
+
+          # Enable overlay filesystem (for layered container images)
+          ./scripts/config --enable CONFIG_OVERLAY_FS
+
+          # Enable FUSE and virtio-fs (for host-guest file sharing)
+          ./scripts/config --enable CONFIG_FUSE_FS
+          ./scripts/config --enable CONFIG_VIRTIO_FS
+
+          # Enable cgroups v2 (for container resource limits)
+          ./scripts/config --enable CONFIG_CGROUPS
+          ./scripts/config --enable CONFIG_CGROUP_CPUACCT
+          ./scripts/config --enable CONFIG_CGROUP_DEVICE
+          ./scripts/config --enable CONFIG_CGROUP_FREEZER
+          ./scripts/config --enable CONFIG_CGROUP_PIDS
+          ./scripts/config --enable CONFIG_CGROUP_SCHED
+          ./scripts/config --enable CONFIG_MEMCG
+
+          # Enable namespaces (for container isolation)
+          ./scripts/config --enable CONFIG_NAMESPACES
+          ./scripts/config --enable CONFIG_UTS_NS
+          ./scripts/config --enable CONFIG_IPC_NS
+          ./scripts/config --enable CONFIG_USER_NS
+          ./scripts/config --enable CONFIG_PID_NS
+          ./scripts/config --enable CONFIG_NET_NS
+
+          # Enable networking features
+          ./scripts/config --enable CONFIG_BRIDGE
+          ./scripts/config --enable CONFIG_VETH
+          ./scripts/config --enable CONFIG_TUN
+          ./scripts/config --enable CONFIG_MACVLAN
+          ./scripts/config --enable CONFIG_IPVLAN
+          ./scripts/config --enable CONFIG_NETFILTER
+          ./scripts/config --enable CONFIG_NF_NAT
+          ./scripts/config --enable CONFIG_IP_NF_NAT
+          ./scripts/config --enable CONFIG_IP_NF_IPTABLES
+          ./scripts/config --enable CONFIG_IP_NF_FILTER
+
+          # Enable additional filesystem support
+          ./scripts/config --enable CONFIG_TMPFS
+          ./scripts/config --enable CONFIG_PROC_FS
+          ./scripts/config --enable CONFIG_SYSFS
+          ./scripts/config --enable CONFIG_DEVTMPFS
+          ./scripts/config --enable CONFIG_DEVTMPFS_MOUNT
+
+          # Enable ext4 (alternative to squashfs if needed)
+          ./scripts/config --enable CONFIG_EXT4_FS
+
+          # Enable loop device (for mounting images)
+          ./scripts/config --enable CONFIG_BLK_DEV_LOOP
+
+          # Ensure key options are built-in (not modules) for initramfs boot
+          ./scripts/config --set-val CONFIG_SQUASHFS y
+          ./scripts/config --set-val CONFIG_OVERLAY_FS y
+          ./scripts/config --set-val CONFIG_FUSE_FS y
+          ./scripts/config --set-val CONFIG_VIRTIO_FS y
+
+          # Update config with new options
+          make olddefconfig
+
+          # Verify critical options are enabled
+          echo ""
+          echo "=== Final config verification ==="
+          echo "squashfs:"
+          grep CONFIG_SQUASHFS .config
+          echo ""
+          echo "overlay:"
+          grep CONFIG_OVERLAY_FS .config
+          echo ""
+          echo "virtio-fs:"
+          grep CONFIG_VIRTIO_FS .config
+          echo ""
+          echo "fuse:"
+          grep CONFIG_FUSE_FS .config
+          echo ""
+          echo "namespaces:"
+          grep CONFIG_.*_NS .config | head -10
+
+      - name: Build kernel
+        working-directory: kernel
+        run: |
+          # Build with all available cores
+          make -j$(nproc) vmlinux
+
+          # Show kernel info
+          ls -lh vmlinux
+          file vmlinux
+
+      - name: Prepare kernel artifact
+        run: |
+          mkdir -p dist
+          cp kernel/vmlinux dist/${{ matrix.image_name }}
+
+          # Generate SHA256 checksum
+          cd dist
+          sha256sum ${{ matrix.image_name }} > ${{ matrix.image_name }}.sha256
+
+          # Show artifact info
+          echo "Kernel artifact:"
+          ls -lh
+          cat *.sha256
+
+      - name: Upload kernel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ matrix.arch }}
+          path: dist/*
+
+  create-release:
+    name: Create Kernel Release
+    needs: build-kernel
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+
+          # Copy all kernel binaries to release directory
+          find artifacts -type f -exec cp {} release/ \;
+
+          # List what we're releasing
+          echo "Release contents:"
+          ls -lh release/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: kernel-${{ inputs.kernel_version }}-hypr
+          name: Linux Kernel ${{ inputs.kernel_version }} for HYPR
+          draft: false
+          prerelease: false
+          body: |
+            ## Linux Kernel ${{ inputs.kernel_version }} for HYPR
+
+            Custom Linux kernel built for HYPR microVMs, based on [cloud-hypervisor/linux](https://github.com/cloud-hypervisor/linux) branch `${{ inputs.ch_branch }}`.
+
+            ### Features Enabled
+
+            **Filesystem Support:**
+            - SquashFS (with zlib, lzo, xz, zstd, lz4 compression)
+            - OverlayFS (for layered container images)
+            - VirtIO-FS / FUSE (for host-guest file sharing)
+            - ext4, tmpfs, procfs, sysfs, devtmpfs
+
+            **Container Features:**
+            - Namespaces (UTS, IPC, User, PID, Network)
+            - Cgroups v2 (CPU, Memory, PIDs, Devices, Freezer)
+
+            **Networking:**
+            - Bridge, veth, TUN/TAP, macvlan, ipvlan
+            - Netfilter / iptables / NAT
+
+            **VirtIO Drivers:**
+            - virtio_blk, virtio_net, virtio_console, virtio_fs
+
+            ### Binaries
+
+            | File | Architecture | Description |
+            |------|--------------|-------------|
+            | `vmlinux-x86_64` | x86_64 | Uncompressed kernel for Intel/AMD |
+            | `vmlinux-aarch64` | aarch64 | Uncompressed kernel for ARM64 |
+
+            ### Usage
+
+            Download the appropriate kernel for your architecture and use it with HYPR:
+
+            ```bash
+            # Linux x86_64
+            curl -fsSL https://github.com/hyprhq/hypr/releases/download/kernel-${{ inputs.kernel_version }}-hypr/vmlinux-x86_64 -o ~/.hypr/vmlinux
+
+            # Linux aarch64
+            curl -fsSL https://github.com/hyprhq/hypr/releases/download/kernel-${{ inputs.kernel_version }}-hypr/vmlinux-aarch64 -o ~/.hypr/vmlinux
+
+            # macOS (Apple Silicon)
+            curl -fsSL https://github.com/hyprhq/hypr/releases/download/kernel-${{ inputs.kernel_version }}-hypr/vmlinux-aarch64 -o ~/.hypr/vmlinux
+
+            # macOS (Intel)
+            curl -fsSL https://github.com/hyprhq/hypr/releases/download/kernel-${{ inputs.kernel_version }}-hypr/vmlinux-x86_64 -o ~/.hypr/vmlinux
+            ```
+
+            ### Verification
+
+            ```bash
+            curl -fsSL https://github.com/hyprhq/hypr/releases/download/kernel-${{ inputs.kernel_version }}-hypr/vmlinux-x86_64.sha256 -o vmlinux.sha256
+            sha256sum -c vmlinux.sha256
+            ```
+
+            ### Base Kernel
+
+            - Source: cloud-hypervisor/linux
+            - Branch: ${{ inputs.ch_branch }}
+            - Base config: `ch_defconfig`
+
+          files: |
+            release/vmlinux-x86_64
+            release/vmlinux-x86_64.sha256
+            release/vmlinux-aarch64
+            release/vmlinux-aarch64.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
