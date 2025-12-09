@@ -47,7 +47,8 @@ jobs:
             libssl-dev \
             libncurses-dev \
             cpio \
-            rsync
+            rsync \
+            bsdmainutils
 
       - name: Download mainline kernel
         run: |
