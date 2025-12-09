@@ -127,11 +127,11 @@ jobs:
         run: |
           mkdir -p dist
 
-          # hypr-cli binary (cargo builds as 'hypr-cli') → rename to hypr-{platform}-{arch}
-          cp target/${{ matrix.target }}/release/hypr-cli dist/hypr-${{ matrix.platform }}-${{ matrix.arch }}
+          # hypr-cli binary (cargo builds as 'hypr') → rename to hypr-{platform}-{arch}
+          cp target/${{ matrix.target }}/release/hypr dist/hypr-${{ matrix.platform }}-${{ matrix.arch }}
 
-          # hypr-daemon binary (cargo builds as 'hypr-daemon') → rename to hyprd-{platform}-{arch}
-          cp target/${{ matrix.target }}/release/hypr-daemon dist/hyprd-${{ matrix.platform }}-${{ matrix.arch }}
+          # hypr-daemon binary (cargo builds as 'hyprd') → rename to hyprd-{platform}-{arch}
+          cp target/${{ matrix.target }}/release/hyprd dist/hyprd-${{ matrix.platform }}-${{ matrix.arch }}
 
           # Make executable
           chmod +x dist/hypr-${{ matrix.platform }}-${{ matrix.arch }}
