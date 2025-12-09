@@ -1162,10 +1162,11 @@ impl LinuxVmBuilder {
 impl BuildExecutor for LinuxVmBuilder {
     async fn execute(
         &mut self,
-        graph: &BuildGraph,
+        _graph: &BuildGraph,
         context: &BuildContext,
         cache: &mut CacheManager,
     ) -> BuildResult<BuildOutput> {
+        #[allow(unused_imports)]
         use crate::builder::parser::{BuildStage, ImageRef};
 
         info!("Starting Linux VM-based build with cloud-hypervisor (multi-stage support)");
@@ -1449,22 +1450,6 @@ impl LinuxVmBuilder {
                                 }
                             })?;
 
-                        // Generate copy command that copies from /stage mount
-                        // We'll mount the source stage's rootfs at /stage in the VM
-                        let source_list = sources.join(" ");
-                        let copy_cmd = format!(
-                            "mkdir -p {} && cp -r {} {} 2>/dev/null || true",
-                            dest_path,
-                            sources
-                                .iter()
-                                .map(|s| format!("/stage{}", s))
-                                .collect::<Vec<_>>()
-                                .join(" "),
-                            dest_path
-                        );
-
-                        // For now, we'll handle this by copying files on the host side before VM execution
-                        // This is simpler and doesn't require kestrel changes
                         // Copy files on the host side before VM execution
                         for source in sources {
                             let src_path = source_rootfs.join(source.trim_start_matches('/'));

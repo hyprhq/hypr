@@ -10,21 +10,29 @@ use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use crate::network::ebpf::{DriftManager, Protocol as EbpfProtocol};
 #[cfg(target_os = "linux")]
-use std::sync::Arc;
-#[cfg(target_os = "linux")]
-use tokio::sync::Mutex;
+use std::sync::Mutex;
 #[cfg(target_os = "linux")]
 use tracing::{info, instrument};
 
 #[cfg(not(target_os = "linux"))]
 use crate::error::HyprError;
 
+/// Wrapper to make DriftManager Send+Sync safe.
+/// Safety: Access is protected by a Mutex, so only one thread can access at a time.
+#[cfg(target_os = "linux")]
+struct SendSyncDrift(DriftManager);
+
+#[cfg(target_os = "linux")]
+unsafe impl Send for SendSyncDrift {}
+#[cfg(target_os = "linux")]
+unsafe impl Sync for SendSyncDrift {}
+
 /// eBPF-based port forwarder using Drift L4 programs.
 ///
 /// Only available on Linux. Provides 10+ Gbps throughput via kernel datapath.
 #[cfg(target_os = "linux")]
 pub struct EbpfForwarder {
-    drift: Arc<Mutex<DriftManager>>,
+    drift: Mutex<SendSyncDrift>,
 }
 
 #[cfg(target_os = "linux")]
@@ -46,27 +54,25 @@ impl EbpfForwarder {
 
         let drift = DriftManager::new(ingress_path, egress_path, interface)?;
 
-        // Attach eBPF programs to TC hooks
-        // Note: This requires CAP_BPF or root privileges
-        let drift = Arc::new(Mutex::new(drift));
-
-        Ok(Self { drift })
+        Ok(Self {
+            drift: Mutex::new(SendSyncDrift(drift))
+        })
     }
 
     /// Attach eBPF programs to the network interface.
     ///
     /// This must be called after creating the forwarder and before adding mappings.
     #[instrument(skip(self))]
-    pub async fn attach(&self) -> Result<()> {
-        let drift = self.drift.lock().await;
-        drift.attach()
+    pub fn attach(&self) -> Result<()> {
+        let mut drift = self.drift.lock().unwrap();
+        drift.0.attach()
     }
 
     /// Detach eBPF programs from the network interface.
     #[instrument(skip(self))]
-    pub async fn detach(&self) -> Result<()> {
-        let drift = self.drift.lock().await;
-        drift.detach()
+    pub fn detach(&self) -> Result<()> {
+        let mut drift = self.drift.lock().unwrap();
+        drift.0.detach()
     }
 }
 
@@ -88,8 +94,8 @@ impl BpfPortMap for EbpfForwarder {
         };
 
         // Add mapping (blocking call is OK here since eBPF map updates are fast)
-        let drift = self.drift.blocking_lock();
-        drift.add_port_mapping(ebpf_mapping)
+        let drift = self.drift.lock().unwrap();
+        drift.0.add_port_mapping(ebpf_mapping)
     }
 
     fn remove_mapping(&self, host_port: u16, protocol: Protocol) -> Result<()> {
@@ -100,8 +106,8 @@ impl BpfPortMap for EbpfForwarder {
         };
 
         // Remove mapping (note: DriftManager::remove_port_mapping takes (protocol, port))
-        let drift = self.drift.blocking_lock();
-        drift.remove_port_mapping(ebpf_proto, host_port)
+        let drift = self.drift.lock().unwrap();
+        drift.0.remove_port_mapping(ebpf_proto, host_port)
     }
 
     fn is_available(&self) -> bool {
