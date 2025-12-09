@@ -108,8 +108,7 @@ pub fn ensure_kernel() -> std::io::Result<PathBuf> {
         match client.get(url).send() {
             Ok(response) => {
                 if !response.status().is_success() {
-                    last_error =
-                        Some(format!("Download failed: HTTP {}", response.status()));
+                    last_error = Some(format!("Download failed: HTTP {}", response.status()));
                     continue;
                 }
 
