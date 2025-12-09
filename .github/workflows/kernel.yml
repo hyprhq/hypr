@@ -20,13 +20,13 @@ jobs:
       matrix:
         include:
           - arch: x86_64
-            runner: ubuntu-latest
+            runner: [self-hosted, Linux, X64]
             cross_compile: ""
             image_name: vmlinux-x86_64
             kernel_target: vmlinux
 
           - arch: aarch64
-            runner: ubuntu-24.04-arm
+            runner: [self-hosted, Linux, ARM64]
             cross_compile: ""
             image_name: Image-aarch64
             kernel_target: Image
