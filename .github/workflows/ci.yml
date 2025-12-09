@@ -38,13 +38,20 @@ jobs:
 
       - name: Install zig
         run: |
+          # Skip if zig already installed
+          if command -v zig &> /dev/null; then
+            echo "Zig already installed: $(zig version)"
+            exit 0
+          fi
+
           if [ "$RUNNER_OS" == "macOS" ]; then
             brew install zig
           elif [ "$RUNNER_OS" == "Linux" ]; then
             wget -q https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz
             tar -xf zig-linux-x86_64-0.13.0.tar.xz
+            sudo rm -rf /usr/local/zig
             sudo mv zig-linux-x86_64-0.13.0 /usr/local/zig
-            sudo ln -s /usr/local/zig/zig /usr/local/bin/zig
+            sudo ln -sf /usr/local/zig/zig /usr/local/bin/zig
             zig version
           fi
 
