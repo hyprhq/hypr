@@ -97,6 +97,23 @@ impl CloudHypervisorAdapter {
         Ok(log_dir.join(format!("{}.log", vm_id)))
     }
 
+    /// Generate a random locally-administered MAC address.
+    ///
+    /// Uses the 52:54:00 prefix (QEMU/KVM convention) with random suffix.
+    fn generate_mac_address() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        format!(
+            "52:54:00:{:02x}:{:02x}:{:02x}",
+            (seed >> 16) as u8,
+            (seed >> 8) as u8,
+            seed as u8
+        )
+    }
+
     /// Start virtiofsd daemons for virtio-fs mounts.
     ///
     /// Each mount gets its own virtiofsd daemon listening on a Unix socket.
@@ -283,12 +300,13 @@ impl CloudHypervisorAdapter {
 
         // Network (only if enabled - build VMs have this disabled for security)
         if config.network_enabled {
+            let mac = config
+                .network
+                .mac_address
+                .clone()
+                .unwrap_or_else(Self::generate_mac_address);
             args.push("--net".to_string());
-            args.push(format!(
-                "tap=tap{},mac={}",
-                config.id,
-                config.network.mac_address.as_deref().unwrap_or("auto")
-            ));
+            args.push(format!("tap=tap{},mac={}", config.id, mac));
         }
 
         // Serial console - redirect to log file if provided, otherwise tty
