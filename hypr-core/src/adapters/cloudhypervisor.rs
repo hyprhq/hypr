@@ -102,16 +102,8 @@ impl CloudHypervisorAdapter {
     /// Uses the 52:54:00 prefix (QEMU/KVM convention) with random suffix.
     fn generate_mac_address() -> String {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        format!(
-            "52:54:00:{:02x}:{:02x}:{:02x}",
-            (seed >> 16) as u8,
-            (seed >> 8) as u8,
-            seed as u8
-        )
+        let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+        format!("52:54:00:{:02x}:{:02x}:{:02x}", (seed >> 16) as u8, (seed >> 8) as u8, seed as u8)
     }
 
     /// Start virtiofsd daemons for virtio-fs mounts.
@@ -265,10 +257,11 @@ impl CloudHypervisorAdapter {
             Some(path) => path.clone(),
             None => {
                 // Extract embedded initramfs for runtime VMs
-                crate::builder::initramfs::create_builder_initramfs()
-                    .map_err(|e| HyprError::BuildFailed {
+                crate::builder::initramfs::create_builder_initramfs().map_err(|e| {
+                    HyprError::BuildFailed {
                         reason: format!("Failed to extract embedded initramfs: {}", e),
-                    })?
+                    }
+                })?
             }
         };
         // Tell kernel to use init from initramfs instead of mounting root device
@@ -307,11 +300,7 @@ impl CloudHypervisorAdapter {
 
         // Network (only if enabled - build VMs have this disabled for security)
         if config.network_enabled {
-            let mac = config
-                .network
-                .mac_address
-                .clone()
-                .unwrap_or_else(Self::generate_mac_address);
+            let mac = config.network.mac_address.clone().unwrap_or_else(Self::generate_mac_address);
             // TAP device names are limited to 15 chars (IFNAMSIZ-1 on Linux)
             // Use "tap" prefix (3 chars) + truncated ID (12 chars max)
             let tap_name = format!("tap{}", &config.id[..config.id.len().min(12)]);
