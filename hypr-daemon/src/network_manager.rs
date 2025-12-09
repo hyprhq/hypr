@@ -58,8 +58,8 @@ impl NetworkManager {
         let ip_allocator = Arc::new(Mutex::new(IpAllocator::new(state.clone())));
 
         // Platform-specific port forwarding initialization
-        // Linux: Try eBPF (10+ Gbps), fallback to proxy (1 Gbps)
-        // macOS: Use proxy (1 Gbps, no eBPF support)
+        // Linux: eBPF by default (10+ Gbps), embedded in binary
+        // macOS: userspace proxy (1 Gbps)
         #[cfg(target_os = "linux")]
         let port_forwarder = {
             match try_ebpf_forwarder() {
@@ -90,7 +90,7 @@ impl NetworkManager {
         let dns_bind_addr = Some(IpAddr::V4(Ipv4Addr::new(192, 168, 64, 1)));
 
         #[cfg(target_os = "linux")]
-        let dns_bind_addr = Some(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1)));
+        let dns_bind_addr = Some(IpAddr::V4(Ipv4Addr::new(10, 88, 0, 1)));
 
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let dns_bind_addr = None;
@@ -176,44 +176,14 @@ impl NetworkManager {
 
 /// Try to initialize eBPF forwarder (Linux only).
 ///
-/// This requires:
-/// 1. Compiled eBPF programs (drift_l4_ingress.o, drift_l4_egress.o)
-/// 2. CAP_BPF capability or root privileges
-/// 3. Network bridge interface (vbr0, br0, etc.)
-///
-/// If any requirement is missing, returns error and caller should fallback to proxy.
+/// Uses embedded eBPF programs (compiled during cargo build).
+/// Requires CAP_BPF capability or root privileges.
 #[cfg(target_os = "linux")]
 fn try_ebpf_forwarder() -> Result<EbpfForwarder> {
-    // Paths to compiled eBPF programs
-    // TODO: Make these configurable or embed in binary
-    let ebpf_dir = hypr_core::paths::ebpf_dir();
-    let ingress = ebpf_dir.join("drift_l4_ingress.o");
-    let egress = ebpf_dir.join("drift_l4_egress.o");
+    // Extract embedded eBPF programs
+    let (ingress, egress) = hypr_core::embedded::get_ebpf_paths()?;
 
-    // Check if eBPF programs exist
-    if !ingress.exists() {
-        return Err(hypr_core::error::HyprError::InvalidConfig {
-            reason: format!(
-                "eBPF ingress program not found at {}. Run 'make' in hypr-core/ebpf/ and install to {}",
-                ingress.display(),
-                ebpf_dir.display()
-            ),
-        });
-    }
-
-    if !egress.exists() {
-        return Err(hypr_core::error::HyprError::InvalidConfig {
-            reason: format!(
-                "eBPF egress program not found at {}. Run 'make' in hypr-core/ebpf/ and install to {}",
-                egress.display(),
-                ebpf_dir.display()
-            ),
-        });
-    }
-
-    // TODO: Auto-detect bridge interface
-    // For now, assume vbr0 (standard HYPR bridge)
-    // Future: Check if vbr0 exists, fallback to br0, etc.
+    // Auto-detect bridge interface (vbr0 is standard HYPR bridge)
     let interface = "vbr0";
 
     // Create eBPF forwarder

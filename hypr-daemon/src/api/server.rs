@@ -509,10 +509,11 @@ impl HyprService for HyprServiceImpl {
 
         let compose_path = PathBuf::from(&req.compose_file);
         let stack_name = req.stack_name.filter(|s| !s.is_empty());
+        let build = req.build;
 
         let stack_id = self
             .orchestrator
-            .deploy_stack(compose_path, stack_name)
+            .deploy_stack(compose_path, stack_name, build)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 

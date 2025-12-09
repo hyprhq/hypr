@@ -110,15 +110,19 @@ impl StackOrchestrator {
         &self,
         compose_file_path: impl AsRef<Path> + std::fmt::Debug,
         stack_name: Option<String>,
+        build: bool,
     ) -> Result<String> {
-        info!("Deploying stack from compose file");
+        info!("Deploying stack from compose file (build={})", build);
+
+        let compose_path = compose_file_path.as_ref().to_path_buf();
+        let compose_dir = compose_path.parent().unwrap_or(Path::new(".")).to_path_buf();
 
         // Parse compose file
-        let compose = ComposeParser::parse_file(compose_file_path)
+        let compose = ComposeParser::parse_file(&compose_path)
             .map_err(|e| HyprError::Internal(format!("Failed to parse compose file: {}", e)))?;
 
-        // Convert to stack config
-        let stack_config = ComposeConverter::convert(compose, stack_name)?;
+        // Convert to stack config - use async version to build images if needed
+        let stack_config = ComposeConverter::convert_async(compose, stack_name, compose_dir).await?;
 
         // Generate stack ID
         let stack_id = format!(

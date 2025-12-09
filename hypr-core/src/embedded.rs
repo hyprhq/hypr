@@ -1,8 +1,8 @@
 //! Embedded hypervisor binaries and resources.
 //!
-//! This module contains cloud-hypervisor binaries embedded at compile time.
+//! This module contains cloud-hypervisor binaries and eBPF programs embedded at compile time.
 //! These are extracted to a runtime directory when needed, eliminating the need
-//! for users to install cloud-hypervisor separately.
+//! for users to install dependencies separately.
 
 use crate::error::{HyprError, Result};
 use std::fs;
@@ -16,6 +16,13 @@ const CLOUD_HYPERVISOR_BINARY: &[u8] = include_bytes!("../embedded/cloud-hypervi
 #[cfg(target_arch = "aarch64")]
 const CLOUD_HYPERVISOR_BINARY: &[u8] =
     include_bytes!("../embedded/cloud-hypervisor-static-aarch64");
+
+/// Embedded eBPF programs (Linux only, compiled during cargo build on Linux)
+#[cfg(target_os = "linux")]
+const EBPF_INGRESS: &[u8] = include_bytes!("../embedded/drift_l4_ingress.o");
+
+#[cfg(target_os = "linux")]
+const EBPF_EGRESS: &[u8] = include_bytes!("../embedded/drift_l4_egress.o");
 
 /// Get the cloud-hypervisor binary path, extracting if needed.
 ///
@@ -88,6 +95,36 @@ fn extract_cloud_hypervisor(dest: &Path) -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Get eBPF program paths, extracting if needed (Linux only).
+///
+/// Returns (ingress_path, egress_path) for the eBPF programs.
+/// These are extracted from the embedded binary to the data directory.
+#[cfg(target_os = "linux")]
+pub fn get_ebpf_paths() -> Result<(PathBuf, PathBuf)> {
+    let ebpf_dir = crate::paths::data_dir().join("ebpf");
+    fs::create_dir_all(&ebpf_dir)
+        .map_err(|e| HyprError::IoError { path: ebpf_dir.clone(), source: e })?;
+
+    let ingress_path = ebpf_dir.join("drift_l4_ingress.o");
+    let egress_path = ebpf_dir.join("drift_l4_egress.o");
+
+    // Extract if not exists
+    if !ingress_path.exists() {
+        info!("Extracting embedded eBPF ingress program");
+        fs::write(&ingress_path, EBPF_INGRESS)
+            .map_err(|e| HyprError::IoError { path: ingress_path.clone(), source: e })?;
+    }
+
+    if !egress_path.exists() {
+        info!("Extracting embedded eBPF egress program");
+        fs::write(&egress_path, EBPF_EGRESS)
+            .map_err(|e| HyprError::IoError { path: egress_path.clone(), source: e })?;
+    }
+
+    debug!("eBPF programs ready at {}", ebpf_dir.display());
+    Ok((ingress_path, egress_path))
 }
 
 #[cfg(test)]

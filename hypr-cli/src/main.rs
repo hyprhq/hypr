@@ -125,9 +125,9 @@ enum Commands {
 enum ComposeCommands {
     /// Deploy a stack from docker-compose.yml
     Up {
-        /// Path to docker-compose.yml
+        /// Path to docker-compose.yml (defaults to docker-compose.yml or compose.yml)
         #[arg(short, long)]
-        file: String,
+        file: Option<String>,
 
         /// Stack name (optional, defaults to directory name)
         #[arg(short, long)]
@@ -276,7 +276,28 @@ async fn main() -> Result<()> {
 
         Commands::Compose(compose_cmd) => match compose_cmd {
             ComposeCommands::Up { file, name, detach, force_recreate, build } => {
-                commands::compose::up(&file, name, detach, force_recreate, build).await?;
+                // Find compose file: use provided path or search for defaults
+                // Supports Docker-compatible and Hypr-specific file names
+                let compose_file = match file {
+                    Some(f) => f,
+                    None => {
+                        // Try compose file names in priority order (hypr-specific first, then Docker-compatible)
+                        let candidates = [
+                            "hypr-compose.yml", "hypr-compose.yaml",
+                            "Hyprfile", "Hyprfile.yml", "Hyprfile.yaml",
+                            "docker-compose.yml", "docker-compose.yaml",
+                            "compose.yml", "compose.yaml",
+                        ];
+                        candidates.iter()
+                            .find(|f| std::path::Path::new(f).exists())
+                            .map(|s| s.to_string())
+                            .ok_or_else(|| anyhow::anyhow!(
+                                "No compose file found. Tried: {}. Use --file to specify.",
+                                candidates.join(", ")
+                            ))?
+                    }
+                };
+                commands::compose::up(&compose_file, name, detach, force_recreate, build).await?;
             }
 
             ComposeCommands::Down { stack_name, force } => {

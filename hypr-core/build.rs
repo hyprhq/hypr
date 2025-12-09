@@ -1,11 +1,10 @@
-// build.rs - Build embedded initramfs with kestrel + busybox for both amd64 and arm64
+// build.rs - Build embedded assets for HYPR
 //
-// This script creates complete initramfs.cpio archives containing:
-// - kestrel binary (PID 1 init)
-// - busybox (static, downloaded from Debian)
-// - Basic directory structure
+// This script creates:
+// 1. initramfs.cpio archives containing kestrel + busybox
+// 2. eBPF programs for high-performance networking (Linux only)
 //
-// The initramfs archives are placed in embedded/ for compile-time inclusion via include_bytes!
+// Assets are placed in embedded/ for compile-time inclusion via include_bytes!
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,6 +15,8 @@ fn main() {
     // The embedded binary must be fresh every build
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=../guest/kestrel.c");
+    println!("cargo:rerun-if-changed=ebpf/drift_l4_ingress.c");
+    println!("cargo:rerun-if-changed=ebpf/drift_l4_egress.c");
 
     let kestrel_src = PathBuf::from("../guest/kestrel.c");
 
@@ -33,6 +34,12 @@ fn main() {
 
     // Download cloud-hypervisor binary (only for target architecture)
     download_cloud_hypervisor(&embedded_dir);
+
+    // Build eBPF programs (Linux target only - requires clang with BPF support)
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "linux" {
+        build_ebpf_programs(&embedded_dir);
+    }
 
     // Build initramfs ONLY for target architecture (host can only virtualize its own arch)
     let target_arch =
@@ -417,4 +424,89 @@ fn download_cloud_hypervisor(embedded_dir: &Path) {
             println!("cargo:warning=  Make sure curl or wget is installed");
         }
     }
+}
+
+/// Build eBPF programs for high-performance networking.
+///
+/// Compiles drift_l4_ingress.c and drift_l4_egress.c to BPF bytecode.
+/// Requires: clang with BPF target support, bpftool for vmlinux.h generation.
+/// Only called when building for Linux target.
+fn build_ebpf_programs(embedded_dir: &Path) {
+    println!("cargo:warning=Building eBPF programs...");
+
+    let ebpf_src_dir = PathBuf::from("ebpf");
+    let ingress_src = ebpf_src_dir.join("drift_l4_ingress.c");
+    let egress_src = ebpf_src_dir.join("drift_l4_egress.c");
+
+    if !ingress_src.exists() || !egress_src.exists() {
+        println!("cargo:warning=  eBPF source files not found, skipping");
+        return;
+    }
+
+    let ingress_out = embedded_dir.join("drift_l4_ingress.o");
+    let egress_out = embedded_dir.join("drift_l4_egress.o");
+
+    // Skip if already built
+    if ingress_out.exists() && egress_out.exists() {
+        println!("cargo:warning=  eBPF programs already built, skipping");
+        return;
+    }
+
+    // Generate vmlinux.h if not present
+    let vmlinux_h = ebpf_src_dir.join("vmlinux.h");
+    if !vmlinux_h.exists() {
+        println!("cargo:warning=  Generating vmlinux.h from kernel BTF...");
+        let status = Command::new("bpftool")
+            .args(["btf", "dump", "file", "/sys/kernel/btf/vmlinux", "format", "c"])
+            .stdout(fs::File::create(&vmlinux_h).unwrap_or_else(|_| {
+                panic!("Failed to create vmlinux.h");
+            }))
+            .status();
+
+        if !matches!(status, Ok(s) if s.success()) {
+            println!("cargo:warning=  Failed to generate vmlinux.h (bpftool not found or no BTF)");
+            println!("cargo:warning=  eBPF will fall back to userspace proxy at runtime");
+            return;
+        }
+    }
+
+    // Compile eBPF programs with clang
+    let bpf_cflags = [
+        "-O2",
+        "-target", "bpf",
+        "-g",
+        "-Wall",
+        "-Wno-unused-value",
+        "-Wno-pointer-sign",
+        "-Wno-compare-distinct-pointer-types",
+        "-fno-stack-protector",
+        "-I", ebpf_src_dir.to_str().unwrap(),
+    ];
+
+    // Compile ingress program
+    println!("cargo:warning=  Compiling drift_l4_ingress.o...");
+    let status = Command::new("clang")
+        .args(&bpf_cflags)
+        .args(["-c", ingress_src.to_str().unwrap(), "-o", ingress_out.to_str().unwrap()])
+        .status();
+
+    if !matches!(status, Ok(s) if s.success()) {
+        println!("cargo:warning=  Failed to compile ingress eBPF (clang with BPF support required)");
+        return;
+    }
+
+    // Compile egress program
+    println!("cargo:warning=  Compiling drift_l4_egress.o...");
+    let status = Command::new("clang")
+        .args(&bpf_cflags)
+        .args(["-c", egress_src.to_str().unwrap(), "-o", egress_out.to_str().unwrap()])
+        .status();
+
+    if !matches!(status, Ok(s) if s.success()) {
+        println!("cargo:warning=  Failed to compile egress eBPF");
+        let _ = fs::remove_file(&ingress_out);
+        return;
+    }
+
+    println!("cargo:warning=  eBPF programs built successfully");
 }
