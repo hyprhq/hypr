@@ -12,7 +12,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use std::fs;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
 /// Builds an image from a Dockerfile.
@@ -34,18 +34,15 @@ pub async fn build(
 ) -> Result<()> {
     let start_time = Instant::now();
 
-    // Resolve paths
-    let context_dir = PathBuf::from(context_path);
-    if !context_dir.exists() {
-        anyhow::bail!("Build context not found: {}", context_path);
-    }
+    // Resolve paths - handle case where user passes Dockerfile as context path
+    let (context_dir, dockerfile_name) = resolve_build_paths(context_path, dockerfile)?;
 
     // Canonicalize to get absolute path
     let context_dir_abs = context_dir
         .canonicalize()
-        .with_context(|| format!("Failed to resolve build context path: {}", context_path))?;
+        .with_context(|| format!("Failed to resolve build context path: {}", context_dir.display()))?;
 
-    let dockerfile_path = context_dir.join(dockerfile);
+    let dockerfile_path = context_dir.join(&dockerfile_name);
     if !dockerfile_path.exists() {
         anyhow::bail!("Dockerfile not found: {}", dockerfile_path.display());
     }
@@ -129,8 +126,8 @@ pub async fn build(
     }
 
     let context = BuildContext {
-        context_path: context_dir.clone(),
-        dockerfile_path: PathBuf::from(dockerfile),
+        context_path: context_dir_abs.clone(),
+        dockerfile_path: PathBuf::from(&dockerfile_name),
         build_args: build_args_map,
         target: target.map(String::from),
         no_cache,
@@ -280,6 +277,50 @@ pub async fn build(
     println!();
 
     Ok(())
+}
+
+/// Resolves build context and dockerfile paths.
+///
+/// Handles various input patterns:
+/// - `hypr build` -> context=".", dockerfile="Dockerfile"
+/// - `hypr build .` -> context=".", dockerfile="Dockerfile"
+/// - `hypr build ./Dockerfile` -> context=".", dockerfile="Dockerfile"
+/// - `hypr build -f custom.Dockerfile .` -> context=".", dockerfile="custom.Dockerfile"
+fn resolve_build_paths(context_path: &str, dockerfile: &str) -> Result<(PathBuf, String)> {
+    let path = PathBuf::from(context_path);
+
+    // Check if context_path is actually a Dockerfile
+    if path.is_file() {
+        // User passed a Dockerfile path, extract directory and filename
+        let parent = path.parent().unwrap_or(Path::new("."));
+        let filename = path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("Dockerfile");
+        return Ok((parent.to_path_buf(), filename.to_string()));
+    }
+
+    // Check if it looks like a Dockerfile path (ends with Dockerfile or .dockerfile)
+    let path_str = context_path.to_lowercase();
+    if path_str.ends_with("dockerfile") || path_str.contains(".dockerfile") {
+        // It might be a Dockerfile path that doesn't exist yet
+        let path = PathBuf::from(context_path);
+        if let Some(parent) = path.parent() {
+            if parent.exists() || parent == Path::new("") || parent == Path::new(".") {
+                let parent_dir = if parent == Path::new("") { PathBuf::from(".") } else { parent.to_path_buf() };
+                let filename = path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("Dockerfile");
+                return Ok((parent_dir, filename.to_string()));
+            }
+        }
+    }
+
+    // Normal case: context_path is a directory
+    if !path.exists() {
+        anyhow::bail!("Build context not found: {}", context_path);
+    }
+
+    Ok((path, dockerfile.to_string()))
 }
 
 /// Create a premium spinner with consistent styling.
