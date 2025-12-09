@@ -97,12 +97,29 @@ fn extract_cloud_hypervisor(dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Placeholder marker for eBPF files that couldn't be compiled at build time.
+#[cfg(target_os = "linux")]
+const EBPF_PLACEHOLDER_MARKER: &[u8] = b"HYPR_EBPF_PLACEHOLDER";
+
 /// Get eBPF program paths, extracting if needed (Linux only).
 ///
 /// Returns (ingress_path, egress_path) for the eBPF programs.
 /// These are extracted from the embedded binary to the data directory.
+///
+/// Returns an error if the embedded eBPF programs are placeholders
+/// (i.e., they couldn't be compiled at build time due to missing tools).
 #[cfg(target_os = "linux")]
 pub fn get_ebpf_paths() -> Result<(PathBuf, PathBuf)> {
+    // Check if we have real eBPF programs or just placeholders
+    if EBPF_INGRESS.starts_with(EBPF_PLACEHOLDER_MARKER)
+        || EBPF_EGRESS.starts_with(EBPF_PLACEHOLDER_MARKER)
+    {
+        info!("eBPF programs are placeholders (not compiled at build time)");
+        return Err(HyprError::EbpfNotAvailable {
+            reason: "eBPF programs not compiled at build time (missing bpftool/clang)".to_string(),
+        });
+    }
+
     let ebpf_dir = crate::paths::data_dir().join("ebpf");
     fs::create_dir_all(&ebpf_dir)
         .map_err(|e| HyprError::IoError { path: ebpf_dir.clone(), source: e })?;

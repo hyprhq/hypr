@@ -87,6 +87,9 @@ pub enum HyprError {
     IpPoolExhausted,
 
     // eBPF errors
+    #[error("eBPF not available: {reason}")]
+    EbpfNotAvailable { reason: String },
+
     #[error("Failed to load eBPF program: {0}")]
     EbpfLoadError(String),
 

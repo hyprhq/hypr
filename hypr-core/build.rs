@@ -465,7 +465,12 @@ fn build_ebpf_programs(embedded_dir: &Path) {
 
         if !matches!(status, Ok(s) if s.success()) {
             println!("cargo:warning=  Failed to generate vmlinux.h (bpftool not found or no BTF)");
+            println!("cargo:warning=  Creating placeholder eBPF files for build to proceed");
             println!("cargo:warning=  eBPF will fall back to userspace proxy at runtime");
+            // Create placeholder files so include_bytes! doesn't fail
+            // These will be detected at runtime and trigger fallback
+            create_ebpf_placeholder(&ingress_out);
+            create_ebpf_placeholder(&egress_out);
             return;
         }
     }
@@ -496,6 +501,9 @@ fn build_ebpf_programs(embedded_dir: &Path) {
         println!(
             "cargo:warning=  Failed to compile ingress eBPF (clang with BPF support required)"
         );
+        println!("cargo:warning=  Creating placeholder eBPF files for build to proceed");
+        create_ebpf_placeholder(&ingress_out);
+        create_ebpf_placeholder(&egress_out);
         return;
     }
 
@@ -508,9 +516,24 @@ fn build_ebpf_programs(embedded_dir: &Path) {
 
     if !matches!(status, Ok(s) if s.success()) {
         println!("cargo:warning=  Failed to compile egress eBPF");
+        println!("cargo:warning=  Creating placeholder eBPF files for build to proceed");
         let _ = fs::remove_file(&ingress_out);
+        create_ebpf_placeholder(&ingress_out);
+        create_ebpf_placeholder(&egress_out);
         return;
     }
 
     println!("cargo:warning=  eBPF programs built successfully");
+}
+
+/// Create a placeholder eBPF file that can be detected at runtime.
+///
+/// The placeholder is a minimal valid ELF file with a magic marker.
+/// At runtime, we check the file size - real eBPF programs are >1KB.
+fn create_ebpf_placeholder(path: &Path) {
+    // Create a minimal placeholder that's clearly not a valid eBPF program
+    // We use "HYPR_PLACEHOLDER" as a magic marker
+    let placeholder = b"HYPR_EBPF_PLACEHOLDER";
+    let _ = fs::write(path, placeholder);
+    println!("cargo:warning=  Created placeholder: {}", path.display());
 }
