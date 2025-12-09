@@ -4,14 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       kernel_version:
-        description: 'Kernel version (e.g., 6.12.8)'
+        description: 'Kernel version (e.g., 6.12)'
         required: true
-        default: '6.12.8'
-        type: string
-      ch_branch:
-        description: 'cloud-hypervisor/linux branch (e.g., ch-6.12.8)'
-        required: true
-        default: 'ch-6.12.8'
+        default: '6.12'
         type: string
 
 env:
@@ -52,22 +47,41 @@ jobs:
             cpio \
             rsync
 
-      - name: Clone cloud-hypervisor kernel
+      - name: Download mainline kernel
         run: |
-          git clone --depth 1 --branch ${{ inputs.ch_branch }} \
-            https://github.com/cloud-hypervisor/linux.git kernel
+          # Download mainline kernel tarball (faster than git clone)
+          MAJOR_VERSION=$(echo "${{ inputs.kernel_version }}" | cut -d. -f1)
+          KERNEL_URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR_VERSION}.x/linux-${{ inputs.kernel_version }}.tar.xz"
+
+          echo "Downloading kernel from: ${KERNEL_URL}"
+          curl -fsSL "${KERNEL_URL}" -o linux.tar.xz
+
+          echo "Extracting kernel..."
+          tar -xf linux.tar.xz
+          mv linux-${{ inputs.kernel_version }} kernel
+          rm linux.tar.xz
+
           cd kernel
           echo "Kernel version: $(make kernelversion)"
 
-      - name: Configure kernel with cloud-hypervisor defaults
+      - name: Configure kernel with minimal virtio config
         working-directory: kernel
         run: |
-          # Start with cloud-hypervisor's minimal config
-          make ch_defconfig
+          # Start with minimal config for x86_64 or arm64
+          if [ "${{ matrix.arch }}" = "x86_64" ]; then
+            make x86_64_defconfig
+          else
+            make defconfig
+          fi
+
+          # Enable KVM guest support
+          ./scripts/config --enable CONFIG_HYPERVISOR_GUEST
+          ./scripts/config --enable CONFIG_KVM_GUEST
+          ./scripts/config --enable CONFIG_PARAVIRT
 
           # Display initial config info
-          echo "Initial config from ch_defconfig:"
-          grep -E "CONFIG_SQUASHFS|CONFIG_OVERLAY_FS|CONFIG_FUSE_FS|CONFIG_VIRTIO_FS" .config || true
+          echo "Initial config:"
+          grep -E "CONFIG_SQUASHFS|CONFIG_OVERLAY_FS|CONFIG_FUSE_FS|CONFIG_VIRTIO" .config | head -20 || true
 
       - name: Enable additional kernel options for HYPR
         working-directory: kernel
@@ -79,6 +93,33 @@ jobs:
           # ============================================
           # HYPR Custom Kernel Configuration
           # ============================================
+
+          # Block device support (required for squashfs and other filesystems)
+          CONFIG_BLOCK=y
+          CONFIG_BLK_DEV=y
+
+          # VirtIO drivers (required for cloud-hypervisor/vfkit)
+          CONFIG_VIRTIO=y
+          CONFIG_VIRTIO_PCI=y
+          CONFIG_VIRTIO_PCI_LEGACY=y
+          CONFIG_VIRTIO_BALLOON=y
+          CONFIG_VIRTIO_BLK=y
+          CONFIG_VIRTIO_NET=y
+          CONFIG_VIRTIO_CONSOLE=y
+          CONFIG_VIRTIO_INPUT=y
+          CONFIG_HW_RANDOM_VIRTIO=y
+          CONFIG_DRM_VIRTIO_GPU=n
+          CONFIG_VIRTIO_MMIO=y
+
+          # 9P filesystem (alternative to virtio-fs)
+          CONFIG_NET_9P=y
+          CONFIG_NET_9P_VIRTIO=y
+          CONFIG_9P_FS=y
+          CONFIG_9P_FS_POSIX_ACL=y
+
+          # Serial console
+          CONFIG_SERIAL_8250=y
+          CONFIG_SERIAL_8250_CONSOLE=y
 
           # SquashFS (required for OCI image rootfs)
           CONFIG_SQUASHFS=y
@@ -254,7 +295,7 @@ jobs:
           body: |
             ## Linux Kernel ${{ inputs.kernel_version }} for HYPR
 
-            Custom Linux kernel built for HYPR microVMs, based on [cloud-hypervisor/linux](https://github.com/cloud-hypervisor/linux) branch `${{ inputs.ch_branch }}`.
+            Custom Linux kernel built for HYPR microVMs, based on mainline Linux kernel from [kernel.org](https://kernel.org).
 
             ### Features Enabled
 
@@ -309,9 +350,9 @@ jobs:
 
             ### Base Kernel
 
-            - Source: cloud-hypervisor/linux
-            - Branch: ${{ inputs.ch_branch }}
-            - Base config: `ch_defconfig`
+            - Source: [kernel.org](https://cdn.kernel.org/pub/linux/kernel/)
+            - Version: ${{ inputs.kernel_version }}
+            - Base config: `x86_64_defconfig` / `defconfig` (arm64)
 
           files: |
             release/vmlinux-x86_64

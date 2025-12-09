@@ -58,7 +58,7 @@ pub fn kernel_path() -> PathBuf {
 }
 
 /// Default kernel version to download.
-pub const DEFAULT_KERNEL_VERSION: &str = "6.12.8";
+pub const DEFAULT_KERNEL_VERSION: &str = "6.12";
 
 /// Get the kernel download URL for the current architecture.
 ///
@@ -68,11 +68,11 @@ pub fn kernel_url() -> Option<&'static str> {
     match std::env::consts::ARCH {
         "x86_64" => Some(concat!(
             "https://github.com/hyprhq/hypr/releases/download/",
-            "kernel-6.12.8-hypr/vmlinux-x86_64"
+            "kernel-6.12-hypr/vmlinux-x86_64"
         )),
         "aarch64" => Some(concat!(
             "https://github.com/hyprhq/hypr/releases/download/",
-            "kernel-6.12.8-hypr/vmlinux-aarch64"
+            "kernel-6.12-hypr/vmlinux-aarch64"
         )),
         _ => None,
     }
