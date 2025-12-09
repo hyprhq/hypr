@@ -93,23 +93,55 @@ pub fn ensure_kernel() -> std::io::Result<PathBuf> {
 
     tracing::info!("Downloading HYPR kernel from: {}", url);
 
-    // Download kernel
-    let response = reqwest::blocking::get(url)
-        .map_err(|e| std::io::Error::other(format!("Download failed: {}", e)))?;
+    // Create client with generous timeout for large kernel download (~20MB)
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(300)) // 5 minute timeout
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| std::io::Error::other(format!("Failed to create HTTP client: {}", e)))?;
 
-    if !response.status().is_success() {
-        return Err(std::io::Error::other(format!("Download failed: HTTP {}", response.status())));
+    // Download kernel with retries
+    let mut last_error = None;
+    for attempt in 1..=3 {
+        tracing::info!("Download attempt {}/3...", attempt);
+
+        match client.get(url).send() {
+            Ok(response) => {
+                if !response.status().is_success() {
+                    last_error =
+                        Some(format!("Download failed: HTTP {}", response.status()));
+                    continue;
+                }
+
+                match response.bytes() {
+                    Ok(kernel_bytes) => {
+                        std::fs::write(&path, &kernel_bytes)?;
+                        tracing::info!(
+                            "Kernel downloaded to: {} ({:.2} MB)",
+                            path.display(),
+                            kernel_bytes.len() as f64 / 1024.0 / 1024.0
+                        );
+                        return Ok(path);
+                    }
+                    Err(e) => {
+                        last_error = Some(format!("Failed to read response: {}", e));
+                    }
+                }
+            }
+            Err(e) => {
+                last_error = Some(format!("Request failed: {}", e));
+            }
+        }
+
+        // Wait before retry
+        if attempt < 3 {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
     }
 
-    let kernel_bytes = response
-        .bytes()
-        .map_err(|e| std::io::Error::other(format!("Failed to read response: {}", e)))?;
-
-    std::fs::write(&path, kernel_bytes)?;
-
-    tracing::info!("Kernel downloaded to: {}", path.display());
-
-    Ok(path)
+    Err(std::io::Error::other(
+        last_error.unwrap_or_else(|| "Download failed after 3 attempts".to_string()),
+    ))
 }
 
 /// Get the eBPF programs directory.
