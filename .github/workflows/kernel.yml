@@ -74,7 +74,11 @@ jobs:
           if [ "${{ matrix.arch }}" = "x86_64" ]; then
             make x86_64_defconfig
           else
-            make defconfig
+            # Use tinyconfig as base for ARM64 to minimize size
+            make tinyconfig
+            # Enable 64-bit
+            ./scripts/config --enable CONFIG_64BIT
+            ./scripts/config --enable CONFIG_ARM64
           fi
 
           # Enable KVM guest support and PVH boot (required for cloud-hypervisor)
