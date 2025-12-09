@@ -283,7 +283,7 @@ impl CloudHypervisorAdapter {
 
         // virtio-fs mounts (using pre-started virtiofsd daemons)
         // Each mount needs its own --fs argument
-        for daemon in &virtiofsd_daemons {
+        for daemon in virtiofsd_daemons {
             args.push("--fs".to_string());
             args.push(format!(
                 "tag={},socket={},num_queues=1",
