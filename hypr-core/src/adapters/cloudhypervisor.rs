@@ -259,13 +259,22 @@ impl CloudHypervisorAdapter {
             }
         }
 
-        // Initramfs (for minimal boot environments like builder VMs)
-        if let Some(initramfs) = &config.initramfs_path {
-            // Tell kernel to use init from initramfs instead of mounting root device
-            kernel_cmdline_parts.push("rdinit=/init".to_string());
-            args.push("--initramfs".to_string());
-            args.push(initramfs.to_string_lossy().to_string());
-        }
+        // Initramfs - always required for cloud-hypervisor (kestrel is our init)
+        // Use provided path or fall back to embedded initramfs
+        let initramfs_path = match &config.initramfs_path {
+            Some(path) => path.clone(),
+            None => {
+                // Extract embedded initramfs for runtime VMs
+                crate::builder::initramfs::create_builder_initramfs()
+                    .map_err(|e| HyprError::BuildFailed {
+                        reason: format!("Failed to extract embedded initramfs: {}", e),
+                    })?
+            }
+        };
+        // Tell kernel to use init from initramfs instead of mounting root device
+        kernel_cmdline_parts.push("rdinit=/init".to_string());
+        args.push("--initramfs".to_string());
+        args.push(initramfs_path.to_string_lossy().to_string());
 
         if !kernel_cmdline_parts.is_empty() {
             args.push("--cmdline".to_string());
