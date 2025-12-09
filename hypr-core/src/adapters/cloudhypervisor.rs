@@ -106,6 +106,72 @@ impl CloudHypervisorAdapter {
         format!("52:54:00:{:02x}:{:02x}:{:02x}", (seed >> 16) as u8, (seed >> 8) as u8, seed as u8)
     }
 
+    /// Configure the host-side TAP device for VM networking.
+    ///
+    /// This sets up the TAP device with the gateway IP so the host can communicate with the VM.
+    /// Uses the 100.64.0.0/10 subnet (CGNAT range, RFC 6598).
+    fn configure_tap_device(tap_name: &str) -> Result<()> {
+        use std::process::Command as StdCommand;
+
+        // Enable IP forwarding (required for routing between host and VM)
+        let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1");
+
+        // Configure TAP device with gateway IP
+        // The VM uses 100.64.0.x, gateway is 100.64.0.1
+        let output = StdCommand::new("ip")
+            .args(["addr", "add", "100.64.0.1/10", "dev", tap_name])
+            .output();
+
+        match output {
+            Ok(o) if o.status.success() => {
+                debug!("Configured TAP {} with IP 100.64.0.1/10", tap_name);
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                // Ignore "RTNETLINK answers: File exists" - IP already assigned
+                if !stderr.contains("File exists") {
+                    warn!("Failed to add IP to TAP {}: {}", tap_name, stderr);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to run ip command: {}", e);
+            }
+        }
+
+        // Bring TAP device up
+        let _ = StdCommand::new("ip")
+            .args(["link", "set", tap_name, "up"])
+            .output();
+
+        Ok(())
+    }
+
+    /// Clean up a TAP device when VM is deleted.
+    fn cleanup_tap_device(tap_name: &str) {
+        use std::process::Command as StdCommand;
+
+        // Delete the TAP device
+        let output = StdCommand::new("ip")
+            .args(["link", "delete", tap_name])
+            .output();
+
+        match output {
+            Ok(o) if o.status.success() => {
+                debug!("Deleted TAP device {}", tap_name);
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                // Ignore "Cannot find device" - already deleted
+                if !stderr.contains("Cannot find device") {
+                    debug!("TAP {} cleanup: {}", tap_name, stderr.trim());
+                }
+            }
+            Err(e) => {
+                debug!("Failed to delete TAP {}: {}", tap_name, e);
+            }
+        }
+    }
+
     /// Start virtiofsd daemons for virtio-fs mounts.
     ///
     /// Each mount gets its own virtiofsd daemon listening on a Unix socket.
@@ -469,6 +535,12 @@ impl VmmAdapter for CloudHypervisorAdapter {
         let api_socket = self.api_socket_path(&config.id);
         self.wait_for_api_socket(&api_socket, Duration::from_secs(5)).await?;
 
+        // Configure host-side TAP device for networking (after VM creates it)
+        if config.network_enabled {
+            let tap_name = format!("tap{}", &config.id[..config.id.len().min(12)]);
+            Self::configure_tap_device(&tap_name)?;
+        }
+
         // Record metrics
         let histogram =
             metrics::histogram!("hypr_vm_boot_duration_seconds", "adapter" => "cloudhypervisor");
@@ -545,6 +617,10 @@ impl VmmAdapter for CloudHypervisorAdapter {
 
         // Stop virtiofsd daemons
         self.stop_virtiofsd_daemons(&handle.id).await?;
+
+        // Clean up TAP device
+        let tap_name = format!("tap{}", &handle.id[..handle.id.len().min(12)]);
+        Self::cleanup_tap_device(&tap_name);
 
         // Clean up API socket
         if let Some(socket_path) = &handle.socket_path {
