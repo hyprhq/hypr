@@ -488,7 +488,7 @@ fn build_ebpf_programs(embedded_dir: &Path) {
     // Compile ingress program
     println!("cargo:warning=  Compiling drift_l4_ingress.o...");
     let status = Command::new("clang")
-        .args(&bpf_cflags)
+        .args(bpf_cflags)
         .args(["-c", ingress_src.to_str().unwrap(), "-o", ingress_out.to_str().unwrap()])
         .status();
 
@@ -502,7 +502,7 @@ fn build_ebpf_programs(embedded_dir: &Path) {
     // Compile egress program
     println!("cargo:warning=  Compiling drift_l4_egress.o...");
     let status = Command::new("clang")
-        .args(&bpf_cflags)
+        .args(bpf_cflags)
         .args(["-c", egress_src.to_str().unwrap(), "-o", egress_out.to_str().unwrap()])
         .status();
 
