@@ -1061,45 +1061,10 @@ impl LinuxVmBuilder {
         std::fs::create_dir_all(&work_dir)
             .map_err(|e| BuildError::IoError { path: work_dir.clone(), source: e })?;
 
-        // Locate or download kernel (uses centralized paths)
-        let kernel_path = crate::paths::kernel_path();
-
-        // Auto-download cloud-hypervisor kernel if not present
-        if !kernel_path.exists() {
-            info!("Cloud Hypervisor kernel not found, downloading...");
-            let data_dir = crate::paths::data_dir();
-            std::fs::create_dir_all(&data_dir)
-                .map_err(|e| BuildError::IoError { path: data_dir.clone(), source: e })?;
-
-            // Detect architecture
-            let arch = std::env::consts::ARCH;
-            let kernel_url = match arch {
-                "x86_64" => "https://github.com/cloud-hypervisor/linux/releases/latest/download/vmlinux-x86_64",
-                "aarch64" => "https://github.com/cloud-hypervisor/linux/releases/latest/download/Image-arm64",
-                _ => return Err(BuildError::ContextError(format!("Unsupported architecture: {}", arch)))
-            };
-
-            info!("Downloading kernel from: {}", kernel_url);
-            let response = reqwest::blocking::get(kernel_url).map_err(|e| {
-                BuildError::ContextError(format!("Failed to download kernel: {}", e))
-            })?;
-
-            if !response.status().is_success() {
-                return Err(BuildError::ContextError(format!(
-                    "Failed to download kernel: HTTP {}",
-                    response.status()
-                )));
-            }
-
-            let kernel_bytes = response
-                .bytes()
-                .map_err(|e| BuildError::ContextError(format!("Failed to read kernel: {}", e)))?;
-
-            std::fs::write(&kernel_path, kernel_bytes)
-                .map_err(|e| BuildError::IoError { path: kernel_path.clone(), source: e })?;
-
-            info!("Kernel downloaded to: {}", kernel_path.display());
-        }
+        // Locate or download kernel (uses centralized paths with auto-download)
+        let kernel_path = crate::paths::ensure_kernel().map_err(|e| {
+            BuildError::ContextError(format!("Failed to ensure kernel: {}", e))
+        })?;
 
         // Placeholder: builder_rootfs will be replaced by on-the-fly initramfs
         let builder_rootfs = PathBuf::from("/tmp/dummy-will-be-initramfs");
@@ -1679,45 +1644,10 @@ impl MacOsVmBuilder {
         std::fs::create_dir_all(&work_dir)
             .map_err(|e| BuildError::IoError { path: work_dir.clone(), source: e })?;
 
-        // Locate kernel (initramfs will be generated on-the-fly)
-        let kernel_path = crate::paths::kernel_path();
-
-        // Download kernel if not present
-        if !kernel_path.exists() {
-            info!("Kernel not found, downloading...");
-            let data_dir = crate::paths::data_dir();
-            std::fs::create_dir_all(&data_dir)
-                .map_err(|e| BuildError::IoError { path: data_dir.clone(), source: e })?;
-
-            // Detect architecture
-            let arch = std::env::consts::ARCH;
-            let kernel_url = match arch {
-                "x86_64" => "https://github.com/cloud-hypervisor/linux/releases/latest/download/vmlinux-x86_64",
-                "aarch64" | "arm64" => "https://github.com/cloud-hypervisor/linux/releases/latest/download/Image-arm64",
-                _ => return Err(BuildError::ContextError(format!("Unsupported architecture: {}", arch)))
-            };
-
-            info!("Downloading kernel from: {}", kernel_url);
-            let response = reqwest::blocking::get(kernel_url).map_err(|e| {
-                BuildError::ContextError(format!("Failed to download kernel: {}", e))
-            })?;
-
-            if !response.status().is_success() {
-                return Err(BuildError::ContextError(format!(
-                    "Failed to download kernel: HTTP {}",
-                    response.status()
-                )));
-            }
-
-            let kernel_bytes = response
-                .bytes()
-                .map_err(|e| BuildError::ContextError(format!("Failed to read kernel: {}", e)))?;
-
-            std::fs::write(&kernel_path, kernel_bytes)
-                .map_err(|e| BuildError::IoError { path: kernel_path.clone(), source: e })?;
-
-            info!("Kernel downloaded to: {}", kernel_path.display());
-        }
+        // Locate or download kernel (uses centralized paths with auto-download)
+        let kernel_path = crate::paths::ensure_kernel().map_err(|e| {
+            BuildError::ContextError(format!("Failed to ensure kernel: {}", e))
+        })?;
 
         // Placeholder: builder_rootfs will be replaced by on-the-fly initramfs
         // For now, use a dummy path (VmBuilder will be refactored to use initramfs)

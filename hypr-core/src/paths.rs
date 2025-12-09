@@ -57,6 +57,74 @@ pub fn kernel_path() -> PathBuf {
     data_dir().join("vmlinux")
 }
 
+/// Default kernel version to download.
+pub const DEFAULT_KERNEL_VERSION: &str = "6.12.8";
+
+/// Get the kernel download URL for the current architecture.
+///
+/// Uses HYPR's custom kernel builds which include squashfs,
+/// overlayfs, virtio-fs, and container features.
+pub fn kernel_url() -> Option<&'static str> {
+    match std::env::consts::ARCH {
+        "x86_64" => Some(concat!(
+            "https://github.com/hyprhq/hypr/releases/download/",
+            "kernel-6.12.8-hypr/vmlinux-x86_64"
+        )),
+        "aarch64" => Some(concat!(
+            "https://github.com/hyprhq/hypr/releases/download/",
+            "kernel-6.12.8-hypr/vmlinux-aarch64"
+        )),
+        _ => None,
+    }
+}
+
+/// Ensure the kernel exists, downloading if necessary.
+///
+/// Returns the path to the kernel, downloading from HYPR releases if not present.
+pub fn ensure_kernel() -> std::io::Result<PathBuf> {
+    let path = kernel_path();
+
+    if path.exists() {
+        return Ok(path);
+    }
+
+    // Create data directory
+    let dir = data_dir();
+    std::fs::create_dir_all(&dir)?;
+
+    // Get download URL
+    let url = kernel_url().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!("Unsupported architecture: {}", std::env::consts::ARCH),
+        )
+    })?;
+
+    tracing::info!("Downloading HYPR kernel from: {}", url);
+
+    // Download kernel
+    let response = reqwest::blocking::get(url).map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::Other, format!("Download failed: {}", e))
+    })?;
+
+    if !response.status().is_success() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Download failed: HTTP {}", response.status()),
+        ));
+    }
+
+    let kernel_bytes = response.bytes().map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to read response: {}", e))
+    })?;
+
+    std::fs::write(&path, kernel_bytes)?;
+
+    tracing::info!("Kernel downloaded to: {}", path.display());
+
+    Ok(path)
+}
+
 /// Get the eBPF programs directory.
 /// These are installed to a system location since they're loaded into the kernel.
 pub fn ebpf_dir() -> PathBuf {
