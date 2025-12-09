@@ -29,7 +29,7 @@ jobs:
             runner: [self-hosted, Linux, ARM64]
             cross_compile: ""
             image_name: Image-aarch64
-            kernel_target: vmlinuz.efi
+            kernel_target: Image
 
     steps:
       - name: Checkout hypr repo
@@ -71,160 +71,63 @@ jobs:
       - name: Configure kernel with minimal virtio config
         working-directory: kernel
         run: |
-          # Start with defconfig for both architectures
-          # Then apply aggressive size reduction to stay under 32MB for ARM64 UEFI
+          # x86_64: Use defconfig (plenty of room)
+          # ARM64: Use allnoconfig + minimal additions to stay under 32MB UEFI limit
           if [ "${{ matrix.arch }}" = "x86_64" ]; then
             make x86_64_defconfig
+
+            # Enable KVM guest support and PVH boot (required for cloud-hypervisor)
+            ./scripts/config --enable CONFIG_HYPERVISOR_GUEST
+            ./scripts/config --enable CONFIG_KVM_GUEST
+            ./scripts/config --enable CONFIG_PARAVIRT
+            ./scripts/config --enable CONFIG_PVH
           else
-            # Use defconfig (not tinyconfig - it's too minimal, missing BLOCK support)
-            make defconfig
+            # ARM64: Start from allnoconfig for minimal size
+            make allnoconfig
+
+            # === CORE: Absolutely required ===
+            ./scripts/config --enable CONFIG_64BIT
+            ./scripts/config --enable CONFIG_ARM64
+            ./scripts/config --enable CONFIG_PRINTK
+            ./scripts/config --enable CONFIG_BUG
+            ./scripts/config --enable CONFIG_SMP
+            ./scripts/config --enable CONFIG_SCHED_MC
+
+            # === MEMORY MANAGEMENT ===
+            ./scripts/config --enable CONFIG_MMU
+            ./scripts/config --enable CONFIG_FLATMEM
+            ./scripts/config --enable CONFIG_SPARSEMEM_VMEMMAP
+
+            # === TTY/CONSOLE ===
+            ./scripts/config --enable CONFIG_TTY
+            ./scripts/config --enable CONFIG_VT
+            ./scripts/config --enable CONFIG_SERIAL_EARLYCON
+            ./scripts/config --enable CONFIG_SERIAL_AMBA_PL011
+            ./scripts/config --enable CONFIG_SERIAL_AMBA_PL011_CONSOLE
+
+            # === DIRECT KERNEL BOOT (no UEFI, no size limit!) ===
+            # Disable EFI so cloud-hypervisor uses direct-kernel boot
+            ./scripts/config --disable CONFIG_EFI
+            ./scripts/config --disable CONFIG_EFI_STUB
+
+            # Enable FDT for device tree based boot
+            ./scripts/config --enable CONFIG_OF
+            ./scripts/config --enable CONFIG_OF_EARLY_FLATTREE
           fi
 
-          # Enable KVM guest support and PVH boot (required for cloud-hypervisor)
-          ./scripts/config --enable CONFIG_HYPERVISOR_GUEST
-          ./scripts/config --enable CONFIG_KVM_GUEST
-          ./scripts/config --enable CONFIG_PARAVIRT
-          ./scripts/config --enable CONFIG_PVH
-
-          # === SIZE REDUCTION: Disable debug info (saves ~10-20MB) ===
+          # === SIZE REDUCTION: Disable debug info ===
           ./scripts/config --disable CONFIG_DEBUG_INFO
-          ./scripts/config --disable CONFIG_DEBUG_INFO_DWARF4
-          ./scripts/config --disable CONFIG_DEBUG_INFO_DWARF5
-          ./scripts/config --disable CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
-          ./scripts/config --disable CONFIG_DEBUG_INFO_BTF
-          ./scripts/config --disable CONFIG_PAHOLE_HAS_SPLIT_BTF
-          ./scripts/config --disable CONFIG_DEBUG_INFO_BTF_MODULES
-          ./scripts/config --disable CONFIG_GDB_SCRIPTS
           ./scripts/config --enable CONFIG_DEBUG_INFO_NONE
 
-          # === SIZE REDUCTION: Disable tracing/profiling ===
-          ./scripts/config --disable CONFIG_FTRACE
-          ./scripts/config --disable CONFIG_FUNCTION_TRACER
-          ./scripts/config --disable CONFIG_KPROBES
-          ./scripts/config --disable CONFIG_KPROBE_EVENTS
-          ./scripts/config --disable CONFIG_UPROBE_EVENTS
-          ./scripts/config --disable CONFIG_DYNAMIC_FTRACE
-          ./scripts/config --disable CONFIG_STACK_TRACER
-          ./scripts/config --disable CONFIG_SCHED_TRACER
-
-          # === SIZE REDUCTION: Disable other debug features ===
-          ./scripts/config --disable CONFIG_KALLSYMS
-          ./scripts/config --disable CONFIG_KALLSYMS_ALL
-          ./scripts/config --disable CONFIG_DEBUG_KERNEL
-          ./scripts/config --disable CONFIG_DEBUG_MISC
-          ./scripts/config --disable CONFIG_PRINTK_TIME
-
-          # === SIZE REDUCTION: Disable unused drivers ===
-          ./scripts/config --disable CONFIG_SOUND
-          ./scripts/config --disable CONFIG_DRM
-          ./scripts/config --disable CONFIG_USB_SUPPORT
-          ./scripts/config --disable CONFIG_WIRELESS
-          ./scripts/config --disable CONFIG_WLAN
-          ./scripts/config --disable CONFIG_BT
-          ./scripts/config --disable CONFIG_RFKILL
-          ./scripts/config --disable CONFIG_INPUT_MOUSE
-          ./scripts/config --disable CONFIG_INPUT_KEYBOARD
-
-          # === SIZE REDUCTION: Disable more unused subsystems ===
-          ./scripts/config --disable CONFIG_HWMON
-          ./scripts/config --disable CONFIG_THERMAL
-          ./scripts/config --disable CONFIG_PCMCIA
-          ./scripts/config --disable CONFIG_PCCARD
-          ./scripts/config --disable CONFIG_I2C
-          ./scripts/config --disable CONFIG_SPI
-          ./scripts/config --disable CONFIG_GPIO_SYSFS
-          ./scripts/config --disable CONFIG_WATCHDOG
-          ./scripts/config --disable CONFIG_MEDIA_SUPPORT
-          ./scripts/config --disable CONFIG_RC_CORE
-          ./scripts/config --disable CONFIG_CAN
-          ./scripts/config --disable CONFIG_PARPORT
-          ./scripts/config --disable CONFIG_NFC
-          ./scripts/config --disable CONFIG_GNSS
-
-          # === SIZE REDUCTION: Disable unused filesystems ===
-          ./scripts/config --disable CONFIG_XFS_FS
-          ./scripts/config --disable CONFIG_BTRFS_FS
-          ./scripts/config --disable CONFIG_F2FS_FS
-          ./scripts/config --disable CONFIG_JFS_FS
-          ./scripts/config --disable CONFIG_REISERFS_FS
-          ./scripts/config --disable CONFIG_GFS2_FS
-          ./scripts/config --disable CONFIG_OCFS2_FS
-          ./scripts/config --disable CONFIG_NILFS2_FS
-          ./scripts/config --disable CONFIG_NTFS_FS
-          ./scripts/config --disable CONFIG_NTFS3_FS
-          ./scripts/config --disable CONFIG_HFS_FS
-          ./scripts/config --disable CONFIG_HFSPLUS_FS
-          ./scripts/config --disable CONFIG_UDF_FS
-          ./scripts/config --disable CONFIG_ISO9660_FS
-          ./scripts/config --disable CONFIG_NFS_FS
-          ./scripts/config --disable CONFIG_NFSD
-          ./scripts/config --disable CONFIG_CIFS
-          ./scripts/config --disable CONFIG_CEPH_FS
-          ./scripts/config --disable CONFIG_EXFAT_FS
-          ./scripts/config --disable CONFIG_VFAT_FS
-          ./scripts/config --disable CONFIG_FAT_FS
-
-          # === SIZE REDUCTION: Disable unused networking ===
-          ./scripts/config --disable CONFIG_IPV6
-          ./scripts/config --disable CONFIG_NETFILTER_NETLINK_LOG
-          ./scripts/config --disable CONFIG_NF_CONNTRACK_FTP
-          ./scripts/config --disable CONFIG_NF_CONNTRACK_IRC
-          ./scripts/config --disable CONFIG_NF_CONNTRACK_TFTP
-          ./scripts/config --disable CONFIG_IP_SCTP
-          ./scripts/config --disable CONFIG_IP_DCCP
-          ./scripts/config --disable CONFIG_TIPC
-          ./scripts/config --disable CONFIG_ATM
-          ./scripts/config --disable CONFIG_L2TP
-          ./scripts/config --disable CONFIG_DECNET
-          ./scripts/config --disable CONFIG_LLC2
-          ./scripts/config --disable CONFIG_ATALK
-          ./scripts/config --disable CONFIG_X25
-          ./scripts/config --disable CONFIG_LAPB
-          ./scripts/config --disable CONFIG_PHONET
-          ./scripts/config --disable CONFIG_6LOWPAN
-          ./scripts/config --disable CONFIG_IEEE802154
-
-          # === SIZE REDUCTION: Disable unused block devices ===
-          ./scripts/config --disable CONFIG_BLK_DEV_FD
-          ./scripts/config --disable CONFIG_BLK_DEV_SR
-          ./scripts/config --disable CONFIG_BLK_DEV_MD
-          ./scripts/config --disable CONFIG_BLK_DEV_DM
-          ./scripts/config --disable CONFIG_BLK_DEV_NVME
-          ./scripts/config --disable CONFIG_BLK_DEV_RBD
-
-          # === SIZE REDUCTION: Disable crypto algorithms we don't need ===
-          ./scripts/config --disable CONFIG_CRYPTO_USER
-          ./scripts/config --disable CONFIG_CRYPTO_PCRYPT
-          ./scripts/config --disable CONFIG_CRYPTO_CRYPTD
-          ./scripts/config --disable CONFIG_CRYPTO_TEST
-
-          # === SIZE REDUCTION: Disable modules (build everything builtin) ===
+          # === SIZE REDUCTION: Disable modules ===
           ./scripts/config --disable CONFIG_MODULES
 
           # === SIZE REDUCTION: Optimize for size ===
           ./scripts/config --enable CONFIG_CC_OPTIMIZE_FOR_SIZE
-          ./scripts/config --enable CONFIG_SLUB_TINY
-
-          # === SIZE REDUCTION: Use LZ4 compression for kernel ===
-          ./scripts/config --enable CONFIG_KERNEL_LZ4
-          ./scripts/config --disable CONFIG_KERNEL_GZIP
-          ./scripts/config --disable CONFIG_KERNEL_XZ
-          ./scripts/config --disable CONFIG_KERNEL_LZMA
-          ./scripts/config --disable CONFIG_KERNEL_LZO
-          ./scripts/config --disable CONFIG_KERNEL_ZSTD
-
-          # === ARM64: Use EFI_ZBOOT for compressed UEFI boot ===
-          # This creates a compressed EFI application that self-decompresses at boot
-          # The compressed size is much smaller than the uncompressed Image
-          if [ "${{ matrix.arch }}" = "aarch64" ]; then
-            ./scripts/config --enable CONFIG_EFI
-            ./scripts/config --enable CONFIG_EFI_STUB
-            ./scripts/config --enable CONFIG_EFI_ZBOOT
-          fi
 
           # Display initial config info
           echo "Initial config:"
-          grep -E "CONFIG_SQUASHFS|CONFIG_OVERLAY_FS|CONFIG_FUSE_FS|CONFIG_VIRTIO" .config | head -20 || true
+          grep -E "CONFIG_SQUASHFS|CONFIG_OVERLAY_FS|CONFIG_FUSE_FS|CONFIG_VIRTIO|CONFIG_BLOCK" .config | head -20 || true
 
       - name: Enable additional kernel options for HYPR
         working-directory: kernel
@@ -237,47 +140,31 @@ jobs:
           # HYPR Custom Kernel Configuration
           # ============================================
 
-          # PVH boot support (required for cloud-hypervisor direct kernel boot)
+          # PVH boot support (required for cloud-hypervisor x86_64)
           CONFIG_PVH=y
 
-          # Block device support (required for squashfs and other filesystems)
-          CONFIG_BLOCK=y
-          CONFIG_BLK_DEV=y
+          # PCI support (required for VirtIO-PCI on ARM64)
+          CONFIG_PCI=y
+          CONFIG_PCI_HOST_GENERIC=y
 
-          # VirtIO drivers (required for cloud-hypervisor/vfkit)
+          # Block device support (required for squashfs)
+          CONFIG_BLOCK=y
+
+          # VirtIO drivers (minimal set for cloud-hypervisor)
           CONFIG_VIRTIO=y
           CONFIG_VIRTIO_PCI=y
-          CONFIG_VIRTIO_PCI_LEGACY=y
-          CONFIG_VIRTIO_BALLOON=y
           CONFIG_VIRTIO_BLK=y
           CONFIG_VIRTIO_NET=y
           CONFIG_VIRTIO_CONSOLE=y
-          CONFIG_VIRTIO_INPUT=y
-          CONFIG_HW_RANDOM_VIRTIO=y
-          CONFIG_DRM_VIRTIO_GPU=n
           CONFIG_VIRTIO_MMIO=y
-
-          # 9P filesystem (alternative to virtio-fs)
-          CONFIG_NET_9P=y
-          CONFIG_NET_9P_VIRTIO=y
-          CONFIG_9P_FS=y
-          CONFIG_9P_FS_POSIX_ACL=y
 
           # Serial console
           CONFIG_SERIAL_8250=y
           CONFIG_SERIAL_8250_CONSOLE=y
 
-          # SquashFS (required for OCI image rootfs)
+          # SquashFS (required for OCI image rootfs) - only zstd compression
           CONFIG_SQUASHFS=y
-          CONFIG_SQUASHFS_FILE_CACHE=y
-          CONFIG_SQUASHFS_DECOMP_SINGLE=y
-          CONFIG_SQUASHFS_ZLIB=y
-          CONFIG_SQUASHFS_LZO=y
-          CONFIG_SQUASHFS_XZ=y
           CONFIG_SQUASHFS_ZSTD=y
-          CONFIG_SQUASHFS_LZ4=y
-          CONFIG_SQUASHFS_4K_DEVBLK_SIZE=y
-          CONFIG_SQUASHFS_EMBEDDED=y
 
           # Overlay filesystem (for layered container images)
           CONFIG_OVERLAY_FS=y
@@ -286,36 +173,20 @@ jobs:
           CONFIG_FUSE_FS=y
           CONFIG_VIRTIO_FS=y
 
-          # Cgroups v2 (for container resource limits)
+          # Minimal cgroups
           CONFIG_CGROUPS=y
-          CONFIG_CGROUP_CPUACCT=y
-          CONFIG_CGROUP_DEVICE=y
-          CONFIG_CGROUP_FREEZER=y
           CONFIG_CGROUP_PIDS=y
-          CONFIG_CGROUP_SCHED=y
           CONFIG_MEMCG=y
-          CONFIG_CGROUP_BPF=y
 
-          # Namespaces (for container isolation)
+          # Minimal namespaces
           CONFIG_NAMESPACES=y
-          CONFIG_UTS_NS=y
-          CONFIG_IPC_NS=y
-          CONFIG_USER_NS=y
           CONFIG_PID_NS=y
           CONFIG_NET_NS=y
 
-          # Networking features
-          CONFIG_BRIDGE=y
-          CONFIG_VETH=y
-          CONFIG_TUN=y
-          CONFIG_MACVLAN=y
-          CONFIG_IPVLAN=y
-          CONFIG_NETFILTER=y
-          CONFIG_NF_CONNTRACK=y
-          CONFIG_NF_NAT=y
-          CONFIG_IP_NF_IPTABLES=y
-          CONFIG_IP_NF_FILTER=y
-          CONFIG_IP_NF_NAT=y
+          # Minimal networking (just for VM connectivity)
+          CONFIG_NET=y
+          CONFIG_INET=y
+          CONFIG_PACKET=y
 
           # Filesystem support
           CONFIG_TMPFS=y
@@ -323,7 +194,6 @@ jobs:
           CONFIG_SYSFS=y
           CONFIG_DEVTMPFS=y
           CONFIG_DEVTMPFS_MOUNT=y
-          CONFIG_EXT4_FS=y
 
           # Block devices
           CONFIG_BLK_DEV_LOOP=y
@@ -385,48 +255,15 @@ jobs:
         run: |
           # Build with all available cores
           # x86_64: builds vmlinux (ELF, works with PVH boot)
-          # aarch64: builds vmlinuz.efi (compressed UEFI kernel via EFI_ZBOOT)
+          # aarch64: builds Image (direct-kernel boot, no UEFI needed!)
           make -j$(nproc) ${{ matrix.kernel_target }}
 
-          # Show kernel info before stripping
-          echo "=== Before stripping ==="
-          if [ "${{ matrix.kernel_target }}" = "vmlinuz.efi" ]; then
-            ls -lh arch/arm64/boot/vmlinuz.efi
-            file arch/arm64/boot/vmlinuz.efi
-          elif [ "${{ matrix.kernel_target }}" = "Image" ]; then
+          # Show kernel info
+          echo "=== Kernel built ==="
+          if [ "${{ matrix.kernel_target }}" = "Image" ]; then
             ls -lh arch/arm64/boot/Image
             file arch/arm64/boot/Image
           else
-            ls -lh vmlinux
-            file vmlinux
-          fi
-
-      - name: Strip kernel
-        working-directory: kernel
-        run: |
-          # Strip debug symbols to reduce kernel size
-          # This can reduce size by 50-70%
-          if [ "${{ matrix.kernel_target }}" = "vmlinuz.efi" ]; then
-            # vmlinuz.efi is already compressed, no stripping needed
-            echo "=== vmlinuz.efi is pre-compressed, skipping strip ==="
-            ls -lh arch/arm64/boot/vmlinuz.efi
-            file arch/arm64/boot/vmlinuz.efi
-          elif [ "${{ matrix.kernel_target }}" = "Image" ]; then
-            # ARM64 Image is already optimized, but we can strip it further
-            # Use objcopy to strip debug sections
-            aarch64-linux-gnu-objcopy --strip-debug arch/arm64/boot/Image arch/arm64/boot/Image.stripped 2>/dev/null || \
-              objcopy --strip-debug arch/arm64/boot/Image arch/arm64/boot/Image.stripped 2>/dev/null || \
-              cp arch/arm64/boot/Image arch/arm64/boot/Image.stripped
-            mv arch/arm64/boot/Image.stripped arch/arm64/boot/Image
-
-            echo "=== After stripping ==="
-            ls -lh arch/arm64/boot/Image
-          else
-            # x86_64 vmlinux - strip debug symbols
-            strip --strip-debug vmlinux -o vmlinux.stripped
-            mv vmlinux.stripped vmlinux
-
-            echo "=== After stripping ==="
             ls -lh vmlinux
             file vmlinux
           fi
@@ -436,14 +273,9 @@ jobs:
           mkdir -p dist
 
           # Copy kernel from correct location based on target
-          if [ "${{ matrix.kernel_target }}" = "vmlinuz.efi" ]; then
-            # ARM64 with EFI_ZBOOT: compressed UEFI kernel
-            cp kernel/arch/arm64/boot/vmlinuz.efi dist/${{ matrix.image_name }}
-          elif [ "${{ matrix.kernel_target }}" = "Image" ]; then
-            # ARM64 uncompressed Image (fallback)
+          if [ "${{ matrix.kernel_target }}" = "Image" ]; then
             cp kernel/arch/arm64/boot/Image dist/${{ matrix.image_name }}
           else
-            # x86_64: vmlinux ELF
             cp kernel/vmlinux dist/${{ matrix.image_name }}
           fi
 
