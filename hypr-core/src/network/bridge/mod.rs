@@ -38,8 +38,8 @@ impl Default for BridgeConfig {
     fn default() -> Self {
         Self {
             name: "vbr0".to_string(),
-            ip: Ipv4Addr::new(100, 64, 0, 1),
-            netmask: Ipv4Addr::new(255, 192, 0, 0), // /10
+            ip: Ipv4Addr::new(10, 88, 0, 1),
+            netmask: Ipv4Addr::new(255, 255, 0, 0), // /16
             mtu: 1500,
         }
     }
@@ -143,8 +143,8 @@ mod tests {
     fn test_default_config() {
         let config = BridgeConfig::default();
         assert_eq!(config.name, "vbr0");
-        assert_eq!(config.ip, Ipv4Addr::new(100, 64, 0, 1));
-        assert_eq!(config.netmask, Ipv4Addr::new(255, 192, 0, 0));
+        assert_eq!(config.ip, Ipv4Addr::new(10, 88, 0, 1));
+        assert_eq!(config.netmask, Ipv4Addr::new(255, 255, 0, 0));
         assert_eq!(config.mtu, 1500);
     }
 

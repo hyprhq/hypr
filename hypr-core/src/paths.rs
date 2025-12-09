@@ -63,7 +63,7 @@ pub fn kernel_url() -> Option<&'static str> {
         )),
         "aarch64" => Some(concat!(
             "https://github.com/hyprhq/hypr/releases/download/",
-            "kernel-6.12-hypr/vmlinux-aarch64"
+            "kernel-6.12-hypr/Image-aarch64"
         )),
         _ => None,
     }

@@ -17,7 +17,10 @@ use tracing::{info, instrument};
 use hypr_core::network::EbpfForwarder;
 
 #[cfg(target_os = "linux")]
-use tracing::warn;
+use hypr_core::network::bridge::{create_bridge_manager, BridgeConfig};
+
+#[cfg(target_os = "linux")]
+use tracing::{debug, warn};
 
 /// Network manager coordinates all networking subsystems.
 pub struct NetworkManager {
@@ -62,6 +65,11 @@ impl NetworkManager {
         // macOS: userspace proxy (1 Gbps)
         #[cfg(target_os = "linux")]
         let port_forwarder = {
+            // First, ensure the bridge exists before trying to attach eBPF
+            if let Err(e) = setup_linux_bridge().await {
+                warn!("Failed to setup bridge: {}", e);
+            }
+
             match try_ebpf_forwarder() {
                 Ok(ebpf) => {
                     info!("Using eBPF port forwarding (10+ Gbps)");
@@ -172,6 +180,31 @@ impl NetworkManager {
     pub fn list_port_mappings(&self) -> Vec<PortMapping> {
         self.port_forwarder.list_mappings()
     }
+}
+
+/// Setup the Linux bridge (vbr0) for VM networking.
+///
+/// Creates the bridge if it doesn't exist, enables IP forwarding, and sets up NAT.
+/// This must be called before trying to attach eBPF programs.
+#[cfg(target_os = "linux")]
+async fn setup_linux_bridge() -> Result<()> {
+    let bridge_mgr = create_bridge_manager()?;
+    let config = BridgeConfig::default();
+
+    // Create bridge (idempotent - skips if already exists)
+    debug!("Ensuring bridge {} exists", config.name);
+    bridge_mgr.create_bridge(&config).await?;
+
+    // Enable IP forwarding for routing between VMs and host
+    debug!("Enabling IP forwarding");
+    bridge_mgr.enable_ip_forward().await?;
+
+    // Setup NAT for outbound connectivity
+    debug!("Setting up NAT for bridge {}", config.name);
+    bridge_mgr.setup_nat(&config.name).await?;
+
+    info!("Linux bridge {} configured successfully", config.name);
+    Ok(())
 }
 
 /// Try to initialize eBPF forwarder (Linux only).

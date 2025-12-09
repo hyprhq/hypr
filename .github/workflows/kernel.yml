@@ -23,11 +23,13 @@ jobs:
             runner: ubuntu-latest
             cross_compile: ""
             image_name: vmlinux-x86_64
+            kernel_target: vmlinux
 
           - arch: aarch64
             runner: ubuntu-24.04-arm
             cross_compile: ""
-            image_name: vmlinux-aarch64
+            image_name: Image-aarch64
+            kernel_target: Image
 
     steps:
       - name: Checkout hypr repo
@@ -242,16 +244,55 @@ jobs:
         working-directory: kernel
         run: |
           # Build with all available cores
-          make -j$(nproc) vmlinux
+          # x86_64: builds vmlinux (ELF, works with PVH boot)
+          # aarch64: builds Image (PE/COFF, works with UEFI boot)
+          make -j$(nproc) ${{ matrix.kernel_target }}
 
-          # Show kernel info
-          ls -lh vmlinux
-          file vmlinux
+          # Show kernel info before stripping
+          echo "=== Before stripping ==="
+          if [ "${{ matrix.kernel_target }}" = "Image" ]; then
+            ls -lh arch/arm64/boot/Image
+            file arch/arm64/boot/Image
+          else
+            ls -lh vmlinux
+            file vmlinux
+          fi
+
+      - name: Strip kernel
+        working-directory: kernel
+        run: |
+          # Strip debug symbols to reduce kernel size
+          # This can reduce size by 50-70%
+          if [ "${{ matrix.kernel_target }}" = "Image" ]; then
+            # ARM64 Image is already optimized, but we can strip it further
+            # Use objcopy to strip debug sections
+            aarch64-linux-gnu-objcopy --strip-debug arch/arm64/boot/Image arch/arm64/boot/Image.stripped 2>/dev/null || \
+              objcopy --strip-debug arch/arm64/boot/Image arch/arm64/boot/Image.stripped 2>/dev/null || \
+              cp arch/arm64/boot/Image arch/arm64/boot/Image.stripped
+            mv arch/arm64/boot/Image.stripped arch/arm64/boot/Image
+
+            echo "=== After stripping ==="
+            ls -lh arch/arm64/boot/Image
+          else
+            # x86_64 vmlinux - strip debug symbols
+            strip --strip-debug vmlinux -o vmlinux.stripped
+            mv vmlinux.stripped vmlinux
+
+            echo "=== After stripping ==="
+            ls -lh vmlinux
+            file vmlinux
+          fi
 
       - name: Prepare kernel artifact
         run: |
           mkdir -p dist
-          cp kernel/vmlinux dist/${{ matrix.image_name }}
+
+          # Copy kernel from correct location based on target
+          if [ "${{ matrix.kernel_target }}" = "Image" ]; then
+            cp kernel/arch/arm64/boot/Image dist/${{ matrix.image_name }}
+          else
+            cp kernel/vmlinux dist/${{ matrix.image_name }}
+          fi
 
           # Generate SHA256 checksum
           cd dist
@@ -325,10 +366,10 @@ jobs:
 
             ### Binaries
 
-            | File | Architecture | Description |
-            |------|--------------|-------------|
-            | `vmlinux-x86_64` | x86_64 | Uncompressed kernel for Intel/AMD |
-            | `vmlinux-aarch64` | aarch64 | Uncompressed kernel for ARM64 |
+            | File | Architecture | Format | Description |
+            |------|--------------|--------|-------------|
+            | `vmlinux-x86_64` | x86_64 | ELF | Kernel for Intel/AMD (PVH boot) |
+            | `Image-aarch64` | aarch64 | PE/COFF | Kernel for ARM64 (UEFI boot) |
 
             ### Usage
 
@@ -339,10 +380,10 @@ jobs:
             curl -fsSL https://github.com/hyprhq/hypr/releases/download/kernel-${{ inputs.kernel_version }}-hypr/vmlinux-x86_64 -o ~/.hypr/vmlinux
 
             # Linux aarch64
-            curl -fsSL https://github.com/hyprhq/hypr/releases/download/kernel-${{ inputs.kernel_version }}-hypr/vmlinux-aarch64 -o ~/.hypr/vmlinux
+            curl -fsSL https://github.com/hyprhq/hypr/releases/download/kernel-${{ inputs.kernel_version }}-hypr/Image-aarch64 -o ~/.hypr/vmlinux
 
             # macOS (Apple Silicon)
-            curl -fsSL https://github.com/hyprhq/hypr/releases/download/kernel-${{ inputs.kernel_version }}-hypr/vmlinux-aarch64 -o ~/.hypr/vmlinux
+            curl -fsSL https://github.com/hyprhq/hypr/releases/download/kernel-${{ inputs.kernel_version }}-hypr/Image-aarch64 -o ~/.hypr/vmlinux
 
             # macOS (Intel)
             curl -fsSL https://github.com/hyprhq/hypr/releases/download/kernel-${{ inputs.kernel_version }}-hypr/vmlinux-x86_64 -o ~/.hypr/vmlinux
@@ -364,7 +405,7 @@ jobs:
           files: |
             release/vmlinux-x86_64
             release/vmlinux-x86_64.sha256
-            release/vmlinux-aarch64
-            release/vmlinux-aarch64.sha256
+            release/Image-aarch64
+            release/Image-aarch64.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
