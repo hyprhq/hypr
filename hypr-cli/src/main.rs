@@ -283,18 +283,26 @@ async fn main() -> Result<()> {
                     None => {
                         // Try compose file names in priority order (hypr-specific first, then Docker-compatible)
                         let candidates = [
-                            "hypr-compose.yml", "hypr-compose.yaml",
-                            "Hyprfile", "Hyprfile.yml", "Hyprfile.yaml",
-                            "docker-compose.yml", "docker-compose.yaml",
-                            "compose.yml", "compose.yaml",
+                            "hypr-compose.yml",
+                            "hypr-compose.yaml",
+                            "Hyprfile",
+                            "Hyprfile.yml",
+                            "Hyprfile.yaml",
+                            "docker-compose.yml",
+                            "docker-compose.yaml",
+                            "compose.yml",
+                            "compose.yaml",
                         ];
-                        candidates.iter()
+                        candidates
+                            .iter()
                             .find(|f| std::path::Path::new(f).exists())
                             .map(|s| s.to_string())
-                            .ok_or_else(|| anyhow::anyhow!(
-                                "No compose file found. Tried: {}. Use --file to specify.",
-                                candidates.join(", ")
-                            ))?
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "No compose file found. Tried: {}. Use --file to specify.",
+                                    candidates.join(", ")
+                                )
+                            })?
                     }
                 };
                 commands::compose::up(&compose_file, name, detach, force_recreate, build).await?;

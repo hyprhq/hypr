@@ -122,7 +122,8 @@ impl StackOrchestrator {
             .map_err(|e| HyprError::Internal(format!("Failed to parse compose file: {}", e)))?;
 
         // Convert to stack config - use async version to build images if needed
-        let stack_config = ComposeConverter::convert_async(compose, stack_name, compose_dir).await?;
+        let stack_config =
+            ComposeConverter::convert_async(compose, stack_name, compose_dir).await?;
 
         // Generate stack ID
         let stack_id = format!(

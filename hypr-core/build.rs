@@ -473,14 +473,16 @@ fn build_ebpf_programs(embedded_dir: &Path) {
     // Compile eBPF programs with clang
     let bpf_cflags = [
         "-O2",
-        "-target", "bpf",
+        "-target",
+        "bpf",
         "-g",
         "-Wall",
         "-Wno-unused-value",
         "-Wno-pointer-sign",
         "-Wno-compare-distinct-pointer-types",
         "-fno-stack-protector",
-        "-I", ebpf_src_dir.to_str().unwrap(),
+        "-I",
+        ebpf_src_dir.to_str().unwrap(),
     ];
 
     // Compile ingress program
@@ -491,7 +493,9 @@ fn build_ebpf_programs(embedded_dir: &Path) {
         .status();
 
     if !matches!(status, Ok(s) if s.success()) {
-        println!("cargo:warning=  Failed to compile ingress eBPF (clang with BPF support required)");
+        println!(
+            "cargo:warning=  Failed to compile ingress eBPF (clang with BPF support required)"
+        );
         return;
     }
 

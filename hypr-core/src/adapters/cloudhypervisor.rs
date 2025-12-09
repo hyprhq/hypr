@@ -118,9 +118,8 @@ impl CloudHypervisorAdapter {
 
         // Configure TAP device with gateway IP
         // The VM uses 10.88.0.x, gateway is 10.88.0.1
-        let output = StdCommand::new("ip")
-            .args(["addr", "add", "10.88.0.1/16", "dev", tap_name])
-            .output();
+        let output =
+            StdCommand::new("ip").args(["addr", "add", "10.88.0.1/16", "dev", tap_name]).output();
 
         match output {
             Ok(o) if o.status.success() => {
@@ -139,9 +138,7 @@ impl CloudHypervisorAdapter {
         }
 
         // Bring TAP device up
-        let _ = StdCommand::new("ip")
-            .args(["link", "set", tap_name, "up"])
-            .output();
+        let _ = StdCommand::new("ip").args(["link", "set", tap_name, "up"]).output();
 
         Ok(())
     }
@@ -151,9 +148,7 @@ impl CloudHypervisorAdapter {
         use std::process::Command as StdCommand;
 
         // Delete the TAP device
-        let output = StdCommand::new("ip")
-            .args(["link", "delete", tap_name])
-            .output();
+        let output = StdCommand::new("ip").args(["link", "delete", tap_name]).output();
 
         match output {
             Ok(o) if o.status.success() => {
