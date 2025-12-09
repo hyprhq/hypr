@@ -1063,9 +1063,8 @@ impl LinuxVmBuilder {
             .map_err(|e| BuildError::IoError { path: work_dir.clone(), source: e })?;
 
         // Locate or download kernel (uses centralized paths with auto-download)
-        let kernel_path = crate::paths::ensure_kernel().map_err(|e| {
-            BuildError::ContextError(format!("Failed to ensure kernel: {}", e))
-        })?;
+        let kernel_path = crate::paths::ensure_kernel()
+            .map_err(|e| BuildError::ContextError(format!("Failed to ensure kernel: {}", e)))?;
 
         // Placeholder: builder_rootfs will be replaced by on-the-fly initramfs
         let builder_rootfs = crate::paths::runtime_dir().join("builder-initramfs.cpio");
@@ -1647,9 +1646,8 @@ impl MacOsVmBuilder {
             .map_err(|e| BuildError::IoError { path: work_dir.clone(), source: e })?;
 
         // Locate or download kernel (uses centralized paths with auto-download)
-        let kernel_path = crate::paths::ensure_kernel().map_err(|e| {
-            BuildError::ContextError(format!("Failed to ensure kernel: {}", e))
-        })?;
+        let kernel_path = crate::paths::ensure_kernel()
+            .map_err(|e| BuildError::ContextError(format!("Failed to ensure kernel: {}", e)))?;
 
         // Placeholder: builder_rootfs will be replaced by on-the-fly initramfs
         let builder_rootfs = crate::paths::runtime_dir().join("builder-initramfs.cpio");
