@@ -24,11 +24,13 @@ const CLOUD_HYPERVISOR_BINARY: &[u8] =
 /// 2. Checks if cloud-hypervisor is already extracted
 /// 3. Extracts the embedded binary if missing
 /// 4. Returns the path to the binary
+///
+/// Note: Uses data_dir (not runtime_dir) because /run is often mounted noexec.
 pub fn get_cloud_hypervisor_path() -> Result<PathBuf> {
-    // Use centralized paths module for consistency
-    let runtime_dir = crate::paths::runtime_dir();
-    fs::create_dir_all(&runtime_dir)
-        .map_err(|e| HyprError::IoError { path: runtime_dir.clone(), source: e })?;
+    // Use data_dir for executables (runtime_dir may be noexec)
+    let bin_dir = crate::paths::data_dir().join("bin");
+    fs::create_dir_all(&bin_dir)
+        .map_err(|e| HyprError::IoError { path: bin_dir.clone(), source: e })?;
 
     let binary_name = if cfg!(target_arch = "x86_64") {
         "cloud-hypervisor-static"
@@ -40,7 +42,7 @@ pub fn get_cloud_hypervisor_path() -> Result<PathBuf> {
         });
     };
 
-    let binary_path = runtime_dir.join(binary_name);
+    let binary_path = bin_dir.join(binary_name);
 
     // Extract if not exists
     if !binary_path.exists() {
