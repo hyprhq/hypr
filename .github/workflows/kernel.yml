@@ -74,10 +74,11 @@ jobs:
             make defconfig
           fi
 
-          # Enable KVM guest support
+          # Enable KVM guest support and PVH boot (required for cloud-hypervisor)
           ./scripts/config --enable CONFIG_HYPERVISOR_GUEST
           ./scripts/config --enable CONFIG_KVM_GUEST
           ./scripts/config --enable CONFIG_PARAVIRT
+          ./scripts/config --enable CONFIG_PVH
 
           # Display initial config info
           echo "Initial config:"
@@ -93,6 +94,9 @@ jobs:
           # ============================================
           # HYPR Custom Kernel Configuration
           # ============================================
+
+          # PVH boot support (required for cloud-hypervisor direct kernel boot)
+          CONFIG_PVH=y
 
           # Block device support (required for squashfs and other filesystems)
           CONFIG_BLOCK=y
@@ -201,6 +205,9 @@ jobs:
           # Verify critical options are enabled
           echo ""
           echo "=== Final config verification ==="
+          echo ""
+          echo "PVH boot (cloud-hypervisor):"
+          grep CONFIG_PVH .config || echo "WARNING: PVH not found!"
           echo ""
           echo "squashfs:"
           grep CONFIG_SQUASHFS .config || echo "WARNING: SQUASHFS not found!"
