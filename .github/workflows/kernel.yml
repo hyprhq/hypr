@@ -69,7 +69,8 @@ jobs:
       - name: Configure kernel with minimal virtio config
         working-directory: kernel
         run: |
-          # Start with minimal config for x86_64 or arm64
+          # Start with defconfig, then aggressively trim for size
+          # ARM64 cloud-hypervisor has ~32MB kernel size limit
           if [ "${{ matrix.arch }}" = "x86_64" ]; then
             make x86_64_defconfig
           else
@@ -81,6 +82,45 @@ jobs:
           ./scripts/config --enable CONFIG_KVM_GUEST
           ./scripts/config --enable CONFIG_PARAVIRT
           ./scripts/config --enable CONFIG_PVH
+
+          # === SIZE REDUCTION: Disable debug info (saves ~10-20MB) ===
+          ./scripts/config --disable CONFIG_DEBUG_INFO
+          ./scripts/config --disable CONFIG_DEBUG_INFO_DWARF4
+          ./scripts/config --disable CONFIG_DEBUG_INFO_DWARF5
+          ./scripts/config --disable CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
+          ./scripts/config --disable CONFIG_DEBUG_INFO_BTF
+          ./scripts/config --disable CONFIG_PAHOLE_HAS_SPLIT_BTF
+          ./scripts/config --disable CONFIG_DEBUG_INFO_BTF_MODULES
+          ./scripts/config --disable CONFIG_GDB_SCRIPTS
+          ./scripts/config --enable CONFIG_DEBUG_INFO_NONE
+
+          # === SIZE REDUCTION: Disable tracing/profiling ===
+          ./scripts/config --disable CONFIG_FTRACE
+          ./scripts/config --disable CONFIG_FUNCTION_TRACER
+          ./scripts/config --disable CONFIG_KPROBES
+          ./scripts/config --disable CONFIG_KPROBE_EVENTS
+          ./scripts/config --disable CONFIG_UPROBE_EVENTS
+          ./scripts/config --disable CONFIG_DYNAMIC_FTRACE
+          ./scripts/config --disable CONFIG_STACK_TRACER
+          ./scripts/config --disable CONFIG_SCHED_TRACER
+
+          # === SIZE REDUCTION: Disable other debug features ===
+          ./scripts/config --disable CONFIG_KALLSYMS
+          ./scripts/config --disable CONFIG_KALLSYMS_ALL
+          ./scripts/config --disable CONFIG_DEBUG_KERNEL
+          ./scripts/config --disable CONFIG_DEBUG_MISC
+          ./scripts/config --disable CONFIG_PRINTK_TIME
+
+          # === SIZE REDUCTION: Disable unused drivers ===
+          ./scripts/config --disable CONFIG_SOUND
+          ./scripts/config --disable CONFIG_DRM
+          ./scripts/config --disable CONFIG_USB_SUPPORT
+          ./scripts/config --disable CONFIG_WIRELESS
+          ./scripts/config --disable CONFIG_WLAN
+          ./scripts/config --disable CONFIG_BT
+          ./scripts/config --disable CONFIG_RFKILL
+          ./scripts/config --disable CONFIG_INPUT_MOUSE
+          ./scripts/config --disable CONFIG_INPUT_KEYBOARD
 
           # Display initial config info
           echo "Initial config:"
