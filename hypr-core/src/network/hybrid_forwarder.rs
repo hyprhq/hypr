@@ -33,10 +33,7 @@ impl HybridForwarder {
     /// Create a new hybrid forwarder.
     pub fn new(ebpf: Arc<EbpfForwarder>) -> Self {
         info!("Creating hybrid forwarder (eBPF + proxy)");
-        Self {
-            ebpf,
-            proxy: ProxyForwarder::new(),
-        }
+        Self { ebpf, proxy: ProxyForwarder::new() }
     }
 }
 
