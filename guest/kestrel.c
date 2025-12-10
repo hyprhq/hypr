@@ -1161,9 +1161,12 @@ found_array:
                             result[i][len] = '\0';
                             i++;
                         }
-                        scan = end;  // Will be incremented at end of loop
+                        scan = end;  // Points to closing quote, will be incremented past it
+                        // Stay in VALUE state - we already processed this string
+                    } else {
+                        // Inside nested array - use state machine to skip strings
+                        state = JSON_STATE_STRING;
                     }
-                    state = JSON_STATE_STRING;
                 } else if (*scan == '[') {
                     arr_depth++;
                 } else if (*scan == ']') {
