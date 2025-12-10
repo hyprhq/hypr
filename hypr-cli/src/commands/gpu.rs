@@ -118,6 +118,7 @@ fn truncate(s: &str, max_len: usize) -> String {
 }
 
 /// Format memory in human-readable form.
+#[cfg(target_os = "macos")]
 fn format_memory(mb: u64) -> String {
     if mb >= 1024 {
         format!("{:.1} GB", mb as f64 / 1024.0)

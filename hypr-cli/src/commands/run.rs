@@ -202,7 +202,7 @@ fn auto_detect_gpu() -> Result<Option<GpuConfig>> {
                 _ => 0,
             };
             let memory_score = g.memory_mb.unwrap_or(0) / 1024; // GB
-            vfio_score + vendor_score + memory_score as u64
+            vfio_score + vendor_score + memory_score
         });
 
         match gpu {
