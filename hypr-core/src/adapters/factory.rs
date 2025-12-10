@@ -256,9 +256,13 @@ mod tests {
 
                 #[cfg(target_os = "macos")]
                 {
-                    // Could be HVF or Krun depending on features
+                    // Could be HVF (krunkit on ARM64, vfkit on Intel) or libkrun-efi
                     let name = adapter.name();
-                    assert!(name == "hvf" || name == "krun", "Expected hvf or krun, got {}", name);
+                    assert!(
+                        name.starts_with("hvf") || name == "libkrun-efi",
+                        "Expected hvf-krunkit, hvf-vfkit, or libkrun-efi, got {}",
+                        name
+                    );
                 }
             }
             Err(HyprError::HypervisorNotFound { .. }) => {

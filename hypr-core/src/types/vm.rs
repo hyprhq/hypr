@@ -176,16 +176,26 @@ pub struct GpuConfig {
     pub vendor: GpuVendor,
 
     /// PCI address (Linux: e.g., "0000:01:00.0")
+    /// Not used on macOS (automatic Metal detection)
     pub pci_address: Option<String>,
 
-    /// GPU model (e.g., "NVIDIA A100 80GB")
+    /// GPU model (e.g., "NVIDIA A100 80GB", "Apple M3 Max")
     pub model: String,
 
-    /// Use SR-IOV virtual function
+    /// Use SR-IOV virtual function (Linux only)
     pub use_sriov: bool,
 
     /// GPU memory in MB (detected from hardware)
     pub gpu_memory_mb: Option<u64>,
+
+    /// NVIDIA GPUDirect P2P clique ID (Turing, Ampere, Hopper, Lovelace).
+    ///
+    /// Enables PCIe P2P for multi-GPU setups. All GPUs in the same clique
+    /// can use direct peer-to-peer DMA transfers over PCIe.
+    ///
+    /// Only valid for NVIDIA GPUs. Ignored for other vendors.
+    #[serde(default)]
+    pub gpudirect_clique: Option<u8>,
 }
 
 /// GPU vendor.

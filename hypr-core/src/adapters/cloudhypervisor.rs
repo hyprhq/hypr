@@ -429,6 +429,32 @@ impl CloudHypervisorAdapter {
         args.push("--rng".to_string());
         args.push("src=/dev/urandom".to_string());
 
+        // GPU passthrough via VFIO
+        // cloud-hypervisor expects: --device path=/sys/bus/pci/devices/0000:01:00.0/
+        if let Some(gpu) = &config.gpu {
+            if let Some(pci_address) = &gpu.pci_address {
+                let mut device_arg = format!("path=/sys/bus/pci/devices/{}/", pci_address);
+
+                // NVIDIA GPUDirect P2P support (Turing, Ampere, Hopper, Lovelace)
+                // Enables PCIe P2P for multi-GPU setups
+                if gpu.vendor == crate::types::vm::GpuVendor::Nvidia {
+                    if let Some(clique) = gpu.gpudirect_clique {
+                        device_arg.push_str(&format!(",x_nv_gpudirect_clique={}", clique));
+                        debug!(clique = clique, "NVIDIA GPUDirect P2P enabled");
+                    }
+                }
+
+                args.push("--device".to_string());
+                args.push(device_arg);
+
+                info!(
+                    pci_address = %pci_address,
+                    vendor = ?gpu.vendor,
+                    "GPU passthrough enabled via VFIO"
+                );
+            }
+        }
+
         debug!("Built CH args: {:?}", args);
         Ok(args)
     }
@@ -698,13 +724,31 @@ impl VmmAdapter for CloudHypervisorAdapter {
         })
     }
 
-    #[instrument(skip(self, _gpu), fields(vm_id = %_handle.id))]
-    async fn attach_gpu(&self, _handle: &VmHandle, _gpu: &GpuConfig) -> Result<()> {
-        metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "cloudhypervisor", "operation" => "attach_gpu").increment(1);
-        Err(HyprError::PlatformUnsupported {
-            feature: "GPU passthrough".to_string(),
-            platform: "cloud-hypervisor (Phase 1)".to_string(),
-        })
+    #[instrument(skip(self, gpu), fields(vm_id = %_handle.id))]
+    async fn attach_gpu(&self, _handle: &VmHandle, gpu: &GpuConfig) -> Result<()> {
+        // GPU passthrough is configured at VM creation time via build_args()
+        // Hot-plug of GPUs is not currently supported by cloud-hypervisor
+        //
+        // For hot-plug in the future:
+        // POST /api/v1/vm.add-device with {"path": "/sys/bus/pci/devices/..."}
+
+        if gpu.pci_address.is_none() {
+            return Err(HyprError::GpuNotBound {
+                pci_address: "unspecified".to_string(),
+                hint: "Linux GPU passthrough requires a PCI address (e.g., 0000:01:00.0)".to_string(),
+            });
+        }
+
+        info!(
+            pci_address = ?gpu.pci_address,
+            vendor = ?gpu.vendor,
+            model = %gpu.model,
+            "GPU configured for VFIO passthrough"
+        );
+
+        // GPU is actually attached at VM creation time (in build_args)
+        // This method just validates the configuration
+        Ok(())
     }
 
     fn vsock_path(&self, _handle: &VmHandle) -> PathBuf {
@@ -714,12 +758,13 @@ impl VmmAdapter for CloudHypervisorAdapter {
 
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterCapabilities {
-            gpu_passthrough: false, // Phase 4
+            gpu_passthrough: true, // VFIO passthrough supported
             virtio_fs: true,
             hotplug_devices: false, // Phase 1
             metadata: HashMap::from([
                 ("adapter".to_string(), "cloud-hypervisor".to_string()),
                 ("version".to_string(), "38.0".to_string()),
+                ("gpu_backend".to_string(), "vfio".to_string()),
             ]),
         }
     }

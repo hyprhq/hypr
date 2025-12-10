@@ -1,7 +1,11 @@
 //! HVF (Hypervisor.framework) adapter for macOS.
 //!
-//! Provides VM lifecycle management using vfkit on macOS.
-//! This is a fallback adapter when libkrun-efi is not available.
+//! Provides VM lifecycle management using:
+//! - **Apple Silicon (ARM64)**: krunkit/libkrun-efi (GPU + Rosetta support)
+//! - **Intel (x86_64)**: vfkit (no GPU support)
+//!
+//! This architecture-based selection ("hard gate") simplifies the code -
+//! no runtime probing needed, just compile-time configuration.
 
 use crate::adapters::{AdapterCapabilities, VmmAdapter};
 use crate::error::{HyprError, Result};
@@ -26,21 +30,54 @@ static KESTREL_INITRAMFS: &[u8] =
 static KESTREL_INITRAMFS: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/embedded/initramfs-linux-arm64.cpio"));
 
-/// HVF adapter using vfkit.
+/// HVF adapter using krunkit (ARM64) or vfkit (x86_64).
+///
+/// # Architecture Selection
+///
+/// - **Apple Silicon (ARM64)**: Uses krunkit/libkrun-efi
+///   - GPU passthrough via virtio-gpu + Venus + Metal
+///   - Rosetta x86_64 emulation support
+///   - Requires macOS 14+ (Sonoma)
+///
+/// - **Intel (x86_64)**: Uses vfkit
+///   - No GPU passthrough support
+///   - Rosetta support (for ARM64 guests)
 pub struct HvfAdapter {
-    /// Path to vfkit binary
+    /// Path to hypervisor binary (krunkit or vfkit)
     binary_path: PathBuf,
     /// Default kernel path
     kernel_path: PathBuf,
+    /// Name of the hypervisor binary (for logging)
+    binary_name: &'static str,
+    /// Whether this adapter supports GPU passthrough
+    gpu_capable: bool,
 }
 
 impl HvfAdapter {
     /// Create a new HVF adapter.
+    ///
+    /// Selects the hypervisor binary based on architecture:
+    /// - ARM64: krunkit (GPU support)
+    /// - x86_64: vfkit (no GPU)
     pub fn new() -> Result<Self> {
-        let binary_path = Self::find_binary()?;
+        // Architecture-based binary selection ("hard gate")
+        #[cfg(target_arch = "aarch64")]
+        let (binary_name, gpu_capable) = ("krunkit", true);
+
+        #[cfg(not(target_arch = "aarch64"))]
+        let (binary_name, gpu_capable) = ("vfkit", false);
+
+        let binary_path = Self::find_binary(binary_name)?;
         let kernel_path = crate::paths::kernel_path();
 
-        Ok(Self { binary_path, kernel_path })
+        info!(
+            binary = binary_name,
+            path = %binary_path.display(),
+            gpu_capable = gpu_capable,
+            "HVF adapter initialized"
+        );
+
+        Ok(Self { binary_path, kernel_path, binary_name, gpu_capable })
     }
 
     /// Write embedded initramfs to a temporary file and return its path.
@@ -77,12 +114,15 @@ impl HvfAdapter {
         Ok(temp_path)
     }
 
-    /// Find vfkit binary in PATH.
-    fn find_binary() -> Result<PathBuf> {
+    /// Find hypervisor binary in common locations.
+    ///
+    /// # Arguments
+    /// * `name` - Binary name: "krunkit" (ARM64) or "vfkit" (Intel)
+    fn find_binary(name: &str) -> Result<PathBuf> {
         let candidates = vec![
-            PathBuf::from("/usr/local/bin/vfkit"),
-            PathBuf::from("/opt/homebrew/bin/vfkit"),
-            PathBuf::from("./vfkit"),
+            PathBuf::from(format!("/opt/homebrew/bin/{}", name)),
+            PathBuf::from(format!("/usr/local/bin/{}", name)),
+            PathBuf::from(format!("./{}", name)),
         ];
 
         for path in candidates {
@@ -91,7 +131,16 @@ impl HvfAdapter {
             }
         }
 
-        Err(HyprError::HypervisorNotFound { hypervisor: "vfkit".to_string() })
+        // Helpful error message with installation instructions
+        let install_hint = if name == "krunkit" {
+            "brew tap slp/krunkit && brew install krunkit"
+        } else {
+            "brew install vfkit"
+        };
+
+        Err(HyprError::HypervisorNotFound {
+            hypervisor: format!("{} (Run: {})", name, install_hint),
+        })
     }
 
     /// Prepare a disk image for macOS Virtualization.framework.
@@ -334,26 +383,35 @@ impl HvfAdapter {
             debug!("Rosetta x86_64 emulation enabled for ARM64 host");
         }
 
-        debug!("Built vfkit args: {:?}", args);
+        debug!(binary = self.binary_name, args = ?args, "Built hypervisor args");
         Ok(args)
     }
 
-    /// Check if GPU is requested and warn user.
+    /// Check if GPU is requested and handle appropriately.
+    ///
+    /// - ARM64 (krunkit): GPU is supported via virtio-gpu + Venus
+    /// - x86_64 (vfkit): GPU not supported, warn user
     fn check_gpu_support(&self, config: &VmConfig) -> Result<()> {
         if config.gpu.is_some() {
-            warn!(
-                "GPU requested but HVF does not support GPU passthrough.\n\
-                \n\
-                For GPU-accelerated VMs on macOS, install libkrun-efi:\n\
-                \n\
-                brew install hypr-libkrun\n\
-                hypr config set vmm.macos libkrun\n\
-                \n\
-                Continuing with CPU-only VM..."
-            );
+            if self.gpu_capable {
+                info!(
+                    "GPU requested - will be enabled via virtio-gpu + Venus (Metal backend)"
+                );
+            } else {
+                warn!(
+                    "GPU requested but {} does not support GPU passthrough.\n\
+                    \n\
+                    GPU passthrough requires Apple Silicon with krunkit.\n\
+                    Intel Macs do not support GPU passthrough.\n\
+                    \n\
+                    Continuing with CPU-only VM...",
+                    self.binary_name
+                );
+            }
         }
         Ok(())
     }
+
 }
 
 impl Default for HvfAdapter {
@@ -511,13 +569,27 @@ impl VmmAdapter for HvfAdapter {
         })
     }
 
-    #[instrument(skip(self, _gpu), fields(vm_id = %_handle.id))]
-    async fn attach_gpu(&self, _handle: &VmHandle, _gpu: &GpuConfig) -> Result<()> {
-        metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "hvf", "operation" => "attach_gpu").increment(1);
-        Err(HyprError::GpuUnavailable {
-            reason: "HVF does not support GPU passthrough. Use libkrun-efi for Metal support."
-                .to_string(),
-        })
+    #[instrument(skip(self, gpu), fields(vm_id = %_handle.id))]
+    async fn attach_gpu(&self, _handle: &VmHandle, gpu: &GpuConfig) -> Result<()> {
+        if self.gpu_capable {
+            // krunkit enables GPU automatically via virtio-gpu + Venus
+            // The guest will see /dev/dri/renderD128
+            info!(
+                vendor = ?gpu.vendor,
+                model = %gpu.model,
+                "GPU attached via krunkit/libkrun-efi (virtio-gpu + Venus)"
+            );
+            Ok(())
+        } else {
+            metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "hvf", "operation" => "attach_gpu").increment(1);
+            Err(HyprError::GpuUnavailable {
+                reason: format!(
+                    "{} does not support GPU passthrough. \
+                     GPU requires Apple Silicon with krunkit.",
+                    self.binary_name
+                ),
+            })
+        }
     }
 
     fn vsock_path(&self, _handle: &VmHandle) -> PathBuf {
@@ -526,18 +598,30 @@ impl VmmAdapter for HvfAdapter {
     }
 
     fn capabilities(&self) -> AdapterCapabilities {
+        let mut metadata = HashMap::from([
+            ("adapter".to_string(), "hvf".to_string()),
+            ("backend".to_string(), self.binary_name.to_string()),
+        ]);
+
+        // Add GPU backend info for krunkit
+        if self.gpu_capable {
+            metadata.insert("gpu_backend".to_string(), "metal".to_string());
+        }
+
         AdapterCapabilities {
-            gpu_passthrough: false,
-            virtio_fs: false,
+            gpu_passthrough: self.gpu_capable,
+            virtio_fs: true, // Both krunkit and vfkit support virtio-fs
             hotplug_devices: false,
-            metadata: HashMap::from([
-                ("adapter".to_string(), "hvf".to_string()),
-                ("backend".to_string(), "vfkit".to_string()),
-            ]),
+            metadata,
         }
     }
 
     fn name(&self) -> &str {
-        "hvf"
+        // Return a descriptive name including the backend
+        if self.gpu_capable {
+            "hvf-krunkit"
+        } else {
+            "hvf-vfkit"
+        }
     }
 }

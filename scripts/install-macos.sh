@@ -57,6 +57,83 @@ else
     echo "  Kernel already exists at $KERNEL_PATH"
 fi
 
+# =============================================================================
+# HYPERVISOR INSTALLATION (Architecture-dependent)
+# =============================================================================
+#
+# - Apple Silicon (arm64): krunkit (GPU support via Metal/Venus)
+# - Intel (x86_64): vfkit (no GPU support)
+#
+# This "hard gate" simplifies the Rust code - no runtime probing needed.
+# =============================================================================
+echo -e "${YELLOW}Installing hypervisor dependencies...${NC}"
+
+# Check if Homebrew is available
+if ! command -v brew &> /dev/null; then
+    echo -e "${RED}Homebrew is required but not installed.${NC}"
+    echo "Install it from: https://brew.sh"
+    exit 1
+fi
+
+if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then
+    echo "  Apple Silicon detected. Installing krunkit (GPU + Rosetta support)..."
+
+    # krunkit requires the slp tap
+    if ! brew tap | grep -q "slp/krunkit"; then
+        echo "  Adding krunkit tap..."
+        brew tap slp/krunkit
+    fi
+
+    # Install krunkit (includes libkrun-efi)
+    if ! command -v krunkit &> /dev/null; then
+        echo "  Installing krunkit..."
+        brew install krunkit
+    else
+        echo "  krunkit already installed"
+    fi
+
+    HYPERVISOR_BIN="krunkit"
+    HYPERVISOR_PATH="$(which krunkit 2>/dev/null || echo '/opt/homebrew/bin/krunkit')"
+
+    # Verify macOS version (krunkit requires Sonoma 14+)
+    MACOS_VERSION=$(sw_vers -productVersion | cut -d. -f1)
+    if [ "$MACOS_VERSION" -lt 14 ]; then
+        echo -e "${YELLOW}  Warning: krunkit works best on macOS 14 (Sonoma) or later${NC}"
+        echo "  GPU passthrough may not work on older macOS versions"
+    fi
+
+    echo -e "${GREEN}  GPU support enabled via Metal/Venus${NC}"
+else
+    echo "  Intel Mac detected. Installing vfkit..."
+
+    # Install vfkit
+    if ! command -v vfkit &> /dev/null; then
+        echo "  Installing vfkit..."
+        brew install vfkit
+    else
+        echo "  vfkit already installed"
+    fi
+
+    HYPERVISOR_BIN="vfkit"
+    HYPERVISOR_PATH="$(which vfkit 2>/dev/null || echo '/usr/local/bin/vfkit')"
+
+    echo -e "${YELLOW}  Note: GPU passthrough not available on Intel Macs${NC}"
+fi
+
+# Verify hypervisor installation
+if ! command -v "$HYPERVISOR_BIN" &> /dev/null; then
+    echo -e "${RED}Failed to install $HYPERVISOR_BIN${NC}"
+    echo "Please install manually:"
+    if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then
+        echo "  brew tap slp/krunkit && brew install krunkit"
+    else
+        echo "  brew install vfkit"
+    fi
+    exit 1
+fi
+
+echo "  Hypervisor: $HYPERVISOR_BIN at $HYPERVISOR_PATH"
+
 echo -e "${YELLOW}Creating LaunchDaemon...${NC}"
 cat > "$PLIST_PATH" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -158,6 +235,17 @@ launchctl load "$PLIST_PATH"
 echo -e "${GREEN}=== Installation Complete ===${NC}"
 echo ""
 echo "hyprd is now running as a system service."
+echo ""
+echo "Hypervisor: $HYPERVISOR_BIN"
+if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then
+    echo -e "GPU Support: ${GREEN}Enabled (Metal/Venus)${NC}"
+    echo ""
+    echo "GPU Commands:"
+    echo "  hypr gpu list        - List available GPUs"
+    echo "  hypr run --gpu ...   - Run with GPU passthrough"
+else
+    echo -e "GPU Support: ${YELLOW}Not available on Intel Macs${NC}"
+fi
 echo ""
 echo "Commands:"
 echo "  hypr ps              - List running VMs"

@@ -305,6 +305,7 @@ impl TryFrom<ProtoGpuConfig> for GpuConfig {
             model: proto.model,
             use_sriov: proto.use_sriov,
             gpu_memory_mb: proto.gpu_memory_mb,
+            gpudirect_clique: None, // Not exposed via proto yet
         })
     }
 }

@@ -100,6 +100,10 @@ pub mod hvf;
 #[cfg(all(target_os = "macos", feature = "krun"))]
 pub mod krun;
 
+// VFIO module (GPU passthrough)
+// Available on all platforms, but VFIO operations only work on Linux
+pub mod vfio;
+
 // Re-export adapter types with proper cfg gates
 #[cfg(target_os = "linux")]
 pub use cloudhypervisor::CloudHypervisorAdapter;
