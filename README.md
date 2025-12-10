@@ -93,8 +93,10 @@ graph TD
 ### Key Components
 
 *   **`hyprd` (Rust):** The brain. Handles image building (DAG solver), state management (SQLite), and orchestration.
-*   **Kestrel (C):** The heart. A 20KB static guest agent that replaces systemd. It handles mounting, networking, and process supervision inside the VM instantly.
-*   **Drift (eBPF):** The muscle. On Linux, HYPR loads custom eBPF programs into the kernel to handle L4 load balancing and NAT at line rate (10Gbps+).
+*   **Kestrel (C):** The heart. A ~500KB static guest agent that replaces systemd. It handles mounting, networking, and process supervision inside the VM instantly.
+*   **Hybrid Networking:** On Linux, HYPR uses a dual-path approach:
+    *   **Drift (eBPF):** TC hooks on the bridge interface for external traffic at line rate (10+ Gbps)
+    *   **Proxy:** Userspace TCP/UDP proxy for localhost port forwarding
 *   **Hermetic Builder:** HYPR doesn't use BuildKit. It spins up ephemeral microVMs to run `RUN` commands, ensuring your build process is completely isolated from the host.
 
 ---
@@ -132,9 +134,9 @@ hypr build -t my-app .
 | Feature | Docker | Firecracker | HYPR |
 | :--- | :--- | :--- | :--- |
 | **Isolation** | Process (Weak) | Hardware (Strong) | **Hardware (Strong)** |
-| **Boot Time** | ~1s | ~150ms | **<50ms** |
-| **Agent Overhead** | High (Host) | N/A | **Zero (20KB C binary)** |
-| **Networking** | Bridge/IPTables | Tap/Tun | **eBPF / XDP** |
+| **Boot Time** | ~1s | ~150ms | **<100ms** |
+| **Agent Overhead** | High (Host) | N/A | **Minimal (~500KB C binary)** |
+| **Networking** | Bridge/IPTables | Tap/Tun | **eBPF + Proxy Hybrid** |
 | **UX** | Excellent | Low-level | **Excellent (Docker-like)** |
 | **State** | Mutable | Ephemeral | **Persistent (SQLite)** |
 
@@ -146,15 +148,16 @@ hypr build -t my-app .
     *   Core Rust Architecture
     *   Cloud Hypervisor / HVF Adapters
     *   SQLite State Management
-*   **Phase 2: Networking & Compose** (In Progress 🟡)
+*   **Phase 2: Networking & Compose** ✅
     *   `docker-compose` parsing
-    *   Native Connectivity (Ping)
-    *   Port Forwarding
+    *   Bridge networking with TAP devices
+    *   Hybrid port forwarding (eBPF + Proxy)
+    *   IPAM (automatic IP allocation)
 *   **Phase 3: The Builder** ✅
     *   DAG Solver
     *   Hermetic VM Builds
     *   Content-Addressable Caching
-*   **Phase 4: Hardware Acceleration** (Next Up)
+*   **Phase 4: Hardware Acceleration** (Next Up 🟡)
     *   VFIO / GPU Passthrough
     *   Apple Metal Passthrough (via `libkrun`)
 
