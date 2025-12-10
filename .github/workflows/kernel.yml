@@ -37,7 +37,25 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          sudo apt-get update
+          # Fix potential apt issues on self-hosted runners
+          sudo rm -f /var/lib/apt/lists/lock
+          sudo rm -f /var/cache/apt/archives/lock
+          sudo rm -f /var/lib/dpkg/lock*
+
+          # Clear and rebuild apt cache (fixes corrupted sources)
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo apt-get clean
+
+          # Update package lists (retry on failure)
+          for i in 1 2 3; do
+            sudo apt-get update && break
+            echo "apt-get update failed (attempt $i), retrying in 5s..."
+            sleep 5
+          done
+
+          # Install dependencies
+          # Note: bsdmainutils replaced by bsdextrautils in Ubuntu 22.04+
+          # Note: lz4 package may be named liblz4-tool on some systems
           sudo apt-get install -y \
             build-essential \
             bc \
@@ -48,8 +66,7 @@ jobs:
             libncurses-dev \
             cpio \
             rsync \
-            bsdmainutils \
-            lz4
+            liblz4-tool
 
       - name: Download mainline kernel
         run: |
