@@ -157,9 +157,9 @@ fn resolve_gpu_config(gpu_option: Option<String>) -> Result<Option<GpuConfig>> {
     #[cfg(target_os = "macos")]
     {
         // macOS doesn't use PCI addresses
-        return Err(anyhow::anyhow!(
+        Err(anyhow::anyhow!(
             "Specifying PCI address is not supported on macOS. Use --gpu without an address."
-        ));
+        ))
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]

@@ -221,7 +221,6 @@ impl HvfAdapter {
         let padding_needed = (padded_size - current_size) as usize;
         if padding_needed > 0 {
             let mut file = fs::OpenOptions::new()
-                .write(true)
                 .append(true)
                 .open(&raw_path)
                 .map_err(|e| HyprError::IoError { path: raw_path.clone(), source: e })?;

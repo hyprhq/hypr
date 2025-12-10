@@ -172,11 +172,13 @@ pub fn validate_iommu_groups(pci_addresses: &[String]) -> Result<Vec<IommuGroup>
 }
 
 /// Check if IOMMU is enabled on the system.
+#[allow(dead_code)]
 pub fn is_iommu_enabled() -> bool {
     PathBuf::from(IOMMU_GROUPS_PATH).exists()
 }
 
 /// Get all IOMMU groups on the system.
+#[allow(dead_code)]
 pub fn list_iommu_groups() -> Result<Vec<IommuGroup>> {
     let path = PathBuf::from(IOMMU_GROUPS_PATH);
     if !path.exists() {

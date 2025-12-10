@@ -74,6 +74,7 @@ pub struct HybridForwarder;
 
 #[cfg(not(target_os = "linux"))]
 impl HybridForwarder {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self
     }

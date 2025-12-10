@@ -17,6 +17,7 @@ static PCI_ADDRESS_REGEX: Lazy<Regex> = Lazy::new(|| {
 });
 
 /// PCI device class codes for GPUs.
+#[allow(dead_code)]
 pub mod class {
     /// VGA compatible controller (0x030000)
     pub const VGA_CONTROLLER: &str = "0x030000";

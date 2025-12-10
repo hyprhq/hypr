@@ -65,8 +65,7 @@ pub fn list() -> Result<()> {
 
         for gpu in &gpus {
             let vendor_str = format!("{:?}", gpu.vendor);
-            let memory =
-                gpu.memory_mb.map(|mb| format_memory(mb)).unwrap_or_else(|| "-".to_string());
+            let memory = gpu.memory_mb.map(format_memory).unwrap_or_else(|| "-".to_string());
             let status = if gpu.available { "available" } else { "unavailable" };
 
             println!(

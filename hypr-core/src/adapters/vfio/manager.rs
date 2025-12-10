@@ -2,7 +2,7 @@
 //!
 //! Handles binding PCI devices to the vfio-pci driver for passthrough to VMs.
 
-use crate::adapters::vfio::device::{is_valid_pci_address, PciDevice, PCI_DEVICES_PATH};
+use crate::adapters::vfio::device::{is_valid_pci_address, PciDevice};
 use crate::adapters::vfio::iommu::{validate_iommu_groups, IommuGroup};
 use crate::error::{HyprError, Result};
 use std::collections::HashMap;

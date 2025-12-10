@@ -1004,7 +1004,7 @@ impl NativeBuilder {
 
         if remainder != 0 {
             let padding_needed = ALIGNMENT - remainder;
-            let mut file = OpenOptions::new().write(true).append(true).open(&squashfs_path)?;
+            let mut file = OpenOptions::new().append(true).open(&squashfs_path)?;
 
             let zeros = vec![0u8; padding_needed as usize];
             file.write_all(&zeros)?;
