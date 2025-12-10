@@ -467,11 +467,26 @@ impl ComposeConverter {
         for (name, service) in services {
             let vm_config = Self::service_to_vm_config(name, service, built_images.get(name))?;
 
+            // Build entrypoint: entrypoint takes precedence, command is appended as args
+            let entrypoint = if let Some(ep) = &service.entrypoint {
+                let mut result = ep.clone();
+                if let Some(cmd) = &service.command {
+                    result.extend(cmd.clone());
+                }
+                result
+            } else {
+                service.command.clone().unwrap_or_default()
+            };
+
+            let workdir = service.working_dir.clone().unwrap_or_default();
+
             let config = ServiceConfig {
                 name: name.clone(),
                 vm_config,
                 depends_on: service.depends_on.clone(),
                 healthcheck: None, // Health check parsing will be added when Phase 2 health checks are implemented
+                entrypoint,
+                workdir,
             };
 
             configs.push(config);
@@ -912,6 +927,8 @@ mod tests {
                 },
                 depends_on: vec!["db".to_string()],
                 healthcheck: None,
+                entrypoint: vec![],
+                workdir: String::new(),
             },
             ServiceConfig {
                 name: "db".to_string(),
@@ -933,6 +950,8 @@ mod tests {
                 },
                 depends_on: vec![],
                 healthcheck: None,
+                entrypoint: vec![],
+                workdir: String::new(),
             },
         ];
 
@@ -965,6 +984,8 @@ mod tests {
                 },
                 depends_on: vec!["b".to_string()],
                 healthcheck: None,
+                entrypoint: vec![],
+                workdir: String::new(),
             },
             ServiceConfig {
                 name: "b".to_string(),
@@ -986,6 +1007,8 @@ mod tests {
                 },
                 depends_on: vec!["a".to_string()],
                 healthcheck: None,
+                entrypoint: vec![],
+                workdir: String::new(),
             },
         ];
 
@@ -1016,6 +1039,8 @@ mod tests {
             },
             depends_on: vec!["nonexistent".to_string()],
             healthcheck: None,
+            entrypoint: vec![],
+            workdir: String::new(),
         }];
 
         let result = ComposeConverter::validate_dependencies(&services);

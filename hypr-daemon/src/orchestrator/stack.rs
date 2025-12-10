@@ -205,7 +205,94 @@ impl StackOrchestrator {
             drop(allocator);
 
             // Create VM config with allocated IP (will be passed to network setup)
-            let vm_config = service.vm_config.clone();
+            let mut vm_config = service.vm_config.clone();
+            if let IpAddr::V4(ipv4) = ip {
+                vm_config.network.ip_address = Some(ipv4);
+            }
+
+            // Build RuntimeManifest for runtime mode
+            // Get entrypoint from service config or from image manifest
+            let (entrypoint, workdir, image_env) = if !service.entrypoint.is_empty() {
+                // Use explicit entrypoint from compose
+                (service.entrypoint.clone(), service.workdir.clone(), HashMap::new())
+            } else {
+                // Try to get entrypoint from image manifest
+                // Parse image name from the first disk (rootfs)
+                let image_name = if let Some(disk) = vm_config.disks.first() {
+                    // Extract image name from path like /path/to/images/nginx/rootfs.squashfs
+                    disk.path
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown")
+                        .to_string()
+                } else {
+                    "unknown".to_string()
+                };
+
+                // Try to load image from state
+                if let Ok(image) = self.state.get_image_by_name_tag(&image_name, "latest").await {
+                    let mut ep = image.manifest.entrypoint.clone();
+                    if ep.is_empty() {
+                        ep = image.manifest.cmd.clone();
+                    } else if !image.manifest.cmd.is_empty() {
+                        ep.extend(image.manifest.cmd.clone());
+                    }
+                    (ep, image.manifest.workdir.clone(), image.manifest.env.clone())
+                } else {
+                    // Fallback: no entrypoint found
+                    warn!(service = %service.name, "No entrypoint found for service, VM will idle");
+                    (vec![], String::new(), HashMap::new())
+                }
+            };
+
+            if !entrypoint.is_empty() {
+                use hypr_core::manifest::runtime_manifest::{
+                    NetworkConfig as ManifestNetworkConfig, RuntimeManifest,
+                };
+
+                // Build environment variables: image env + compose env
+                let mut env_vars: Vec<String> =
+                    image_env.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
+                for (k, v) in &vm_config.env {
+                    env_vars.push(format!("{}={}", k, v));
+                }
+
+                // Build the manifest
+                let mut manifest = RuntimeManifest::new(entrypoint.clone()).with_env(env_vars);
+
+                // Set workdir if specified
+                if !workdir.is_empty() {
+                    manifest = manifest.with_workdir(workdir.clone());
+                }
+
+                // Add network configuration
+                manifest = manifest.with_network(ManifestNetworkConfig {
+                    ip: ip.to_string(),
+                    netmask: "255.255.255.0".to_string(),
+                    gateway: "10.88.0.1".to_string(),
+                    dns: vec!["8.8.8.8".to_string(), "1.1.1.1".to_string()],
+                });
+
+                // Encode manifest and add to kernel args
+                match manifest.encode() {
+                    Ok(encoded) => {
+                        vm_config.kernel_args.push(format!("manifest={}", encoded));
+                        info!(
+                            service = %service.name,
+                            entrypoint = ?entrypoint,
+                            "Injected RuntimeManifest into kernel cmdline"
+                        );
+                    }
+                    Err(e) => {
+                        error!(service = %service.name, error = %e, "Failed to encode RuntimeManifest");
+                        return Err(HyprError::Internal(format!(
+                            "Failed to encode RuntimeManifest: {}",
+                            e
+                        )));
+                    }
+                }
+            }
 
             // Create VM via adapter
             let handle = self.adapter.create(&vm_config).await.map_err(|e| {
@@ -545,6 +632,8 @@ mod tests {
             },
             depends_on,
             healthcheck: None,
+            entrypoint: vec![],
+            workdir: String::new(),
         }
     }
 }

@@ -67,6 +67,14 @@ pub struct ServiceConfig {
 
     /// Health check configuration
     pub healthcheck: Option<HealthCheck>,
+
+    /// Entrypoint/command to run (combined entrypoint + command from compose)
+    #[serde(default)]
+    pub entrypoint: Vec<String>,
+
+    /// Working directory
+    #[serde(default)]
+    pub workdir: String,
 }
 
 /// Volume configuration.
