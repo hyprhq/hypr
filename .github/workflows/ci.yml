@@ -25,16 +25,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system dependencies
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
         run: |
-          if [ "$RUNNER_OS" == "macOS" ]; then
-            brew install protobuf
-          elif [ "$RUNNER_OS" == "Linux" ]; then
-            sudo apt-get update
-            sudo apt-get install -y protobuf-compiler libelf-dev zlib1g-dev clang libbpf-dev libssl-dev pkg-config
-            # Try to install bpftool for eBPF compilation (optional, will use placeholders if unavailable)
-            sudo apt-get install -y linux-tools-common linux-tools-generic bpftool 2>/dev/null || true
+          # Fix broken apt mirrors (self-hosted runner may have stale sources)
+          sudo sed -i 's|http://[a-z]*\.archive\.ubuntu\.com|http://archive.ubuntu.com|g' /etc/apt/sources.list || true
+          sudo sed -i 's|http://security\.ubuntu\.com|http://archive.ubuntu.com|g' /etc/apt/sources.list || true
+          # For Ubuntu 24.04+ which uses sources.list.d
+          if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+            sudo sed -i 's|http://[a-z]*\.archive\.ubuntu\.com|http://archive.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources || true
           fi
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libelf-dev zlib1g-dev clang libbpf-dev libssl-dev pkg-config
+          # Try to install bpftool for eBPF compilation (optional, will use placeholders if unavailable)
+          sudo apt-get install -y linux-tools-common linux-tools-generic bpftool 2>/dev/null || true
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
 
       - name: Install zig
         run: |
