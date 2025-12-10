@@ -153,6 +153,42 @@ impl EbpfForwarder {
                 debug!("iptables PREROUTING: {}", e);
             }
         }
+
+        // Add MASQUERADE for localhost traffic going to VM network
+        // Without this, the VM sees source=127.0.0.1 and responds to its own loopback
+        // MASQUERADE changes source to 10.88.0.1 (bridge gateway) so responses route back
+        let result = Command::new("iptables")
+            .args([
+                "-t",
+                "nat",
+                "-A",
+                "POSTROUTING",
+                "-s",
+                "127.0.0.1",
+                "-d",
+                &mapping.vm_ip.to_string(),
+                "-p",
+                proto,
+                "--dport",
+                &mapping.vm_port.to_string(),
+                "-j",
+                "MASQUERADE",
+            ])
+            .output();
+
+        match result {
+            Ok(output) => {
+                if output.status.success() {
+                    debug!("Added iptables MASQUERADE for localhost -> {}", mapping.vm_ip);
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    debug!("iptables MASQUERADE: {}", stderr);
+                }
+            }
+            Err(e) => {
+                debug!("iptables MASQUERADE: {}", e);
+            }
+        }
     }
 }
 
@@ -261,7 +297,30 @@ impl EbpfForwarder {
             }
         }
 
-        debug!("Cleaned up iptables DNAT rules for port {}", host_port);
+        // Clean up POSTROUTING MASQUERADE rules for localhost traffic
+        if let Ok(output) =
+            Command::new("iptables").args(["-t", "nat", "-S", "POSTROUTING"]).output()
+        {
+            let rules = String::from_utf8_lossy(&output.stdout);
+            for line in rules.lines() {
+                // Match rules like: -A POSTROUTING -s 127.0.0.1 -d 10.88.0.2 -p tcp --dport 80 -j MASQUERADE
+                if line.contains("-s 127.0.0.1")
+                    && line.contains(&format!("--dport {}", host_port))
+                    && line.contains(&format!("-p {}", proto))
+                    && line.contains("MASQUERADE")
+                {
+                    let delete_rule = line.replace("-A POSTROUTING", "-D POSTROUTING");
+                    let args: Vec<&str> = delete_rule.split_whitespace().collect();
+                    if !args.is_empty() {
+                        let mut cmd_args = vec!["-t", "nat"];
+                        cmd_args.extend(args);
+                        let _ = Command::new("iptables").args(&cmd_args).output();
+                    }
+                }
+            }
+        }
+
+        debug!("Cleaned up iptables rules for port {}", host_port);
     }
 }
 
