@@ -532,7 +532,7 @@ impl ComposeConverter {
             network_enabled: true, // Runtime VMs need network
             id: vm_id.clone(),
             name: name.to_string(),
-            resources: VmResources { cpus, memory_mb },
+            resources: VmResources { cpus, memory_mb, balloon_enabled: true },
             kernel_path: None, // Use default kernel
             kernel_args: vec![],
             initramfs_path: None, // Only used for build VMs

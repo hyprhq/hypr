@@ -526,7 +526,7 @@ mod tests {
                 network_enabled: true,
                 id: format!("{}_vm", name),
                 name: name.to_string(),
-                resources: VmResources { cpus: 1, memory_mb: 512 },
+                resources: VmResources { cpus: 1, memory_mb: 512, balloon_enabled: true },
                 kernel_path: Some("/tmp/kernel".into()),
                 kernel_args: vec![],
                 initramfs_path: None,

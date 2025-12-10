@@ -256,7 +256,7 @@ impl VmBuilder {
             network_enabled: true, // Enable network for package downloads (bun install, etc.)
             id: vm_id.clone(),
             name: vm_id.clone(),
-            resources: VmResources { cpus: 4, memory_mb: 4096 }, // More memory for npm/bun/turbopack
+            resources: VmResources { cpus: 4, memory_mb: 4096, balloon_enabled: true }, // More memory for npm/bun/turbopack
             kernel_path: Some(self.kernel_path.clone()),
             kernel_args: vec![
                 "init=/init".to_string(),

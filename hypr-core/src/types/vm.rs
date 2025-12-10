@@ -125,11 +125,24 @@ pub struct VmResources {
 
     /// Memory in megabytes
     pub memory_mb: u32,
+
+    /// Enable memory ballooning.
+    ///
+    /// When enabled, the VM can dynamically return unused memory to the host.
+    /// This is useful for development where you want flexible resource allocation.
+    /// For production, disable this for predictable performance.
+    #[serde(default = "default_balloon")]
+    pub balloon_enabled: bool,
+}
+
+fn default_balloon() -> bool {
+    // Default to enabled for development convenience
+    true
 }
 
 impl Default for VmResources {
     fn default() -> Self {
-        Self { cpus: 2, memory_mb: 512 }
+        Self { cpus: 2, memory_mb: 512, balloon_enabled: true }
     }
 }
 

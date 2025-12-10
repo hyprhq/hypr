@@ -8,6 +8,13 @@ use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 
+/// Image information returned from daemon
+pub struct ImageInfo {
+    pub id: String,
+    pub name: String,
+    pub tag: String,
+}
+
 /// HYPR gRPC client
 pub struct HyprClient {
     client: HyprServiceClient<Channel>,
@@ -109,8 +116,22 @@ impl HyprClient {
         Ok(image.try_into()?)
     }
 
+    /// List all images
+    pub async fn list_images(&mut self) -> Result<Vec<ImageInfo>> {
+        let request = tonic::Request::new(ListImagesRequest { filter: None });
+
+        let response = self.client.list_images(request).await?;
+        let images = response
+            .into_inner()
+            .images
+            .into_iter()
+            .map(|img| ImageInfo { id: img.id, name: img.name, tag: img.tag })
+            .collect();
+
+        Ok(images)
+    }
+
     /// Delete an image
-    #[allow(dead_code)]
     pub async fn delete_image(&mut self, id: &str, force: bool) -> Result<bool> {
         let request = tonic::Request::new(DeleteImageRequest { id: id.to_string(), force });
 

@@ -370,6 +370,15 @@ impl HvfAdapter {
         args.push("--device".to_string());
         args.push("virtio-rng".to_string());
 
+        // Memory balloon device (for dynamic memory management)
+        // Allows the VM to return unused memory to the host.
+        // Useful for development where you want flexible resource allocation.
+        if config.resources.balloon_enabled {
+            args.push("--device".to_string());
+            args.push("virtio-balloon".to_string());
+            debug!("Memory balloon enabled - VM can dynamically return unused memory");
+        }
+
         // Rosetta x86_64 emulation (macOS ARM64 only)
         // This enables running x86_64 container images on Apple Silicon via Rosetta 2.
         // vfkit will expose the Rosetta runtime as a virtio-fs share with tag "rosetta".
@@ -381,6 +390,17 @@ impl HvfAdapter {
             args.push("rosetta,mountTag=rosetta".to_string());
             debug!("Rosetta x86_64 emulation enabled for ARM64 host");
         }
+
+        // vsock for guest-host communication (exec, etc.)
+        // vfkit exposes vsock as a Unix socket bridge
+        // Guest listens on port 1024, host connects via socket path
+        let vsock_path = crate::paths::runtime_dir().join("ch").join(format!("{}.vsock", config.id));
+        if let Some(parent) = vsock_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        args.push("--device".to_string());
+        args.push(format!("virtio-vsock,port=1024,socketURL={}", vsock_path.display()));
+        debug!("vsock enabled at {}", vsock_path.display());
 
         debug!(binary = self.binary_name, args = ?args, "Built hypervisor args");
         Ok(args)
@@ -588,9 +608,8 @@ impl VmmAdapter for HvfAdapter {
         }
     }
 
-    fn vsock_path(&self, _handle: &VmHandle) -> PathBuf {
-        // No longer used - communication via virtio-fs + stdout parsing
-        PathBuf::from("/dev/null")
+    fn vsock_path(&self, handle: &VmHandle) -> PathBuf {
+        crate::paths::runtime_dir().join("ch").join(format!("{}.vsock", handle.id))
     }
 
     fn capabilities(&self) -> AdapterCapabilities {

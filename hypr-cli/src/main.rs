@@ -122,6 +122,28 @@ enum Commands {
     /// Check daemon health
     Health,
 
+    /// Execute a command in a running VM
+    Exec {
+        /// VM ID or name
+        vm: String,
+
+        /// Command to execute
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+
+        /// Run interactively with TTY allocation
+        #[arg(short = 'i', long)]
+        interactive: bool,
+
+        /// Run with TTY allocation (same as -i)
+        #[arg(short = 't', long)]
+        tty: bool,
+
+        /// Environment variable (KEY=VALUE)
+        #[arg(short, long)]
+        env: Vec<String>,
+    },
+
     /// Manage stacks with compose files
     #[command(subcommand)]
     Compose(ComposeCommands),
@@ -129,6 +151,10 @@ enum Commands {
     /// GPU management commands
     #[command(subcommand)]
     Gpu(GpuCommands),
+
+    /// System maintenance commands
+    #[command(subcommand)]
+    System(SystemCommands),
 }
 
 #[derive(Subcommand)]
@@ -183,6 +209,27 @@ enum ComposeCommands {
 enum GpuCommands {
     /// List available GPUs on the system
     List,
+}
+
+#[derive(Subcommand)]
+enum SystemCommands {
+    /// Remove unused data (stopped VMs, dangling images, orphaned resources)
+    Prune {
+        /// Remove all stopped VMs and unused images (not just dangling)
+        #[arg(short, long)]
+        all: bool,
+
+        /// Do not prompt for confirmation
+        #[arg(short, long)]
+        force: bool,
+
+        /// Also remove unused volumes
+        #[arg(long)]
+        volumes: bool,
+    },
+
+    /// Show disk usage information
+    Df,
 }
 
 #[tokio::main]
@@ -296,6 +343,35 @@ async fn main() -> Result<()> {
             println!("Version: {}", version);
         }
 
+        Commands::Exec { vm, command, interactive, tty, env } => {
+            // Join command parts into a single string
+            let cmd = if command.is_empty() {
+                "/bin/sh".to_string()
+            } else {
+                command.join(" ")
+            };
+
+            // Parse env vars
+            let env_vars: Vec<(String, String)> = env
+                .iter()
+                .filter_map(|e| {
+                    let parts: Vec<&str> = e.splitn(2, '=').collect();
+                    if parts.len() == 2 {
+                        Some((parts[0].to_string(), parts[1].to_string()))
+                    } else {
+                        eprintln!("Warning: Invalid env format: {}", e);
+                        None
+                    }
+                })
+                .collect();
+
+            // -i or -t enables interactive mode
+            let is_interactive = interactive || tty;
+
+            let exit_code = commands::exec::exec(&vm, &cmd, is_interactive, env_vars).await?;
+            std::process::exit(exit_code);
+        }
+
         Commands::Compose(compose_cmd) => match compose_cmd {
             ComposeCommands::Up { file, name, detach, force_recreate, build } => {
                 // Find compose file: use provided path or search for defaults
@@ -346,6 +422,15 @@ async fn main() -> Result<()> {
         Commands::Gpu(gpu_cmd) => match gpu_cmd {
             GpuCommands::List => {
                 commands::gpu::list()?;
+            }
+        },
+
+        Commands::System(system_cmd) => match system_cmd {
+            SystemCommands::Prune { all, force, volumes } => {
+                commands::system::prune(all, force, volumes).await?;
+            }
+            SystemCommands::Df => {
+                commands::system::df().await?;
             }
         },
     }

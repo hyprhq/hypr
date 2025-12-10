@@ -152,7 +152,7 @@ impl TryFrom<ProtoVmConfig> for VmConfig {
 
 impl From<VmResources> for ProtoVmResources {
     fn from(res: VmResources) -> Self {
-        Self { cpus: res.cpus, memory_mb: res.memory_mb }
+        Self { cpus: res.cpus, memory_mb: res.memory_mb, balloon_enabled: res.balloon_enabled }
     }
 }
 
@@ -160,7 +160,11 @@ impl TryFrom<ProtoVmResources> for VmResources {
     type Error = HyprError;
 
     fn try_from(proto: ProtoVmResources) -> Result<Self> {
-        Ok(Self { cpus: proto.cpus, memory_mb: proto.memory_mb })
+        Ok(Self {
+            cpus: proto.cpus,
+            memory_mb: proto.memory_mb,
+            balloon_enabled: proto.balloon_enabled,
+        })
     }
 }
 

@@ -47,6 +47,45 @@
 #include <dirent.h>
 #include <sys/inotify.h>
 #include <limits.h>  // NAME_MAX
+#include <sys/select.h>
+#include <termios.h>
+#include <pty.h>      // For forkpty()
+
+// ===== VSOCK (self-contained) =====
+#ifndef AF_VSOCK
+#define AF_VSOCK 40
+#endif
+
+#ifndef VMADDR_CID_ANY
+#define VMADDR_CID_ANY -1U
+#endif
+
+#ifndef VMADDR_CID_HOST
+#define VMADDR_CID_HOST 2
+#endif
+
+struct sockaddr_vm {
+    sa_family_t svm_family;
+    unsigned short svm_reserved1;
+    unsigned int svm_port;
+    unsigned int svm_cid;
+    unsigned char svm_zero[sizeof(struct sockaddr) - sizeof(sa_family_t) - sizeof(unsigned short) - sizeof(unsigned int) - sizeof(unsigned int)];
+};
+
+// Exec server constants
+#define EXEC_VSOCK_PORT 1024
+#define EXEC_MAX_SESSIONS 16
+#define EXEC_BUF_SIZE 4096
+
+// Message types (matching protocol.rs)
+#define MSG_EXEC_REQUEST  0x01
+#define MSG_EXEC_RESPONSE 0x02
+#define MSG_STDIN         0x03
+#define MSG_STDOUT        0x04
+#define MSG_STDERR        0x05
+#define MSG_SIGNAL        0x06
+#define MSG_RESIZE        0x07
+#define MSG_CLOSE         0x08
 
 // ===== MAKEDEV (self-contained) =====
 #ifndef makedev
@@ -1354,6 +1393,621 @@ static int switch_user(uid_t uid, gid_t gid) {
 }
 
 // ============================================================================
+// EXEC SERVER - VSOCK-BASED REMOTE EXECUTION
+// ============================================================================
+//
+// Implements a vsock server that allows the host to execute commands inside
+// the guest VM. Uses a binary protocol matching hypr-core/src/exec/protocol.rs.
+//
+// Protocol: Length-prefixed messages
+//   [4 bytes: length (big-endian)] [length bytes: message body]
+//
+// Message body format:
+//   [1 byte: type] [4 bytes: session_id (big-endian)] [payload...]
+
+// Exec session state
+typedef struct {
+    uint32_t session_id;
+    pid_t pid;
+    int master_fd;      // PTY master (or pipe for non-tty)
+    int stdout_fd;      // stdout pipe (non-tty mode only)
+    int stderr_fd;      // stderr pipe (non-tty mode only)
+    int is_tty;
+    int active;
+} exec_session_t;
+
+// Global exec server state
+static int g_exec_listen_fd = -1;
+static int g_exec_client_fd = -1;
+static exec_session_t g_exec_sessions[EXEC_MAX_SESSIONS];
+
+// Helper: Read exactly n bytes from fd
+static int read_exact(int fd, void *buf, size_t n) {
+    size_t total = 0;
+    while (total < n) {
+        ssize_t r = read(fd, (char *)buf + total, n - total);
+        if (r <= 0) {
+            if (r == 0) return -1;  // EOF
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        total += r;
+    }
+    return 0;
+}
+
+// Helper: Write exactly n bytes to fd
+static int write_exact(int fd, const void *buf, size_t n) {
+    size_t total = 0;
+    while (total < n) {
+        ssize_t w = write(fd, (const char *)buf + total, n - total);
+        if (w <= 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        total += w;
+    }
+    return 0;
+}
+
+// Helper: Read big-endian u32
+static uint32_t read_be32(const uint8_t *p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+// Helper: Read big-endian u16
+static uint16_t read_be16(const uint8_t *p) {
+    return ((uint16_t)p[0] << 8) | (uint16_t)p[1];
+}
+
+// Helper: Write big-endian u32
+static void write_be32(uint8_t *p, uint32_t v) {
+    p[0] = (v >> 24) & 0xFF;
+    p[1] = (v >> 16) & 0xFF;
+    p[2] = (v >> 8) & 0xFF;
+    p[3] = v & 0xFF;
+}
+
+// Helper: Write big-endian i32
+static void write_be32_signed(uint8_t *p, int32_t v) {
+    write_be32(p, (uint32_t)v);
+}
+
+// Send a length-prefixed message
+static int exec_send_message(int fd, const uint8_t *data, size_t len) {
+    uint8_t header[4];
+    write_be32(header, len);
+    if (write_exact(fd, header, 4) < 0) return -1;
+    if (len > 0 && write_exact(fd, data, len) < 0) return -1;
+    return 0;
+}
+
+// Send ExecResponse message
+static int exec_send_response(int fd, uint32_t session_id, int has_pid, uint32_t pid,
+                               int has_exit_code, int32_t exit_code) {
+    uint8_t buf[32];
+    size_t pos = 0;
+
+    buf[pos++] = MSG_EXEC_RESPONSE;
+    write_be32(buf + pos, session_id); pos += 4;
+
+    // Flags: bit 0 = has_pid, bit 1 = has_exit_code
+    uint8_t flags = 0;
+    if (has_pid) flags |= 1;
+    if (has_exit_code) flags |= 2;
+    buf[pos++] = flags;
+
+    if (has_pid) {
+        write_be32(buf + pos, pid);
+        pos += 4;
+    }
+    if (has_exit_code) {
+        write_be32_signed(buf + pos, exit_code);
+        pos += 4;
+    }
+
+    return exec_send_message(fd, buf, pos);
+}
+
+// Send stdout/stderr data
+static int exec_send_output(int fd, uint8_t msg_type, const uint8_t *data, size_t len) {
+    if (len == 0) return 0;
+
+    uint8_t *buf = malloc(5 + len);
+    if (!buf) return -1;
+
+    buf[0] = msg_type;
+    write_be32(buf + 1, len);
+    memcpy(buf + 5, data, len);
+
+    int ret = exec_send_message(fd, buf, 5 + len);
+    free(buf);
+    return ret;
+}
+
+// Find session by ID
+static exec_session_t* exec_find_session(uint32_t session_id) {
+    for (int i = 0; i < EXEC_MAX_SESSIONS; i++) {
+        if (g_exec_sessions[i].active && g_exec_sessions[i].session_id == session_id) {
+            return &g_exec_sessions[i];
+        }
+    }
+    return NULL;
+}
+
+// Find free session slot
+static exec_session_t* exec_alloc_session(void) {
+    for (int i = 0; i < EXEC_MAX_SESSIONS; i++) {
+        if (!g_exec_sessions[i].active) {
+            memset(&g_exec_sessions[i], 0, sizeof(exec_session_t));
+            g_exec_sessions[i].active = 1;
+            g_exec_sessions[i].master_fd = -1;
+            g_exec_sessions[i].stdout_fd = -1;
+            g_exec_sessions[i].stderr_fd = -1;
+            return &g_exec_sessions[i];
+        }
+    }
+    return NULL;
+}
+
+// Clean up session
+static void exec_free_session(exec_session_t *sess) {
+    if (!sess || !sess->active) return;
+
+    if (sess->master_fd >= 0) close(sess->master_fd);
+    if (sess->stdout_fd >= 0) close(sess->stdout_fd);
+    if (sess->stderr_fd >= 0) close(sess->stderr_fd);
+
+    // Kill process if still running
+    if (sess->pid > 0) {
+        kill(sess->pid, SIGTERM);
+        usleep(10000);  // Give it 10ms
+        kill(sess->pid, SIGKILL);
+    }
+
+    sess->active = 0;
+}
+
+// Handle ExecRequest message
+static int exec_handle_request(int client_fd, const uint8_t *payload, size_t len) {
+    if (len < 13) {
+        LOG("ExecRequest too short: %zu bytes", len);
+        return -1;
+    }
+
+    size_t pos = 0;
+    uint32_t session_id = read_be32(payload + pos); pos += 4;
+    uint8_t flags = payload[pos++];
+    int want_tty = (flags & 1) != 0;
+    uint16_t rows = read_be16(payload + pos); pos += 2;
+    uint16_t cols = read_be16(payload + pos); pos += 2;
+
+    // Read command
+    uint32_t cmd_len = read_be32(payload + pos); pos += 4;
+    if (pos + cmd_len > len) {
+        LOG("ExecRequest command truncated");
+        return -1;
+    }
+
+    char *command = malloc(cmd_len + 1);
+    if (!command) return -1;
+    memcpy(command, payload + pos, cmd_len);
+    command[cmd_len] = '\0';
+    pos += cmd_len;
+
+    LOG("ExecRequest: session=%u tty=%d rows=%u cols=%u cmd='%s'",
+        session_id, want_tty, rows, cols, command);
+
+    // Parse environment variables
+    char **env_vars = NULL;
+    int env_count = 0;
+
+    if (pos + 4 <= len) {
+        env_count = read_be32(payload + pos); pos += 4;
+        if (env_count > 0 && env_count < 256) {
+            env_vars = malloc(sizeof(char*) * (env_count + 1));
+            if (env_vars) {
+                for (int i = 0; i < env_count && pos + 2 <= len; i++) {
+                    uint16_t key_len = read_be16(payload + pos); pos += 2;
+                    if (pos + key_len > len) break;
+                    char *key = malloc(key_len + 1);
+                    if (!key) break;
+                    memcpy(key, payload + pos, key_len);
+                    key[key_len] = '\0';
+                    pos += key_len;
+
+                    if (pos + 2 > len) { free(key); break; }
+                    uint16_t val_len = read_be16(payload + pos); pos += 2;
+                    if (pos + val_len > len) { free(key); break; }
+
+                    // Format as KEY=VALUE
+                    env_vars[i] = malloc(key_len + 1 + val_len + 1);
+                    if (env_vars[i]) {
+                        memcpy(env_vars[i], key, key_len);
+                        env_vars[i][key_len] = '=';
+                        memcpy(env_vars[i] + key_len + 1, payload + pos, val_len);
+                        env_vars[i][key_len + 1 + val_len] = '\0';
+                    }
+                    free(key);
+                    pos += val_len;
+                }
+                env_vars[env_count] = NULL;
+            }
+        }
+    }
+
+    // Allocate session
+    exec_session_t *sess = exec_alloc_session();
+    if (!sess) {
+        LOG("No free exec sessions");
+        free(command);
+        if (env_vars) {
+            for (int i = 0; i < env_count; i++) if (env_vars[i]) free(env_vars[i]);
+            free(env_vars);
+        }
+        exec_send_response(client_fd, session_id, 0, 0, 1, 126);
+        return 0;
+    }
+
+    sess->session_id = session_id;
+    sess->is_tty = want_tty;
+
+    if (want_tty) {
+        // Use forkpty for TTY mode
+        struct winsize ws = { .ws_row = rows, .ws_col = cols };
+        pid_t pid = forkpty(&sess->master_fd, NULL, NULL, &ws);
+
+        if (pid < 0) {
+            LOG("forkpty failed: %s", strerror(errno));
+            exec_free_session(sess);
+            free(command);
+            if (env_vars) {
+                for (int i = 0; i < env_count; i++) if (env_vars[i]) free(env_vars[i]);
+                free(env_vars);
+            }
+            exec_send_response(client_fd, session_id, 0, 0, 1, 126);
+            return 0;
+        }
+
+        if (pid == 0) {
+            // Child - set environment and exec
+            if (env_vars) {
+                for (int i = 0; i < env_count && env_vars[i]; i++) {
+                    putenv(env_vars[i]);
+                }
+            }
+            execl("/bin/sh", "sh", "-c", command, NULL);
+            _exit(127);
+        }
+
+        // Parent
+        sess->pid = pid;
+
+        // Set non-blocking
+        int fl = fcntl(sess->master_fd, F_GETFL);
+        fcntl(sess->master_fd, F_SETFL, fl | O_NONBLOCK);
+
+    } else {
+        // Non-TTY mode: use pipes
+        int stdout_pipe[2], stderr_pipe[2], stdin_pipe[2];
+
+        if (pipe(stdout_pipe) < 0 || pipe(stderr_pipe) < 0 || pipe(stdin_pipe) < 0) {
+            LOG("pipe failed: %s", strerror(errno));
+            exec_free_session(sess);
+            free(command);
+            if (env_vars) {
+                for (int i = 0; i < env_count; i++) if (env_vars[i]) free(env_vars[i]);
+                free(env_vars);
+            }
+            exec_send_response(client_fd, session_id, 0, 0, 1, 126);
+            return 0;
+        }
+
+        pid_t pid = fork();
+        if (pid < 0) {
+            LOG("fork failed: %s", strerror(errno));
+            close(stdout_pipe[0]); close(stdout_pipe[1]);
+            close(stderr_pipe[0]); close(stderr_pipe[1]);
+            close(stdin_pipe[0]); close(stdin_pipe[1]);
+            exec_free_session(sess);
+            free(command);
+            if (env_vars) {
+                for (int i = 0; i < env_count; i++) if (env_vars[i]) free(env_vars[i]);
+                free(env_vars);
+            }
+            exec_send_response(client_fd, session_id, 0, 0, 1, 126);
+            return 0;
+        }
+
+        if (pid == 0) {
+            // Child
+            close(stdin_pipe[1]);
+            close(stdout_pipe[0]);
+            close(stderr_pipe[0]);
+
+            dup2(stdin_pipe[0], STDIN_FILENO);
+            dup2(stdout_pipe[1], STDOUT_FILENO);
+            dup2(stderr_pipe[1], STDERR_FILENO);
+
+            close(stdin_pipe[0]);
+            close(stdout_pipe[1]);
+            close(stderr_pipe[1]);
+
+            if (env_vars) {
+                for (int i = 0; i < env_count && env_vars[i]; i++) {
+                    putenv(env_vars[i]);
+                }
+            }
+            execl("/bin/sh", "sh", "-c", command, NULL);
+            _exit(127);
+        }
+
+        // Parent
+        close(stdin_pipe[0]);
+        close(stdout_pipe[1]);
+        close(stderr_pipe[1]);
+
+        sess->pid = pid;
+        sess->master_fd = stdin_pipe[1];  // stdin write end
+        sess->stdout_fd = stdout_pipe[0];
+        sess->stderr_fd = stderr_pipe[0];
+
+        // Set non-blocking
+        fcntl(sess->stdout_fd, F_SETFL, fcntl(sess->stdout_fd, F_GETFL) | O_NONBLOCK);
+        fcntl(sess->stderr_fd, F_SETFL, fcntl(sess->stderr_fd, F_GETFL) | O_NONBLOCK);
+    }
+
+    LOG("Started process PID %d for session %u", sess->pid, session_id);
+
+    // Send response with PID
+    exec_send_response(client_fd, session_id, 1, sess->pid, 0, 0);
+
+    free(command);
+    // Note: env_vars strings are used by putenv, don't free
+    if (env_vars) free(env_vars);
+
+    return 0;
+}
+
+// Handle Stdin message
+static int exec_handle_stdin(const uint8_t *payload, size_t len) {
+    if (len < 4) return -1;
+
+    uint32_t data_len = read_be32(payload);
+    if (4 + data_len > len) return -1;
+
+    const uint8_t *data = payload + 4;
+
+    // Find the active session and write to its stdin
+    // For now, write to first active session (single session support)
+    for (int i = 0; i < EXEC_MAX_SESSIONS; i++) {
+        exec_session_t *sess = &g_exec_sessions[i];
+        if (sess->active && sess->master_fd >= 0) {
+            write(sess->master_fd, data, data_len);
+            break;
+        }
+    }
+
+    return 0;
+}
+
+// Handle Signal message
+static int exec_handle_signal(const uint8_t *payload, size_t len) {
+    if (len < 5) return -1;
+
+    uint32_t session_id = read_be32(payload);
+    uint8_t sig = payload[4];
+
+    exec_session_t *sess = exec_find_session(session_id);
+    if (sess && sess->pid > 0) {
+        LOG("Sending signal %d to PID %d", sig, sess->pid);
+        kill(sess->pid, sig);
+    }
+
+    return 0;
+}
+
+// Handle Resize message
+static int exec_handle_resize(const uint8_t *payload, size_t len) {
+    if (len < 8) return -1;
+
+    uint32_t session_id = read_be32(payload);
+    uint16_t rows = read_be16(payload + 4);
+    uint16_t cols = read_be16(payload + 6);
+
+    exec_session_t *sess = exec_find_session(session_id);
+    if (sess && sess->is_tty && sess->master_fd >= 0) {
+        struct winsize ws = { .ws_row = rows, .ws_col = cols };
+        ioctl(sess->master_fd, TIOCSWINSZ, &ws);
+    }
+
+    return 0;
+}
+
+// Initialize vsock exec server
+static int exec_server_init(void) {
+    // Create vsock socket
+    g_exec_listen_fd = socket(AF_VSOCK, SOCK_STREAM, 0);
+    if (g_exec_listen_fd < 0) {
+        LOG("Warning: vsock socket failed: %s (exec disabled)", strerror(errno));
+        return -1;
+    }
+
+    // Bind to VMADDR_CID_ANY (accept from any CID) on our port
+    struct sockaddr_vm addr = {0};
+    addr.svm_family = AF_VSOCK;
+    addr.svm_cid = VMADDR_CID_ANY;
+    addr.svm_port = EXEC_VSOCK_PORT;
+
+    if (bind(g_exec_listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        LOG("Warning: vsock bind failed: %s (exec disabled)", strerror(errno));
+        close(g_exec_listen_fd);
+        g_exec_listen_fd = -1;
+        return -1;
+    }
+
+    if (listen(g_exec_listen_fd, 5) < 0) {
+        LOG("Warning: vsock listen failed: %s (exec disabled)", strerror(errno));
+        close(g_exec_listen_fd);
+        g_exec_listen_fd = -1;
+        return -1;
+    }
+
+    // Set non-blocking
+    int fl = fcntl(g_exec_listen_fd, F_GETFL);
+    fcntl(g_exec_listen_fd, F_SETFL, fl | O_NONBLOCK);
+
+    LOG("Exec server listening on vsock port %d", EXEC_VSOCK_PORT);
+    return 0;
+}
+
+// Process incoming exec messages
+static void exec_server_poll(void) {
+    if (g_exec_listen_fd < 0) return;
+
+    // Accept new connections
+    if (g_exec_client_fd < 0) {
+        struct sockaddr_vm peer;
+        socklen_t peer_len = sizeof(peer);
+        int client = accept(g_exec_listen_fd, (struct sockaddr *)&peer, &peer_len);
+        if (client >= 0) {
+            LOG("Exec client connected from CID %u", peer.svm_cid);
+            g_exec_client_fd = client;
+            fcntl(g_exec_client_fd, F_SETFL, fcntl(g_exec_client_fd, F_GETFL) | O_NONBLOCK);
+        }
+    }
+
+    if (g_exec_client_fd < 0) return;
+
+    // Try to read a message from client
+    uint8_t len_buf[4];
+    ssize_t r = recv(g_exec_client_fd, len_buf, 4, MSG_PEEK);
+    if (r == 4) {
+        uint32_t msg_len = read_be32(len_buf);
+        if (msg_len > 0 && msg_len < 1024 * 1024) {  // Sanity limit: 1MB
+            uint8_t *msg_buf = malloc(4 + msg_len);
+            if (msg_buf) {
+                r = recv(g_exec_client_fd, msg_buf, 4 + msg_len, MSG_PEEK);
+                if (r == (ssize_t)(4 + msg_len)) {
+                    // Got complete message, consume it
+                    read(g_exec_client_fd, msg_buf, 4 + msg_len);
+
+                    uint8_t *payload = msg_buf + 4;
+                    if (msg_len >= 1) {
+                        uint8_t msg_type = payload[0];
+                        uint8_t *msg_payload = payload + 1;
+                        size_t payload_len = msg_len - 1;
+
+                        switch (msg_type) {
+                            case MSG_EXEC_REQUEST:
+                                exec_handle_request(g_exec_client_fd, msg_payload, payload_len);
+                                break;
+                            case MSG_STDIN:
+                                exec_handle_stdin(msg_payload, payload_len);
+                                break;
+                            case MSG_SIGNAL:
+                                exec_handle_signal(msg_payload, payload_len);
+                                break;
+                            case MSG_RESIZE:
+                                exec_handle_resize(msg_payload, payload_len);
+                                break;
+                            case MSG_CLOSE:
+                                LOG("Exec client sent close");
+                                close(g_exec_client_fd);
+                                g_exec_client_fd = -1;
+                                // Clean up all sessions
+                                for (int i = 0; i < EXEC_MAX_SESSIONS; i++) {
+                                    exec_free_session(&g_exec_sessions[i]);
+                                }
+                                break;
+                        }
+                    }
+                }
+                free(msg_buf);
+            }
+        }
+    } else if (r == 0) {
+        // Client disconnected
+        LOG("Exec client disconnected");
+        close(g_exec_client_fd);
+        g_exec_client_fd = -1;
+    }
+
+    // Relay output from active sessions to client
+    for (int i = 0; i < EXEC_MAX_SESSIONS; i++) {
+        exec_session_t *sess = &g_exec_sessions[i];
+        if (!sess->active) continue;
+
+        uint8_t buf[EXEC_BUF_SIZE];
+        ssize_t n;
+
+        if (sess->is_tty && sess->master_fd >= 0) {
+            // PTY mode: read from master
+            n = read(sess->master_fd, buf, sizeof(buf));
+            if (n > 0 && g_exec_client_fd >= 0) {
+                exec_send_output(g_exec_client_fd, MSG_STDOUT, buf, n);
+            }
+        } else {
+            // Pipe mode: read from stdout and stderr separately
+            if (sess->stdout_fd >= 0) {
+                n = read(sess->stdout_fd, buf, sizeof(buf));
+                if (n > 0 && g_exec_client_fd >= 0) {
+                    exec_send_output(g_exec_client_fd, MSG_STDOUT, buf, n);
+                }
+            }
+            if (sess->stderr_fd >= 0) {
+                n = read(sess->stderr_fd, buf, sizeof(buf));
+                if (n > 0 && g_exec_client_fd >= 0) {
+                    exec_send_output(g_exec_client_fd, MSG_STDERR, buf, n);
+                }
+            }
+        }
+
+        // Check if process exited
+        int status;
+        pid_t result = waitpid(sess->pid, &status, WNOHANG);
+        if (result == sess->pid) {
+            int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) :
+                           (WIFSIGNALED(status) ? 128 + WTERMSIG(status) : -1);
+
+            LOG("Session %u process exited with code %d", sess->session_id, exit_code);
+
+            // Drain any remaining output
+            if (sess->is_tty && sess->master_fd >= 0) {
+                while ((n = read(sess->master_fd, buf, sizeof(buf))) > 0) {
+                    if (g_exec_client_fd >= 0) {
+                        exec_send_output(g_exec_client_fd, MSG_STDOUT, buf, n);
+                    }
+                }
+            } else {
+                if (sess->stdout_fd >= 0) {
+                    while ((n = read(sess->stdout_fd, buf, sizeof(buf))) > 0) {
+                        if (g_exec_client_fd >= 0) {
+                            exec_send_output(g_exec_client_fd, MSG_STDOUT, buf, n);
+                        }
+                    }
+                }
+                if (sess->stderr_fd >= 0) {
+                    while ((n = read(sess->stderr_fd, buf, sizeof(buf))) > 0) {
+                        if (g_exec_client_fd >= 0) {
+                            exec_send_output(g_exec_client_fd, MSG_STDERR, buf, n);
+                        }
+                    }
+                }
+            }
+
+            // Send exit response
+            if (g_exec_client_fd >= 0) {
+                exec_send_response(g_exec_client_fd, sess->session_id, 1, sess->pid, 1, exit_code);
+            }
+
+            exec_free_session(sess);
+        }
+    }
+}
+
+// ============================================================================
 // RUNTIME MODE - NETWORK CONFIGURATION
 // ============================================================================
 
@@ -1835,6 +2489,9 @@ static void run_runtime_mode(void) {
     // This must be called after /proc is mounted but before executing workloads
     setup_rosetta();
 
+    // Initialize vsock exec server (allows host to run commands in guest)
+    exec_server_init();
+
     // Print ready message
     LOG("Runtime mode ready");
     printf("[kestrel] RUNTIME_READY\n");
@@ -1949,7 +2606,7 @@ static void run_runtime_mode(void) {
     free_string_array(entrypoint, entrypoint_count);
     // Note: env_vars are used by putenv, don't free them
 
-    // Main loop: reap zombies, wait for shutdown
+    // Main loop: reap zombies, handle exec requests, wait for shutdown
     // As PID 1, we must reap ALL orphaned processes (not just direct children).
     // Using a while loop ensures we drain all pending zombies before sleeping,
     // because SIGCHLD signals are not queued - multiple exits may coalesce.
@@ -1966,8 +2623,11 @@ static void run_runtime_mode(void) {
             }
         }
 
-        // Sleep only when no more zombies to reap
-        sleep(1);
+        // Poll exec server for incoming commands and relay I/O
+        exec_server_poll();
+
+        // Short sleep for responsiveness (exec I/O needs frequent polling)
+        usleep(10000);  // 10ms
     }
 }
 

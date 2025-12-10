@@ -70,6 +70,7 @@ message VMConfig {
 message VMResources {
   uint32 cpus = 1;
   uint32 memory_mb = 2;
+  bool balloon_enabled = 3; // Enable memory ballooning (default: true)
 }
 
 message DiskConfig {

@@ -1,15 +1,21 @@
+//! HYPR Daemon (hyprd)
+//!
+//! The background service that manages VMs, networking, and state.
+
 use hypr_core::{
     adapters::AdapterFactory, init_observability, shutdown_observability, HealthChecker,
     StateManager,
 };
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[allow(unused_imports)]
 mod api;
 mod network_manager;
 mod orchestrator;
 mod proto_convert;
+mod reconcile;
+mod shutdown;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,6 +23,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_observability()?;
 
     info!("HYPR daemon starting");
+
+    // Write PID file for single-instance enforcement
+    let pid_path = hypr_core::paths::runtime_dir().join("hyprd.pid");
+    write_pid_file(&pid_path)?;
 
     // Initialize health checker
     let health_checker = HealthChecker::new();
@@ -32,14 +42,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     info!("Initializing state manager at {}", db_path_str);
-    let _state = Arc::new(
+    let state = Arc::new(
         StateManager::new(&db_path_str).await.expect("Failed to initialize state manager"),
     );
     health_checker.register_subsystem("database".to_string()).await;
 
     // Create VMM adapter using the factory (auto-detects platform)
     info!("Initializing VMM adapter");
-    let _adapter = match AdapterFactory::create(None) {
+    let adapter = match AdapterFactory::create(None) {
         Ok(adapter) => {
             info!(
                 adapter = adapter.name(),
@@ -58,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize network manager
     info!("Initializing network manager");
-    let network_mgr = match network_manager::NetworkManager::new(_state.clone()).await {
+    let network_mgr = match network_manager::NetworkManager::new(state.clone()).await {
         Ok(mgr) => {
             info!("Network manager initialized successfully");
             Arc::new(mgr)
@@ -70,21 +80,223 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     health_checker.register_subsystem("networking".to_string()).await;
 
+    // Reconcile state from previous run
+    info!("Reconciling state from previous session...");
+    let reconciler = reconcile::StateReconciler::new(
+        state.clone(),
+        adapter.clone(),
+        network_mgr.clone(),
+    );
+
+    match reconciler.reconcile().await {
+        Ok(report) => {
+            if report.orphaned > 0 || report.orphaned_taps > 0 || report.orphaned_vfio > 0 {
+                info!(
+                    "Reconciliation cleaned up orphaned resources: {} VMs, {} TAPs, {} VFIO bindings",
+                    report.orphaned, report.orphaned_taps, report.orphaned_vfio
+                );
+            }
+            info!(
+                "State reconciliation complete: {} running VMs",
+                report.running
+            );
+        }
+        Err(e) => {
+            warn!("State reconciliation failed (continuing anyway): {}", e);
+        }
+    }
+
+    // Setup host DNS resolver
+    if let Err(e) = setup_host_dns_resolver().await {
+        warn!("Failed to setup host DNS resolver: {} (host cannot resolve *.hypr domains)", e);
+    }
+
     info!("HYPR daemon ready");
+
+    // Create shutdown manager
+    let shutdown_mgr = shutdown::ShutdownManager::new(
+        state.clone(),
+        adapter.clone(),
+        network_mgr.clone(),
+    );
 
     // Start gRPC API server
     let api_handle =
-        tokio::spawn(api::start_api_server(_state.clone(), _adapter.clone(), network_mgr.clone()));
+        tokio::spawn(api::start_api_server(state.clone(), adapter.clone(), network_mgr.clone()));
 
     // Wait for shutdown signal
-    tokio::signal::ctrl_c().await?;
-    info!("Received shutdown signal");
+    let mut shutdown_rx = shutdown::shutdown_signal();
+    tokio::select! {
+        _ = shutdown_rx.recv() => {
+            info!("Received shutdown signal, initiating graceful shutdown...");
+        }
+        result = api_handle => {
+            match result {
+                Ok(Ok(())) => info!("API server exited normally"),
+                Ok(Err(e)) => error!("API server error: {}", e),
+                Err(e) => error!("API server task panicked: {}", e),
+            }
+        }
+    }
 
-    // Abort API server
-    api_handle.abort();
-    let _ = api_handle.await;
+    // Perform graceful shutdown
+    if let Err(e) = shutdown_mgr.shutdown().await {
+        error!("Error during shutdown: {}", e);
+    }
 
-    info!("HYPR daemon shutting down");
+    // Clean up PID file
+    let _ = std::fs::remove_file(&pid_path);
+
+    info!("HYPR daemon shut down");
     shutdown_observability();
+    Ok(())
+}
+
+/// Write PID file and check for stale instances.
+fn write_pid_file(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    // Ensure parent directory exists
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Check if PID file exists and if process is still running
+    if path.exists() {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if let Ok(pid) = content.trim().parse::<i32>() {
+                // Check if process is still alive
+                if unsafe { libc::kill(pid, 0) } == 0 {
+                    return Err(format!(
+                        "Another hyprd instance is already running (PID {}). \
+                         If this is incorrect, remove {}",
+                        pid,
+                        path.display()
+                    )
+                    .into());
+                }
+            }
+        }
+        // Stale PID file - remove it
+        let _ = std::fs::remove_file(path);
+    }
+
+    // Write our PID
+    std::fs::write(path, std::process::id().to_string())?;
+    Ok(())
+}
+
+/// Setup host DNS resolver to resolve *.hypr domains.
+async fn setup_host_dns_resolver() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::fs;
+        use std::path::Path;
+
+        let resolver_dir = Path::new("/etc/resolver");
+        let resolver_file = resolver_dir.join("hypr");
+
+        // Get the gateway IP (DNS server address)
+        let dns_ip = "192.168.64.1"; // macOS vmnet gateway
+
+        // Create /etc/resolver directory if it doesn't exist
+        if !resolver_dir.exists() {
+            info!("Creating /etc/resolver directory...");
+            if let Err(e) = fs::create_dir_all(resolver_dir) {
+                return Err(format!(
+                    "Failed to create /etc/resolver (may require sudo): {}",
+                    e
+                )
+                .into());
+            }
+        }
+
+        // Write resolver configuration
+        let config = format!("nameserver {}\n", dns_ip);
+        info!("Setting up /etc/resolver/hypr to point to {}", dns_ip);
+
+        if let Err(e) = fs::write(&resolver_file, &config) {
+            return Err(format!(
+                "Failed to write /etc/resolver/hypr (may require sudo): {}",
+                e
+            )
+            .into());
+        }
+
+        info!("Host DNS resolver configured: *.hypr -> {}", dns_ip);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::fs;
+        use std::path::Path;
+
+        // Try systemd-resolved first
+        let resolved_conf_dir = Path::new("/etc/systemd/resolved.conf.d");
+        let resolved_conf = resolved_conf_dir.join("hypr.conf");
+
+        // Get the gateway IP (DNS server address)
+        let dns_ip = "10.88.0.1"; // Linux bridge gateway
+
+        if resolved_conf_dir.exists() || Path::new("/etc/systemd/resolved.conf").exists() {
+            // systemd-resolved is available
+            info!("Setting up systemd-resolved for *.hypr domains...");
+
+            // Create config directory if needed
+            if !resolved_conf_dir.exists() {
+                if let Err(e) = fs::create_dir_all(resolved_conf_dir) {
+                    warn!("Could not create resolved.conf.d: {} (may require sudo)", e);
+                }
+            }
+
+            // Write drop-in configuration
+            let config = format!(
+                "[Resolve]\nDNS={}\nDomains=~hypr\n",
+                dns_ip
+            );
+
+            if let Err(e) = fs::write(&resolved_conf, &config) {
+                warn!("Could not write resolved config: {} (may require sudo)", e);
+                // Fall through to try alternative method
+            } else {
+                // Restart systemd-resolved to pick up the change
+                let status = std::process::Command::new("systemctl")
+                    .args(["restart", "systemd-resolved"])
+                    .status();
+
+                match status {
+                    Ok(s) if s.success() => {
+                        info!("Host DNS resolver configured via systemd-resolved: *.hypr -> {}", dns_ip);
+                        return Ok(());
+                    }
+                    _ => {
+                        warn!("Could not restart systemd-resolved");
+                    }
+                }
+            }
+        }
+
+        // Fallback: Try resolvectl directly
+        let status = std::process::Command::new("resolvectl")
+            .args(["dns", "vbr0", dns_ip])
+            .status();
+
+        if let Ok(s) = status {
+            if s.success() {
+                let _ = std::process::Command::new("resolvectl")
+                    .args(["domain", "vbr0", "~hypr"])
+                    .status();
+                info!("Host DNS resolver configured via resolvectl: *.hypr -> {}", dns_ip);
+                return Ok(());
+            }
+        }
+
+        // Last resort: Log instructions
+        warn!(
+            "Could not configure host DNS resolver automatically. \
+             To resolve *.hypr domains, add 'nameserver {}' to /etc/resolv.conf \
+             or configure your DNS server to forward .hypr to {}",
+            dns_ip, dns_ip
+        );
+    }
+
     Ok(())
 }

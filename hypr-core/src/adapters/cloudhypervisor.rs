@@ -327,6 +327,14 @@ impl CloudHypervisorAdapter {
         args.push("--memory".to_string());
         args.push(format!("size={}M,shared=on", config.resources.memory_mb));
 
+        // Memory balloon (for dynamic memory management)
+        // Allows the VM to return unused memory to the host.
+        if config.resources.balloon_enabled {
+            args.push("--balloon".to_string());
+            args.push("size=0".to_string()); // Start with no balloon inflation
+            debug!("Memory balloon enabled - VM can dynamically return unused memory");
+        }
+
         // Kernel
         let kernel = config.kernel_path.as_ref().unwrap_or(&self.kernel_path);
         args.push("--kernel".to_string());
@@ -457,6 +465,17 @@ impl CloudHypervisorAdapter {
                 );
             }
         }
+
+        // vsock for guest-host communication (exec, etc.)
+        // CID 3 is the standard guest CID
+        let vsock_path = self.runtime_dir.join(format!("ch/{}.vsock", config.id));
+        // Ensure parent directory exists
+        if let Some(parent) = vsock_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        args.push("--vsock".to_string());
+        args.push(format!("cid=3,socket={}", vsock_path.display()));
+        debug!("vsock enabled at {}", vsock_path.display());
 
         debug!("Built CH args: {:?}", args);
         Ok(args)
@@ -804,9 +823,8 @@ impl VmmAdapter for CloudHypervisorAdapter {
         Ok(())
     }
 
-    fn vsock_path(&self, _handle: &VmHandle) -> PathBuf {
-        // No longer used - communication via virtio-fs + stdout parsing
-        PathBuf::from("/dev/null")
+    fn vsock_path(&self, handle: &VmHandle) -> PathBuf {
+        self.runtime_dir.join(format!("ch/{}.vsock", handle.id))
     }
 
     fn capabilities(&self) -> AdapterCapabilities {

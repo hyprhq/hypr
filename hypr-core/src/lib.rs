@@ -7,6 +7,7 @@ pub mod builder;
 pub mod compose;
 pub mod embedded;
 pub mod error;
+pub mod exec;
 pub mod manifest;
 pub mod network;
 pub mod observability;
