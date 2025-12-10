@@ -35,8 +35,9 @@ impl StateReconciler {
     /// 3. Updates status to FAILED/STOPPED for dead processes
     /// 4. Cleans up orphaned resources (TAP devices, port forwards)
     /// 5. Rebuilds port forwarding rules for alive VMs
-    pub async fn reconcile(&self) -> Result<ReconcileReport, Box<dyn std::error::Error + Send + Sync>>
-    {
+    pub async fn reconcile(
+        &self,
+    ) -> Result<ReconcileReport, Box<dyn std::error::Error + Send + Sync>> {
         info!("Reconciling daemon state...");
 
         let mut report = ReconcileReport::default();
@@ -48,14 +49,16 @@ impl StateReconciler {
             match vm.status {
                 VmStatus::Running | VmStatus::Creating => {
                     // Check if process is still alive
-                    let is_alive = if let Some(pid) = vm.pid {
-                        is_process_alive(pid)
-                    } else {
-                        false
-                    };
+                    let is_alive =
+                        if let Some(pid) = vm.pid { is_process_alive(pid) } else { false };
 
                     if is_alive {
-                        info!("VM {} ({}) is still running (PID {})", vm.name, vm.id, vm.pid.unwrap_or(0));
+                        info!(
+                            "VM {} ({}) is still running (PID {})",
+                            vm.name,
+                            vm.id,
+                            vm.pid.unwrap_or(0)
+                        );
                         report.running += 1;
 
                         // Rebuild port forwarding for this VM
@@ -106,7 +109,8 @@ impl StateReconciler {
                         report.orphaned += 1;
 
                         // Update status to Failed
-                        if let Err(e) = self.state.update_vm_status(&vm.id, VmStatus::Failed).await {
+                        if let Err(e) = self.state.update_vm_status(&vm.id, VmStatus::Failed).await
+                        {
                             warn!("Failed to update VM {} status: {}", vm.name, e);
                         }
 
@@ -165,11 +169,7 @@ impl StateReconciler {
         }
 
         // Clean up via adapter (handles VFIO unbinding, etc.)
-        let handle = hypr_core::VmHandle {
-            id: vm.id.clone(),
-            pid: vm.pid,
-            socket_path: None,
-        };
+        let handle = hypr_core::VmHandle { id: vm.id.clone(), pid: vm.pid, socket_path: None };
 
         if let Err(e) = self.adapter.delete(&handle).await {
             // This is expected to fail if the process is dead, just log debug
@@ -197,9 +197,7 @@ pub struct ReconcileReport {
 fn is_process_alive(pid: u32) -> bool {
     // Use kill(pid, 0) to check if process exists
     // This is more reliable than parsing /proc or using ps
-    unsafe {
-        libc::kill(pid as i32, 0) == 0
-    }
+    unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
 /// Clean up TAP devices that don't correspond to running VMs.
@@ -278,7 +276,13 @@ async fn cleanup_orphaned_vfio_bindings(
             let name_str = name.to_string_lossy();
 
             // Skip non-device entries
-            if name_str == "bind" || name_str == "unbind" || name_str == "new_id" || name_str == "remove_id" || name_str == "module" || name_str == "uevent" {
+            if name_str == "bind"
+                || name_str == "unbind"
+                || name_str == "new_id"
+                || name_str == "remove_id"
+                || name_str == "module"
+                || name_str == "uevent"
+            {
                 continue;
             }
 

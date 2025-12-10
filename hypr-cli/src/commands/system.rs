@@ -107,10 +107,7 @@ pub async fn prune(all: bool, force: bool, volumes: bool) -> Result<()> {
         }
     }
 
-    println!(
-        "\nTotal reclaimed space: {} MB",
-        total_reclaimed / (1024 * 1024)
-    );
+    println!("\nTotal reclaimed space: {} MB", total_reclaimed / (1024 * 1024));
     Ok(())
 }
 
@@ -266,9 +263,7 @@ async fn prune_orphaned_taps() -> Result<usize> {
     let mut cleaned = 0;
 
     // List TAP devices attached to vbr0
-    let output = Command::new("ip")
-        .args(["link", "show", "master", "vbr0"])
-        .output();
+    let output = Command::new("ip").args(["link", "show", "master", "vbr0"]).output();
 
     if let Ok(output) = output {
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -366,40 +361,20 @@ pub async fn df() -> Result<()> {
 
     // Images
     let (images_size, images_count) = dir_size(&images_dir);
-    println!(
-        "{:<20} {:>10} MB {:>8}",
-        "Images",
-        images_size / (1024 * 1024),
-        images_count
-    );
+    println!("{:<20} {:>10} MB {:>8}", "Images", images_size / (1024 * 1024), images_count);
 
     // Build cache
     let (cache_size, cache_count) = dir_size(&cache_dir);
-    println!(
-        "{:<20} {:>10} MB {:>8}",
-        "Build Cache",
-        cache_size / (1024 * 1024),
-        cache_count
-    );
+    println!("{:<20} {:>10} MB {:>8}", "Build Cache", cache_size / (1024 * 1024), cache_count);
 
     // Logs
     let (logs_size, logs_count) = dir_size(&logs_dir);
-    println!(
-        "{:<20} {:>10} MB {:>8}",
-        "Logs",
-        logs_size / (1024 * 1024),
-        logs_count
-    );
+    println!("{:<20} {:>10} MB {:>8}", "Logs", logs_size / (1024 * 1024), logs_count);
 
     // Database
     let db_path = hypr_core::paths::db_path();
     let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
-    println!(
-        "{:<20} {:>10} MB {:>8}",
-        "Database",
-        db_size / (1024 * 1024),
-        1
-    );
+    println!("{:<20} {:>10} MB {:>8}", "Database", db_size / (1024 * 1024), 1);
 
     println!("{:-<42}", "");
     let total = images_size + cache_size + logs_size + db_size;

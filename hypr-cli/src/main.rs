@@ -345,11 +345,7 @@ async fn main() -> Result<()> {
 
         Commands::Exec { vm, command, interactive, tty, env } => {
             // Join command parts into a single string
-            let cmd = if command.is_empty() {
-                "/bin/sh".to_string()
-            } else {
-                command.join(" ")
-            };
+            let cmd = if command.is_empty() { "/bin/sh".to_string() } else { command.join(" ") };
 
             // Parse env vars
             let env_vars: Vec<(String, String)> = env

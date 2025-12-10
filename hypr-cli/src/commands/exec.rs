@@ -41,9 +41,8 @@ pub async fn exec(
 
     // Get vsock path from VM config
     // For now, construct it from the VM ID and runtime directory
-    let vsock_path = hypr_core::paths::runtime_dir()
-        .join("ch")
-        .join(format!("{}.vsock", vm_info.id));
+    let vsock_path =
+        hypr_core::paths::runtime_dir().join("ch").join(format!("{}.vsock", vm_info.id));
 
     // Check if vsock is available
     if !vsock_path.exists() {
@@ -80,9 +79,7 @@ fn setup_terminal() -> Result<()> {
     // Use stty for simplicity - works on all Unix systems
     #[cfg(unix)]
     {
-        let _ = std::process::Command::new("stty")
-            .args(["-icanon", "-echo", "raw"])
-            .status();
+        let _ = std::process::Command::new("stty").args(["-icanon", "-echo", "raw"]).status();
     }
     Ok(())
 }

@@ -213,13 +213,16 @@ impl ExecMessage {
                     return Err(HyprError::Internal("ExecRequest too short".to_string()));
                 }
 
-                let session_id = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                let session_id =
+                    u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
                 let flags = payload[4];
                 let tty = (flags & 1) != 0;
                 let rows = u16::from_be_bytes([payload[5], payload[6]]);
                 let cols = u16::from_be_bytes([payload[7], payload[8]]);
 
-                let cmd_len = u32::from_be_bytes([payload[9], payload[10], payload[11], payload[12]]) as usize;
+                let cmd_len =
+                    u32::from_be_bytes([payload[9], payload[10], payload[11], payload[12]])
+                        as usize;
                 let cmd_start = 13;
                 let cmd_end = cmd_start + cmd_len;
 
@@ -246,25 +249,29 @@ impl ExecMessage {
                         if offset + 2 > payload.len() {
                             break;
                         }
-                        let key_len = u16::from_be_bytes([payload[offset], payload[offset + 1]]) as usize;
+                        let key_len =
+                            u16::from_be_bytes([payload[offset], payload[offset + 1]]) as usize;
                         offset += 2;
 
                         if offset + key_len > payload.len() {
                             break;
                         }
-                        let key = String::from_utf8_lossy(&payload[offset..offset + key_len]).to_string();
+                        let key =
+                            String::from_utf8_lossy(&payload[offset..offset + key_len]).to_string();
                         offset += key_len;
 
                         if offset + 2 > payload.len() {
                             break;
                         }
-                        let value_len = u16::from_be_bytes([payload[offset], payload[offset + 1]]) as usize;
+                        let value_len =
+                            u16::from_be_bytes([payload[offset], payload[offset + 1]]) as usize;
                         offset += 2;
 
                         if offset + value_len > payload.len() {
                             break;
                         }
-                        let value = String::from_utf8_lossy(&payload[offset..offset + value_len]).to_string();
+                        let value = String::from_utf8_lossy(&payload[offset..offset + value_len])
+                            .to_string();
                         offset += value_len;
 
                         env.push((key, value));
@@ -286,7 +293,8 @@ impl ExecMessage {
                     return Err(HyprError::Internal("ExecResponse too short".to_string()));
                 }
 
-                let session_id = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                let session_id =
+                    u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
                 let flags = payload[4];
                 let has_pid = (flags & 1) != 0;
                 let has_exit_code = (flags & 2) != 0;
@@ -317,11 +325,7 @@ impl ExecMessage {
                     None
                 };
 
-                Ok(ExecMessage::ExecResponse(ExecResponse {
-                    session_id,
-                    pid,
-                    exit_code,
-                }))
+                Ok(ExecMessage::ExecResponse(ExecResponse { session_id, pid, exit_code }))
             }
 
             MessageType::Stdin | MessageType::Stdout | MessageType::Stderr => {
@@ -329,7 +333,8 @@ impl ExecMessage {
                     return Err(HyprError::Internal("Data message too short".to_string()));
                 }
 
-                let data_len = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+                let data_len =
+                    u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
                 let data = payload.get(4..4 + data_len).unwrap_or(&[]).to_vec();
 
                 match msg_type {
@@ -345,7 +350,8 @@ impl ExecMessage {
                     return Err(HyprError::Internal("Signal message too short".to_string()));
                 }
 
-                let session_id = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                let session_id =
+                    u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
                 let signal = payload[4];
 
                 Ok(ExecMessage::Signal { session_id, signal })
@@ -356,7 +362,8 @@ impl ExecMessage {
                     return Err(HyprError::Internal("Resize message too short".to_string()));
                 }
 
-                let session_id = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                let session_id =
+                    u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
                 let rows = u16::from_be_bytes([payload[4], payload[5]]);
                 let cols = u16::from_be_bytes([payload[6], payload[7]]);
 
@@ -402,11 +409,7 @@ mod tests {
 
     #[test]
     fn test_exec_response_roundtrip() {
-        let resp = ExecResponse {
-            session_id: 12345,
-            pid: Some(999),
-            exit_code: Some(0),
-        };
+        let resp = ExecResponse { session_id: 12345, pid: Some(999), exit_code: Some(0) };
 
         let msg = ExecMessage::ExecResponse(resp);
         let encoded = msg.encode();

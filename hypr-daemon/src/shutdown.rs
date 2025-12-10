@@ -28,12 +28,7 @@ impl ShutdownManager {
         adapter: Arc<dyn VmmAdapter>,
         network_mgr: Arc<NetworkManager>,
     ) -> Self {
-        Self {
-            state,
-            adapter,
-            network_mgr,
-            graceful_timeout: Duration::from_secs(30),
-        }
+        Self { state, adapter, network_mgr, graceful_timeout: Duration::from_secs(30) }
     }
 
     /// Perform graceful shutdown of all VMs and cleanup resources.
@@ -71,11 +66,7 @@ impl ShutdownManager {
         for vm in running_vms {
             info!("Stopping VM {} ({})...", vm.name, vm.id);
 
-            let handle = hypr_core::VmHandle {
-                id: vm.id.clone(),
-                pid: vm.pid,
-                socket_path: None,
-            };
+            let handle = hypr_core::VmHandle { id: vm.id.clone(), pid: vm.pid, socket_path: None };
 
             // Try graceful stop first
             match tokio::time::timeout(
@@ -182,9 +173,7 @@ pub fn shutdown_signal() -> broadcast::Receiver<()> {
 
     tokio::spawn(async move {
         let ctrl_c = async {
-            tokio::signal::ctrl_c()
-                .await
-                .expect("Failed to install Ctrl+C handler");
+            tokio::signal::ctrl_c().await.expect("Failed to install Ctrl+C handler");
         };
 
         #[cfg(unix)]

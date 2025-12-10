@@ -394,7 +394,8 @@ impl HvfAdapter {
         // vsock for guest-host communication (exec, etc.)
         // vfkit exposes vsock as a Unix socket bridge
         // Guest listens on port 1024, host connects via socket path
-        let vsock_path = crate::paths::runtime_dir().join("ch").join(format!("{}.vsock", config.id));
+        let vsock_path =
+            crate::paths::runtime_dir().join("ch").join(format!("{}.vsock", config.id));
         if let Some(parent) = vsock_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }

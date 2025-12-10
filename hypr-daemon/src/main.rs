@@ -82,11 +82,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Reconcile state from previous run
     info!("Reconciling state from previous session...");
-    let reconciler = reconcile::StateReconciler::new(
-        state.clone(),
-        adapter.clone(),
-        network_mgr.clone(),
-    );
+    let reconciler =
+        reconcile::StateReconciler::new(state.clone(), adapter.clone(), network_mgr.clone());
 
     match reconciler.reconcile().await {
         Ok(report) => {
@@ -96,10 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     report.orphaned, report.orphaned_taps, report.orphaned_vfio
                 );
             }
-            info!(
-                "State reconciliation complete: {} running VMs",
-                report.running
-            );
+            info!("State reconciliation complete: {} running VMs", report.running);
         }
         Err(e) => {
             warn!("State reconciliation failed (continuing anyway): {}", e);
@@ -114,11 +108,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("HYPR daemon ready");
 
     // Create shutdown manager
-    let shutdown_mgr = shutdown::ShutdownManager::new(
-        state.clone(),
-        adapter.clone(),
-        network_mgr.clone(),
-    );
+    let shutdown_mgr =
+        shutdown::ShutdownManager::new(state.clone(), adapter.clone(), network_mgr.clone());
 
     // Start gRPC API server
     let api_handle =
@@ -201,11 +192,9 @@ async fn setup_host_dns_resolver() -> Result<(), Box<dyn std::error::Error + Sen
         if !resolver_dir.exists() {
             info!("Creating /etc/resolver directory...");
             if let Err(e) = fs::create_dir_all(resolver_dir) {
-                return Err(format!(
-                    "Failed to create /etc/resolver (may require sudo): {}",
-                    e
-                )
-                .into());
+                return Err(
+                    format!("Failed to create /etc/resolver (may require sudo): {}", e).into()
+                );
             }
         }
 
@@ -214,11 +203,9 @@ async fn setup_host_dns_resolver() -> Result<(), Box<dyn std::error::Error + Sen
         info!("Setting up /etc/resolver/hypr to point to {}", dns_ip);
 
         if let Err(e) = fs::write(&resolver_file, &config) {
-            return Err(format!(
-                "Failed to write /etc/resolver/hypr (may require sudo): {}",
-                e
-            )
-            .into());
+            return Err(
+                format!("Failed to write /etc/resolver/hypr (may require sudo): {}", e).into()
+            );
         }
 
         info!("Host DNS resolver configured: *.hypr -> {}", dns_ip);
@@ -248,10 +235,7 @@ async fn setup_host_dns_resolver() -> Result<(), Box<dyn std::error::Error + Sen
             }
 
             // Write drop-in configuration
-            let config = format!(
-                "[Resolve]\nDNS={}\nDomains=~hypr\n",
-                dns_ip
-            );
+            let config = format!("[Resolve]\nDNS={}\nDomains=~hypr\n", dns_ip);
 
             if let Err(e) = fs::write(&resolved_conf, &config) {
                 warn!("Could not write resolved config: {} (may require sudo)", e);
@@ -264,7 +248,10 @@ async fn setup_host_dns_resolver() -> Result<(), Box<dyn std::error::Error + Sen
 
                 match status {
                     Ok(s) if s.success() => {
-                        info!("Host DNS resolver configured via systemd-resolved: *.hypr -> {}", dns_ip);
+                        info!(
+                            "Host DNS resolver configured via systemd-resolved: *.hypr -> {}",
+                            dns_ip
+                        );
                         return Ok(());
                     }
                     _ => {
@@ -275,9 +262,8 @@ async fn setup_host_dns_resolver() -> Result<(), Box<dyn std::error::Error + Sen
         }
 
         // Fallback: Try resolvectl directly
-        let status = std::process::Command::new("resolvectl")
-            .args(["dns", "vbr0", dns_ip])
-            .status();
+        let status =
+            std::process::Command::new("resolvectl").args(["dns", "vbr0", dns_ip]).status();
 
         if let Ok(s) = status {
             if s.success() {

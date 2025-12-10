@@ -56,10 +56,7 @@ impl ExecClient {
     /// The vsock_path should be the Unix socket exposed by the hypervisor
     /// that bridges to the guest's vsock.
     pub fn new(vsock_path: impl AsRef<Path>) -> Self {
-        Self {
-            socket_path: vsock_path.as_ref().to_path_buf(),
-            session_id: rand_session_id(),
-        }
+        Self { socket_path: vsock_path.as_ref().to_path_buf(), session_id: rand_session_id() }
     }
 
     /// Execute a command in the VM and return the exit code.
@@ -115,11 +112,7 @@ impl ExecClient {
     /// Execute a command interactively with TTY support.
     ///
     /// This connects stdin/stdout/stderr and supports terminal resizing.
-    pub async fn exec_interactive(
-        &mut self,
-        cmd: &str,
-        env: Vec<(String, String)>,
-    ) -> Result<i32> {
+    pub async fn exec_interactive(&mut self, cmd: &str, env: Vec<(String, String)>) -> Result<i32> {
         debug!("Connecting to VM via vsock (interactive): {}", self.socket_path.display());
 
         let mut stream = UnixStream::connect(&self.socket_path)
@@ -212,14 +205,16 @@ async fn send_message(stream: &mut UnixStream, msg: &ExecMessage) -> Result<()> 
 
     // Send length prefix (4 bytes, big-endian)
     let len = bytes.len() as u32;
-    stream.write_all(&len.to_be_bytes()).await.map_err(|e| {
-        HyprError::Internal(format!("Failed to send message length: {}", e))
-    })?;
+    stream
+        .write_all(&len.to_be_bytes())
+        .await
+        .map_err(|e| HyprError::Internal(format!("Failed to send message length: {}", e)))?;
 
     // Send message body
-    stream.write_all(&bytes).await.map_err(|e| {
-        HyprError::Internal(format!("Failed to send message: {}", e))
-    })?;
+    stream
+        .write_all(&bytes)
+        .await
+        .map_err(|e| HyprError::Internal(format!("Failed to send message: {}", e)))?;
 
     Ok(())
 }
@@ -232,13 +227,15 @@ async fn send_message_to_writer(
     let bytes = msg.encode();
 
     let len = bytes.len() as u32;
-    writer.write_all(&len.to_be_bytes()).await.map_err(|e| {
-        HyprError::Internal(format!("Failed to send message length: {}", e))
-    })?;
+    writer
+        .write_all(&len.to_be_bytes())
+        .await
+        .map_err(|e| HyprError::Internal(format!("Failed to send message length: {}", e)))?;
 
-    writer.write_all(&bytes).await.map_err(|e| {
-        HyprError::Internal(format!("Failed to send message: {}", e))
-    })?;
+    writer
+        .write_all(&bytes)
+        .await
+        .map_err(|e| HyprError::Internal(format!("Failed to send message: {}", e)))?;
 
     Ok(())
 }
@@ -247,16 +244,18 @@ async fn send_message_to_writer(
 async fn recv_message(stream: &mut UnixStream) -> Result<ExecMessage> {
     // Read length prefix
     let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await.map_err(|e| {
-        HyprError::Internal(format!("Failed to read message length: {}", e))
-    })?;
+    stream
+        .read_exact(&mut len_buf)
+        .await
+        .map_err(|e| HyprError::Internal(format!("Failed to read message length: {}", e)))?;
     let len = u32::from_be_bytes(len_buf) as usize;
 
     // Read message body
     let mut buf = vec![0u8; len];
-    stream.read_exact(&mut buf).await.map_err(|e| {
-        HyprError::Internal(format!("Failed to read message: {}", e))
-    })?;
+    stream
+        .read_exact(&mut buf)
+        .await
+        .map_err(|e| HyprError::Internal(format!("Failed to read message: {}", e)))?;
 
     ExecMessage::decode(&buf)
 }
@@ -266,15 +265,17 @@ async fn recv_message_from_reader(
     reader: &mut tokio::net::unix::OwnedReadHalf,
 ) -> Result<ExecMessage> {
     let mut len_buf = [0u8; 4];
-    reader.read_exact(&mut len_buf).await.map_err(|e| {
-        HyprError::Internal(format!("Failed to read message length: {}", e))
-    })?;
+    reader
+        .read_exact(&mut len_buf)
+        .await
+        .map_err(|e| HyprError::Internal(format!("Failed to read message length: {}", e)))?;
     let len = u32::from_be_bytes(len_buf) as usize;
 
     let mut buf = vec![0u8; len];
-    reader.read_exact(&mut buf).await.map_err(|e| {
-        HyprError::Internal(format!("Failed to read message: {}", e))
-    })?;
+    reader
+        .read_exact(&mut buf)
+        .await
+        .map_err(|e| HyprError::Internal(format!("Failed to read message: {}", e)))?;
 
     ExecMessage::decode(&buf)
 }
@@ -282,10 +283,7 @@ async fn recv_message_from_reader(
 /// Generate a random session ID.
 fn rand_session_id() -> u32 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let seed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
+    let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     (seed & 0xFFFFFFFF) as u32
 }
 

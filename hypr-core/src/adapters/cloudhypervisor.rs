@@ -601,7 +601,7 @@ impl VmmAdapter for CloudHypervisorAdapter {
 
                 let mut vfio_manager = crate::adapters::vfio::VfioManager::new();
                 let bind_options = crate::adapters::vfio::BindOptions {
-                    force_boot_vga: false, // Never unbind boot VGA automatically
+                    force_boot_vga: false,             // Never unbind boot VGA automatically
                     include_iommu_group_devices: true, // Include all devices in IOMMU group
                     ..Default::default()
                 };

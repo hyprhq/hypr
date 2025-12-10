@@ -68,7 +68,11 @@ pub async fn run(
         network_enabled: true,
         id: vm_id.clone(),
         name: vm_name.clone(),
-        resources: VmResources { cpus: cpus.unwrap_or(2), memory_mb: memory_mb.unwrap_or(512), balloon_enabled: true },
+        resources: VmResources {
+            cpus: cpus.unwrap_or(2),
+            memory_mb: memory_mb.unwrap_or(512),
+            balloon_enabled: true,
+        },
         kernel_path: None, // Use default
         kernel_args: vec![],
         initramfs_path: None, // Only used for build VMs
