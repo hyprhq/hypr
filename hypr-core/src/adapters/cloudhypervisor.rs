@@ -106,40 +106,75 @@ impl CloudHypervisorAdapter {
         format!("52:54:00:{:02x}:{:02x}:{:02x}", (seed >> 16) as u8, (seed >> 8) as u8, seed as u8)
     }
 
-    /// Configure the host-side TAP device for VM networking.
+    /// Create and configure a TAP device for VM networking.
     ///
-    /// This sets up the TAP device with the gateway IP so the host can communicate with the VM.
-    /// Uses the 10.88.0.0/16 subnet (private range, avoids Tailscale conflict).
+    /// This must be called BEFORE spawning cloud-hypervisor, as it expects
+    /// the TAP device to already exist.
     fn configure_tap_device(tap_name: &str) -> Result<()> {
         use std::process::Command as StdCommand;
 
         // Enable IP forwarding (required for routing between host and VM)
         let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1");
 
-        // Configure TAP device with gateway IP
-        // The VM uses 10.88.0.x, gateway is 10.88.0.1
+        // Create the TAP device
         let output =
-            StdCommand::new("ip").args(["addr", "add", "10.88.0.1/16", "dev", tap_name]).output();
+            StdCommand::new("ip").args(["tuntap", "add", "mode", "tap", "name", tap_name]).output();
 
         match output {
             Ok(o) if o.status.success() => {
-                debug!("Configured TAP {} with IP 10.88.0.1/16", tap_name);
+                debug!("Created TAP device {}", tap_name);
             }
             Ok(o) => {
                 let stderr = String::from_utf8_lossy(&o.stderr);
-                // Ignore "RTNETLINK answers: File exists" - IP already assigned
-                if !stderr.contains("File exists") {
-                    warn!("Failed to add IP to TAP {}: {}", tap_name, stderr);
+                // Ignore "RTNETLINK answers: File exists" - TAP already exists
+                if !stderr.contains("File exists") && !stderr.contains("already exists") {
+                    warn!("Failed to create TAP {}: {}", tap_name, stderr);
                 }
             }
             Err(e) => {
-                warn!("Failed to run ip command: {}", e);
+                return Err(HyprError::NetworkSetupFailed {
+                    reason: format!("Failed to create TAP device {}: {}", tap_name, e),
+                });
+            }
+        }
+
+        // Attach TAP to the bridge (vbr0)
+        // The bridge has IP 10.88.0.1, VMs get 10.88.0.x addresses
+        let output =
+            StdCommand::new("ip").args(["link", "set", tap_name, "master", "vbr0"]).output();
+
+        match output {
+            Ok(o) if o.status.success() => {
+                debug!("Attached TAP {} to bridge vbr0", tap_name);
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                if !stderr.contains("already a member") {
+                    warn!("Failed to attach TAP {} to bridge: {}", tap_name, stderr);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to attach TAP {} to bridge: {}", tap_name, e);
             }
         }
 
         // Bring TAP device up
-        let _ = StdCommand::new("ip").args(["link", "set", tap_name, "up"]).output();
+        let output = StdCommand::new("ip").args(["link", "set", tap_name, "up"]).output();
 
+        match output {
+            Ok(o) if o.status.success() => {
+                debug!("Brought up TAP device {}", tap_name);
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                warn!("Failed to bring up TAP {}: {}", tap_name, stderr);
+            }
+            Err(e) => {
+                warn!("Failed to bring up TAP {}: {}", tap_name, e);
+            }
+        }
+
+        info!("Configured TAP device {} attached to vbr0", tap_name);
         Ok(())
     }
 
@@ -504,6 +539,13 @@ impl VmmAdapter for CloudHypervisorAdapter {
 
         info!("VM logs will be written to: {}", log_path.display());
 
+        // Create and configure TAP device BEFORE spawning cloud-hypervisor
+        // Cloud-hypervisor expects the TAP device to already exist
+        if config.network_enabled {
+            let tap_name = format!("tap{}", &config.id[..config.id.len().min(12)]);
+            Self::configure_tap_device(&tap_name)?;
+        }
+
         // Spawn cloud-hypervisor process with stdout/stderr redirected to log file
         let start = Instant::now();
         let child = Command::new(&self.binary_path)
@@ -512,6 +554,12 @@ impl VmmAdapter for CloudHypervisorAdapter {
             .stderr(std::process::Stdio::from(log_file_err))
             .spawn()
             .map_err(|e| {
+                // Clean up TAP device on failure
+                if config.network_enabled {
+                    let tap_name = format!("tap{}", &config.id[..config.id.len().min(12)]);
+                    Self::cleanup_tap_device(&tap_name);
+                }
+
                 // Clean up virtiofsd daemons on failure
                 let rt = tokio::runtime::Handle::current();
                 let adapter = self.clone();
@@ -537,12 +585,6 @@ impl VmmAdapter for CloudHypervisorAdapter {
         // Wait for API socket
         let api_socket = self.api_socket_path(&config.id);
         self.wait_for_api_socket(&api_socket, Duration::from_secs(5)).await?;
-
-        // Configure host-side TAP device for networking (after VM creates it)
-        if config.network_enabled {
-            let tap_name = format!("tap{}", &config.id[..config.id.len().min(12)]);
-            Self::configure_tap_device(&tap_name)?;
-        }
 
         // Record metrics
         let histogram =
