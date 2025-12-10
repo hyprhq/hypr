@@ -399,12 +399,12 @@ impl CacheManager {
         Ok(crate::paths::cache_dir().join("layers"))
     }
 
-    /// Returns the current Unix timestamp.
+    /// Returns the current Unix timestamp in milliseconds.
     fn current_timestamp() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("System time before Unix epoch")
-            .as_secs()
+            .as_millis() as u64
     }
 }
 
