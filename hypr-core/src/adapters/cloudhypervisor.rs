@@ -607,8 +607,8 @@ impl VmmAdapter for CloudHypervisorAdapter {
                 };
 
                 // Validate and bind device to vfio-pci
-                vfio_manager.validate_devices(&[pci_addr.clone()], &bind_options)?;
-                vfio_manager.bind_devices(&[pci_addr.clone()])?;
+                vfio_manager.validate_devices(std::slice::from_ref(pci_addr), &bind_options)?;
+                vfio_manager.bind_devices(std::slice::from_ref(pci_addr))?;
 
                 // Track for cleanup on delete
                 {
