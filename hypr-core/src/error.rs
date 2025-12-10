@@ -34,6 +34,9 @@ pub enum HyprError {
     #[error("Invalid image manifest: {reason}")]
     InvalidManifest { reason: String },
 
+    #[error("Failed to pull image {image}: {reason}")]
+    ImagePullFailed { image: String, reason: String },
+
     // Build errors
     #[error("Build failed: {reason}")]
     BuildFailed { reason: String },

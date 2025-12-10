@@ -77,9 +77,11 @@ libbpf-sys = "1.4"
 # Mount syscalls for overlayfs
 nix = { version = "0.29", features = ["net", "mount"] }
 
+[dependencies.tempfile]
+version = "3.10"
+
 [dev-dependencies]
 mockall = "0.13"
-tempfile = "3.10"
 
 [features]
 # libkrun-efi support (macOS Metal GPU, Phase 4)

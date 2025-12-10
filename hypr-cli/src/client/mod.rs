@@ -104,10 +104,13 @@ impl HyprClient {
         Ok(vm.try_into()?)
     }
 
-    /// Get an image by name and tag
+    /// Get an image by name and tag (auto-pulls from registry if not found locally)
     pub async fn get_image(&mut self, name: &str, tag: &str) -> Result<hypr_core::Image> {
-        let request =
-            tonic::Request::new(GetImageRequest { name: name.to_string(), tag: tag.to_string() });
+        let request = tonic::Request::new(GetImageRequest {
+            name: name.to_string(),
+            tag: tag.to_string(),
+            pull: true, // Auto-pull from registry if not found locally
+        });
 
         let response = self.client.get_image(request).await?;
         let image =

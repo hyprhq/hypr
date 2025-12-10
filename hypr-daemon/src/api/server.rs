@@ -423,14 +423,39 @@ impl HyprService for HyprServiceImpl {
 
         let req = request.into_inner();
 
-        let image = self
-            .state
-            .get_image_by_name_tag(&req.name, &req.tag)
+        // Determine the tag (default to "latest" if empty)
+        let tag = if req.tag.is_empty() { "latest".to_string() } else { req.tag };
+
+        // First try to get image from local database
+        if let Ok(image) = self.state.get_image_by_name_tag(&req.name, &tag).await {
+            let response = GetImageResponse { image: Some(image.into()) };
+            return Ok(Response::new(response));
+        }
+
+        // Image not found locally - auto-pull from registry (Docker-like behavior)
+        info!("Image {}:{} not found locally, pulling from registry...", req.name, tag);
+
+        // Build full image reference
+        let image_ref = format!("{}:{}", req.name, tag);
+
+        // Pull from registry
+        let mut puller = hypr_core::registry::ImagePuller::new()
+            .map_err(|e| Status::internal(format!("Failed to create image puller: {}", e)))?;
+
+        let image = puller
+            .pull(&image_ref)
             .await
-            .map_err(|e| Status::not_found(e.to_string()))?;
+            .map_err(|e| Status::not_found(format!("Failed to pull image {}: {}", image_ref, e)))?;
+
+        // Store in database
+        self.state
+            .insert_image(&image)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to store pulled image: {}", e)))?;
+
+        info!("Image {}:{} pulled and stored successfully", image.name, image.tag);
 
         let response = GetImageResponse { image: Some(image.into()) };
-
         Ok(Response::new(response))
     }
 

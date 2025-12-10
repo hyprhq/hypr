@@ -223,6 +223,7 @@ message ListImagesResponse {
 message GetImageRequest {
   string name = 1; // Image name (e.g., "ts-frontend")
   string tag = 2;  // Image tag (e.g., "latest")
+  bool pull = 3;   // Auto-pull from registry if not found locally (default: true)
 }
 
 message GetImageResponse {

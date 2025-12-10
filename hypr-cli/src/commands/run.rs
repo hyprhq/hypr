@@ -25,11 +25,12 @@ pub async fn run(
     let (image_name, image_tag) =
         if let Some((name, tag)) = image.split_once(':') { (name, tag) } else { (image, "latest") };
 
-    // Resolve image to get actual rootfs path
+    // Resolve image to get actual rootfs path (auto-pulls from registry if not found locally)
+    println!("Resolving image {}:{}...", image_name, image_tag);
     let image_info = client
         .get_image(image_name, image_tag)
         .await
-        .map_err(|e| anyhow::anyhow!("Image not found: {}:{} - {}", image_name, image_tag, e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to get image {}:{} - {}", image_name, image_tag, e))?;
 
     // Generate VM ID and name
     let vm_id = format!("vm-{}", uuid::Uuid::new_v4());

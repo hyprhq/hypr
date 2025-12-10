@@ -105,6 +105,12 @@ enum Commands {
     /// List images
     Images,
 
+    /// Pull an image from a registry
+    Pull {
+        /// Image name (e.g., "nginx", "nginx:1.25", "ghcr.io/org/repo:tag")
+        image: String,
+    },
+
     /// Stream logs from a VM
     Logs {
         /// VM ID or name
@@ -330,6 +336,10 @@ async fn main() -> Result<()> {
 
         Commands::Images => {
             commands::images().await?;
+        }
+
+        Commands::Pull { image } => {
+            commands::pull(&image).await?;
         }
 
         Commands::Logs { vm, follow, tail } => {
