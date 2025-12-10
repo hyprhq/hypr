@@ -271,8 +271,8 @@ async fn prune_orphaned_taps() -> Result<usize> {
         for line in stdout.lines() {
             if let Some(name) = line.split(':').nth(1) {
                 let name = name.trim().split('@').next().unwrap_or("").trim();
-                if name.starts_with("tap") {
-                    if let Ok(tap_num) = name[3..].parse::<usize>() {
+                if let Some(suffix) = name.strip_prefix("tap") {
+                    if let Ok(tap_num) = suffix.parse::<usize>() {
                         if tap_num >= running_count {
                             let _ = Command::new("ip").args(["link", "del", name]).status();
                             cleaned += 1;
@@ -327,13 +327,14 @@ async fn prune_orphaned_vfio() -> Result<usize> {
                 continue;
             }
 
-            // Check if this is a PCI address format
-            if name_str.contains(':') && name_str.contains('.') {
-                if !running_gpu_addresses.contains(name_str.as_ref()) {
-                    let unbind_path = vfio_pci_path.join("unbind");
-                    if std::fs::write(&unbind_path, name_str.as_ref()).is_ok() {
-                        cleaned += 1;
-                    }
+            // Check if this is a PCI address format and not in use
+            if name_str.contains(':')
+                && name_str.contains('.')
+                && !running_gpu_addresses.contains(name_str.as_ref())
+            {
+                let unbind_path = vfio_pci_path.join("unbind");
+                if std::fs::write(&unbind_path, name_str.as_ref()).is_ok() {
+                    cleaned += 1;
                 }
             }
         }

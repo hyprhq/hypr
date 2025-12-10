@@ -223,9 +223,9 @@ async fn cleanup_orphaned_tap_devices(
         for line in stdout.lines() {
             if let Some(name) = line.split(':').nth(1) {
                 let name = name.trim().split('@').next().unwrap_or("").trim();
-                if name.starts_with("tap") {
+                if let Some(suffix) = name.strip_prefix("tap") {
                     // Extract tap number
-                    if let Ok(tap_num) = name[3..].parse::<usize>() {
+                    if let Ok(tap_num) = suffix.parse::<usize>() {
                         // If we have more TAP devices than running VMs, delete extras
                         if tap_num >= running_vm_count {
                             info!("Cleaning up orphaned TAP device: {}", name);
