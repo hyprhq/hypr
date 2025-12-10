@@ -38,6 +38,12 @@ enum Commands {
         /// Environment variables (KEY=VALUE)
         #[arg(short, long)]
         env: Vec<String>,
+
+        /// Enable GPU passthrough.
+        /// Linux: Specify PCI address (e.g., --gpu 0000:01:00.0)
+        /// macOS ARM64: Use --gpu to enable Metal GPU (no address needed)
+        #[arg(short, long)]
+        gpu: Option<Option<String>>,
     },
 
     /// List all VMs
@@ -119,6 +125,10 @@ enum Commands {
     /// Manage stacks with compose files
     #[command(subcommand)]
     Compose(ComposeCommands),
+
+    /// GPU management commands
+    #[command(subcommand)]
+    Gpu(GpuCommands),
 }
 
 #[derive(Subcommand)]
@@ -169,6 +179,12 @@ enum ComposeCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum GpuCommands {
+    /// List available GPUs on the system
+    List,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize tracing if RUST_LOG is set
@@ -181,7 +197,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { image, name, cpus, memory, port, env } => {
+        Commands::Run { image, name, cpus, memory, port, env, gpu } => {
             // Parse ports
             let ports: Vec<(u16, u16)> = port
                 .iter()
@@ -208,7 +224,13 @@ async fn main() -> Result<()> {
                 })
                 .collect::<Result<Vec<_>>>()?;
 
-            commands::run(&image, name, cpus, memory, ports, env_vars).await?;
+            // Parse GPU option:
+            // --gpu (no value) = auto-detect
+            // --gpu=<pci-addr> = specific device
+            // (absent) = no GPU
+            let gpu_option = gpu.map(|opt| opt.unwrap_or_default());
+
+            commands::run(&image, name, cpus, memory, ports, env_vars, gpu_option).await?;
         }
 
         Commands::Ps => {
@@ -318,6 +340,12 @@ async fn main() -> Result<()> {
 
             ComposeCommands::Logs { service_name } => {
                 commands::compose::logs(&service_name).await?;
+            }
+        },
+
+        Commands::Gpu(gpu_cmd) => match gpu_cmd {
+            GpuCommands::List => {
+                commands::gpu::list()?;
             }
         },
     }

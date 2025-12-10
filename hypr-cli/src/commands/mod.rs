@@ -2,6 +2,7 @@
 
 pub mod build;
 pub mod compose;
+pub mod gpu;
 pub mod images;
 pub mod logs;
 pub mod ps;
