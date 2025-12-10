@@ -655,9 +655,7 @@ pub async fn start_api_server(
                 // Auto-create group if it doesn't exist
                 if grp.is_null() {
                     info!("Creating 'hypr' group...");
-                    let status = std::process::Command::new("groupadd")
-                        .arg("hypr")
-                        .status();
+                    let status = std::process::Command::new("groupadd").arg("hypr").status();
 
                     match status {
                         Ok(exit) if exit.success() => {

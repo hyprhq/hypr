@@ -92,12 +92,18 @@ impl EbpfForwarder {
         // iptables -t nat -A OUTPUT -p tcp --dport 80 -j DNAT --to-destination 10.88.0.2:80
         let result = Command::new("iptables")
             .args([
-                "-t", "nat",
-                "-A", "OUTPUT",
-                "-p", proto,
-                "--dport", &mapping.host_port.to_string(),
-                "-j", "DNAT",
-                "--to-destination", &dest,
+                "-t",
+                "nat",
+                "-A",
+                "OUTPUT",
+                "-p",
+                proto,
+                "--dport",
+                &mapping.host_port.to_string(),
+                "-j",
+                "DNAT",
+                "--to-destination",
+                &dest,
             ])
             .output();
 
@@ -118,12 +124,18 @@ impl EbpfForwarder {
         // Also add to PREROUTING for external access via host IP
         let result = Command::new("iptables")
             .args([
-                "-t", "nat",
-                "-A", "PREROUTING",
-                "-p", proto,
-                "--dport", &mapping.host_port.to_string(),
-                "-j", "DNAT",
-                "--to-destination", &dest,
+                "-t",
+                "nat",
+                "-A",
+                "PREROUTING",
+                "-p",
+                proto,
+                "--dport",
+                &mapping.host_port.to_string(),
+                "-j",
+                "DNAT",
+                "--to-destination",
+                &dest,
             ])
             .output();
 
@@ -142,7 +154,6 @@ impl EbpfForwarder {
             }
         }
     }
-
 }
 
 #[cfg(target_os = "linux")]
@@ -209,10 +220,7 @@ impl EbpfForwarder {
         };
 
         // List rules in OUTPUT chain and find ones matching our port
-        if let Ok(output) = Command::new("iptables")
-            .args(["-t", "nat", "-S", "OUTPUT"])
-            .output()
-        {
+        if let Ok(output) = Command::new("iptables").args(["-t", "nat", "-S", "OUTPUT"]).output() {
             let rules = String::from_utf8_lossy(&output.stdout);
             for line in rules.lines() {
                 // Look for rules like: -A OUTPUT -p tcp --dport 80 -j DNAT --to-destination 10.88.0.2:80
@@ -233,9 +241,8 @@ impl EbpfForwarder {
         }
 
         // Same for PREROUTING
-        if let Ok(output) = Command::new("iptables")
-            .args(["-t", "nat", "-S", "PREROUTING"])
-            .output()
+        if let Ok(output) =
+            Command::new("iptables").args(["-t", "nat", "-S", "PREROUTING"]).output()
         {
             let rules = String::from_utf8_lossy(&output.stdout);
             for line in rules.lines() {
