@@ -1609,6 +1609,82 @@ static int mount_runtime_rootfs(void) {
 }
 
 // ============================================================================
+// ROSETTA x86_64 EMULATION (macOS ARM64 Mixed Mode)
+// ============================================================================
+//
+// On macOS ARM64, Apple's Rosetta 2 can translate x86_64 binaries transparently.
+// This enables running x86_64 container images on ARM64 hosts.
+//
+// How it works:
+// 1. vfkit exposes the Rosetta runtime via virtio-fs share (mountTag=rosetta)
+// 2. We mount that share and register it with binfmt_misc
+// 3. Linux kernel delegates x86_64 ELF execution to Rosetta binary
+//
+// This is optional - if the share isn't available, we silently skip.
+
+static void setup_rosetta(void) {
+    // 1. Create mount point for the Rosetta binary
+    mkdir("/mnt", 0755);
+    mkdir("/mnt/rosetta", 0755);
+
+    // 2. Try to mount the virtio-fs share exposed by vfkit
+    // If this fails (not on macOS ARM64, or Rosetta not enabled), just return
+    if (mount("rosetta", "/mnt/rosetta", "virtiofs", MS_RDONLY, NULL) != 0) {
+        // Not running in Mixed Mode - this is fine, just skip
+        return;
+    }
+
+    LOG("Rosetta share mounted, configuring x86_64 emulation...");
+
+    // 3. Mount binfmt_misc filesystem (interface to register binary interpreters)
+    // This may already be mounted, so EBUSY is acceptable
+    if (mount("binfmt_misc", "/proc/sys/fs/binfmt_misc", "binfmt_misc", 0, NULL) != 0) {
+        if (errno != EBUSY) {
+            LOG("WARNING: binfmt_misc mount failed: %s", strerror(errno));
+            return;
+        }
+    }
+
+    // 4. Register Rosetta as the interpreter for x86_64 ELF binaries
+    //
+    // Format: :name:type:offset:magic:mask:interpreter:flags
+    //
+    // Magic bytes identify x86_64 ELF:
+    //   \x7fELF     - ELF magic
+    //   \x02        - 64-bit (ELFCLASS64)
+    //   \x01        - Little endian (ELFDATA2LSB)
+    //   \x01        - ELF version 1
+    //   ... padding ...
+    //   \x02\x00    - ET_EXEC or ET_DYN (executable)
+    //   \x3e\x00    - EM_X86_64 (AMD64 architecture)
+    //
+    // Flags:
+    //   O - Open binary immediately (for performance)
+    //   C - Use credentials of the original binary
+    //   F - Fix binary (required for containers/chroot - preserves interpreter across mounts)
+    //
+    const char *rule = ":rosetta:M::\\x7fELF\\x02\\x01\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x02\\x00\\x3e\\x00:\\xff\\xff\\xff\\xff\\xff\\xfe\\xfe\\x00\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xfe\\xff\\xff\\xff:/mnt/rosetta/rosetta:OCF";
+
+    int fd = open("/proc/sys/fs/binfmt_misc/register", O_WRONLY);
+    if (fd < 0) {
+        LOG("WARNING: Failed to open binfmt_misc register: %s", strerror(errno));
+        return;
+    }
+
+    ssize_t written = write(fd, rule, strlen(rule));
+    if (written < 0) {
+        // EEXIST means already registered, which is fine
+        if (errno != EEXIST) {
+            LOG("WARNING: Failed to register Rosetta binfmt rule: %s", strerror(errno));
+        }
+    } else {
+        LOG("Rosetta x86_64 emulation enabled");
+    }
+
+    close(fd);
+}
+
+// ============================================================================
 // RUNTIME MODE - MAIN ENTRY POINT
 // ============================================================================
 
@@ -1754,6 +1830,10 @@ static void run_runtime_mode(void) {
             LOG("Chroot failed: %s", strerror(errno));
         }
     }
+
+    // Set up Rosetta x86_64 emulation if available (macOS ARM64 Mixed Mode)
+    // This must be called after /proc is mounted but before executing workloads
+    setup_rosetta();
 
     // Print ready message
     LOG("Runtime mode ready");

@@ -322,6 +322,18 @@ impl HvfAdapter {
         args.push("--device".to_string());
         args.push("virtio-rng".to_string());
 
+        // Rosetta x86_64 emulation (macOS ARM64 only)
+        // This enables running x86_64 container images on Apple Silicon via Rosetta 2.
+        // vfkit will expose the Rosetta runtime as a virtio-fs share with tag "rosetta".
+        // The guest (Kestrel) will mount this and register it with binfmt_misc.
+        // Cost is negligible if unused - Rosetta share is only accessed when x86_64 binaries run.
+        #[cfg(target_arch = "aarch64")]
+        {
+            args.push("--device".to_string());
+            args.push("rosetta,mountTag=rosetta".to_string());
+            debug!("Rosetta x86_64 emulation enabled for ARM64 host");
+        }
+
         debug!("Built vfkit args: {:?}", args);
         Ok(args)
     }

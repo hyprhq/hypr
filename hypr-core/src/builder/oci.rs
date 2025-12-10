@@ -16,14 +16,36 @@ use std::path::{Path, PathBuf};
 use tar::Archive;
 use tracing::{debug, info, instrument};
 
+/// Helper to find a manifest entry matching a specific architecture.
+fn find_linux_arch<'a>(
+    manifests: &'a [ImageIndexEntry],
+    arch: &str,
+) -> Option<&'a ImageIndexEntry> {
+    manifests.iter().find(|entry| {
+        entry
+            .platform
+            .as_ref()
+            .is_some_and(|platform| platform.os == "linux" && platform.architecture == arch)
+    })
+}
+
 /// Platform resolver that always selects Linux images with the current architecture.
 ///
 /// This is needed because we're building Linux container images (for microVMs)
 /// even when running on macOS or other platforms. The default resolver would
 /// try to pull darwin/arm64 on macOS, but we need linux/arm64.
+///
+/// # Rosetta Fallback (macOS ARM64)
+///
+/// On Apple Silicon Macs, if no native ARM64 image is available, we automatically
+/// fall back to x86_64 (amd64) images. These will run transparently via Apple's
+/// Rosetta 2 translation layer inside the Linux VM.
+///
+/// This enables running x86_64-only images (like older MySQL versions) on ARM64 Macs.
 fn linux_platform_resolver(manifests: &[ImageIndexEntry]) -> Option<String> {
     // Detect current architecture
-    let arch = match std::env::consts::ARCH {
+    let host_arch = std::env::consts::ARCH;
+    let arch = match host_arch {
         "x86_64" => "amd64",
         "aarch64" => "arm64",
         other => other,
@@ -31,16 +53,33 @@ fn linux_platform_resolver(manifests: &[ImageIndexEntry]) -> Option<String> {
 
     debug!("Looking for linux/{} image variant", arch);
 
-    // Find first linux image matching current architecture
-    manifests
-        .iter()
-        .find(|entry| {
-            entry
-                .platform
-                .as_ref()
-                .is_some_and(|platform| platform.os == "linux" && platform.architecture == arch)
-        })
-        .map(|entry| entry.digest.clone())
+    // 1. Try to find native architecture match (best performance)
+    if let Some(entry) = find_linux_arch(manifests, arch) {
+        debug!("Found native linux/{} image", arch);
+        return Some(entry.digest.clone());
+    }
+
+    // 2. Rosetta fallback: On macOS ARM64, try x86_64 if no ARM64 available
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        debug!("Native ARM64 image not found, trying x86_64 (Rosetta fallback)");
+
+        // Try "amd64" first (Docker convention)
+        if let Some(entry) = find_linux_arch(manifests, "amd64") {
+            info!("Native ARM64 image not available, using x86_64 via Rosetta 2 emulation");
+            return Some(entry.digest.clone());
+        }
+
+        // Also try "x86_64" in case of non-standard naming
+        if let Some(entry) = find_linux_arch(manifests, "x86_64") {
+            info!("Native ARM64 image not available, using x86_64 via Rosetta 2 emulation");
+            return Some(entry.digest.clone());
+        }
+    }
+
+    // No suitable image found
+    debug!("No suitable linux image found for architecture {}", arch);
+    None
 }
 
 /// OCI registry client for pulling images.

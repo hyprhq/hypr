@@ -175,6 +175,9 @@ jobs:
           CONFIG_BLK_DEV_LOOP=y
           CONFIG_BLK_DEV_LOOP_MIN_COUNT=8
 
+          # Binary format support (required for Rosetta x86_64 emulation on ARM64)
+          CONFIG_BINFMT_MISC=y
+
           # Compression support (required by squashfs)
           CONFIG_ZLIB_INFLATE=y
           CONFIG_ZLIB_DEFLATE=y
