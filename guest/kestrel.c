@@ -1699,17 +1699,23 @@ int main(int argc, char *argv[]) {
     mkdir("/dev", 0755);
     
     int console_fd = -1;
-    
+
     // Try hvc0 first (virtio-serial for vfkit/macOS)
     mknod("/dev/hvc0", S_IFCHR | 0600, makedev(229, 0));
     console_fd = open("/dev/hvc0", O_WRONLY);
-    
+
     if (console_fd < 0) {
-        // Try ttyS0 (legacy serial for cloud-hypervisor/Linux)
+        // Try ttyAMA0 (PL011 UART for ARM64, major 204 minor 64)
+        mknod("/dev/ttyAMA0", S_IFCHR | 0600, makedev(204, 64));
+        console_fd = open("/dev/ttyAMA0", O_WRONLY);
+    }
+
+    if (console_fd < 0) {
+        // Try ttyS0 (legacy serial for cloud-hypervisor/Linux x86_64)
         mknod("/dev/ttyS0", S_IFCHR | 0600, makedev(4, 64));
         console_fd = open("/dev/ttyS0", O_WRONLY);
     }
-    
+
     if (console_fd < 0) {
         // Fallback to /dev/console
         mknod("/dev/console", S_IFCHR | 0600, makedev(5, 1));

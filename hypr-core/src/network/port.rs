@@ -358,9 +358,19 @@ impl PortForwarder {
             return Err(HyprError::InvalidConfig { reason: "Port cannot be 0".to_string() });
         }
 
-        // Warn about privileged ports but don't fail
+        // Warn about privileged ports only if not running as root
         if port < 1024 {
-            warn!("Port {} is in privileged range (<1024), may require root", port);
+            // Check if running as root (uid 0)
+            #[cfg(unix)]
+            {
+                if unsafe { libc::geteuid() } != 0 {
+                    warn!("Port {} is in privileged range (<1024), may require root", port);
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                warn!("Port {} is in privileged range (<1024), may require root", port);
+            }
         }
 
         Ok(())

@@ -1,6 +1,8 @@
 //! eBPF-based port forwarding adapter for Linux.
 //!
 //! Wraps DriftManager to implement the BpfPortMap trait for platform abstraction.
+//! Also adds iptables DNAT rules for localhost traffic (eBPF TC hooks don't
+//! intercept loopback traffic).
 
 use crate::error::Result;
 use crate::network::port::{BpfPortMap, PortMapping};
@@ -10,9 +12,11 @@ use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use crate::network::ebpf::{DriftManager, Protocol as EbpfProtocol};
 #[cfg(target_os = "linux")]
+use std::process::Command;
+#[cfg(target_os = "linux")]
 use std::sync::Mutex;
 #[cfg(target_os = "linux")]
-use tracing::{info, instrument};
+use tracing::{debug, info, instrument, warn};
 
 #[cfg(not(target_os = "linux"))]
 use crate::error::HyprError;
@@ -30,6 +34,8 @@ unsafe impl Sync for SendSyncDrift {}
 /// eBPF-based port forwarder using Drift L4 programs.
 ///
 /// Only available on Linux. Provides 10+ Gbps throughput via kernel datapath.
+/// Also adds iptables DNAT rules for localhost traffic since eBPF TC hooks
+/// don't intercept loopback interface traffic.
 #[cfg(target_os = "linux")]
 pub struct EbpfForwarder {
     drift: Mutex<SendSyncDrift>,
@@ -72,6 +78,71 @@ impl EbpfForwarder {
         let mut drift = self.drift.lock().unwrap();
         drift.0.detach()
     }
+
+    /// Add iptables DNAT rule for localhost traffic.
+    /// eBPF TC hooks don't intercept loopback traffic, so we need iptables for localhost.
+    fn add_iptables_dnat(&self, mapping: &PortMapping) {
+        let proto = match mapping.protocol {
+            Protocol::Tcp => "tcp",
+            Protocol::Udp => "udp",
+        };
+        let dest = format!("{}:{}", mapping.vm_ip, mapping.vm_port);
+
+        // Add DNAT rule to OUTPUT chain (for localhost traffic)
+        // iptables -t nat -A OUTPUT -p tcp --dport 80 -j DNAT --to-destination 10.88.0.2:80
+        let result = Command::new("iptables")
+            .args([
+                "-t", "nat",
+                "-A", "OUTPUT",
+                "-p", proto,
+                "--dport", &mapping.host_port.to_string(),
+                "-j", "DNAT",
+                "--to-destination", &dest,
+            ])
+            .output();
+
+        match result {
+            Ok(output) => {
+                if output.status.success() {
+                    debug!("Added iptables DNAT for localhost: {} -> {}", mapping.host_port, dest);
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    warn!("Failed to add iptables DNAT: {}", stderr);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to execute iptables: {}", e);
+            }
+        }
+
+        // Also add to PREROUTING for external access via host IP
+        let result = Command::new("iptables")
+            .args([
+                "-t", "nat",
+                "-A", "PREROUTING",
+                "-p", proto,
+                "--dport", &mapping.host_port.to_string(),
+                "-j", "DNAT",
+                "--to-destination", &dest,
+            ])
+            .output();
+
+        match result {
+            Ok(output) => {
+                if output.status.success() {
+                    debug!("Added iptables PREROUTING DNAT: {} -> {}", mapping.host_port, dest);
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    // PREROUTING may fail if chain doesn't exist, that's OK
+                    debug!("iptables PREROUTING DNAT: {}", stderr);
+                }
+            }
+            Err(e) => {
+                debug!("iptables PREROUTING: {}", e);
+            }
+        }
+    }
+
 }
 
 #[cfg(target_os = "linux")]
@@ -91,9 +162,16 @@ impl BpfPortMap for EbpfForwarder {
             backend_port: mapping.vm_port,
         };
 
-        // Add mapping (blocking call is OK here since eBPF map updates are fast)
+        // Add eBPF mapping (for bridge/external traffic)
         let drift = self.drift.lock().unwrap();
-        drift.0.add_port_mapping(ebpf_mapping)
+        drift.0.add_port_mapping(ebpf_mapping)?;
+
+        // Also add iptables DNAT for localhost traffic
+        // (eBPF TC hooks don't intercept loopback interface)
+        drop(drift); // Release lock before calling iptables
+        self.add_iptables_dnat(mapping);
+
+        Ok(())
     }
 
     fn remove_mapping(&self, host_port: u16, protocol: Protocol) -> Result<()> {
@@ -103,14 +181,80 @@ impl BpfPortMap for EbpfForwarder {
             Protocol::Udp => EbpfProtocol::Udp,
         };
 
-        // Remove mapping (note: DriftManager::remove_port_mapping takes (protocol, port))
+        // Remove eBPF mapping
         let drift = self.drift.lock().unwrap();
-        drift.0.remove_port_mapping(ebpf_proto, host_port)
+        let result = drift.0.remove_port_mapping(ebpf_proto, host_port);
+        drop(drift);
+
+        // Remove iptables DNAT rules
+        self.remove_iptables_dnat_by_port(host_port, protocol);
+
+        result
     }
 
     fn is_available(&self) -> bool {
         // eBPF is available if we successfully created the forwarder
         true
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl EbpfForwarder {
+    /// Remove iptables DNAT rules by port (without knowing VM IP).
+    /// Uses iptables -S to find matching rules and delete them.
+    fn remove_iptables_dnat_by_port(&self, host_port: u16, protocol: Protocol) {
+        let proto = match protocol {
+            Protocol::Tcp => "tcp",
+            Protocol::Udp => "udp",
+        };
+
+        // List rules in OUTPUT chain and find ones matching our port
+        if let Ok(output) = Command::new("iptables")
+            .args(["-t", "nat", "-S", "OUTPUT"])
+            .output()
+        {
+            let rules = String::from_utf8_lossy(&output.stdout);
+            for line in rules.lines() {
+                // Look for rules like: -A OUTPUT -p tcp --dport 80 -j DNAT --to-destination 10.88.0.2:80
+                if line.contains(&format!("--dport {}", host_port))
+                    && line.contains(&format!("-p {}", proto))
+                    && line.contains("DNAT")
+                {
+                    // Convert -A to -D for deletion
+                    let delete_rule = line.replace("-A OUTPUT", "-D OUTPUT");
+                    let args: Vec<&str> = delete_rule.split_whitespace().collect();
+                    if !args.is_empty() {
+                        let mut cmd_args = vec!["-t", "nat"];
+                        cmd_args.extend(args);
+                        let _ = Command::new("iptables").args(&cmd_args).output();
+                    }
+                }
+            }
+        }
+
+        // Same for PREROUTING
+        if let Ok(output) = Command::new("iptables")
+            .args(["-t", "nat", "-S", "PREROUTING"])
+            .output()
+        {
+            let rules = String::from_utf8_lossy(&output.stdout);
+            for line in rules.lines() {
+                if line.contains(&format!("--dport {}", host_port))
+                    && line.contains(&format!("-p {}", proto))
+                    && line.contains("DNAT")
+                {
+                    let delete_rule = line.replace("-A PREROUTING", "-D PREROUTING");
+                    let args: Vec<&str> = delete_rule.split_whitespace().collect();
+                    if !args.is_empty() {
+                        let mut cmd_args = vec!["-t", "nat"];
+                        cmd_args.extend(args);
+                        let _ = Command::new("iptables").args(&cmd_args).output();
+                    }
+                }
+            }
+        }
+
+        debug!("Cleaned up iptables DNAT rules for port {}", host_port);
     }
 }
 

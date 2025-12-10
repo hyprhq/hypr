@@ -647,10 +647,33 @@ pub async fn start_api_server(
     {
         use std::ffi::CString;
         if let Ok(socket_cstr) = CString::new(socket_path) {
-            // Try to get the 'hypr' group ID
+            // Try to get the 'hypr' group ID, create it if it doesn't exist
             let hypr_group = CString::new("hypr").unwrap();
             unsafe {
-                let grp = libc::getgrnam(hypr_group.as_ptr());
+                let mut grp = libc::getgrnam(hypr_group.as_ptr());
+
+                // Auto-create group if it doesn't exist
+                if grp.is_null() {
+                    info!("Creating 'hypr' group...");
+                    let status = std::process::Command::new("groupadd")
+                        .arg("hypr")
+                        .status();
+
+                    match status {
+                        Ok(exit) if exit.success() => {
+                            info!("Created 'hypr' group");
+                            // Refresh group lookup
+                            grp = libc::getgrnam(hypr_group.as_ptr());
+                        }
+                        Ok(exit) => {
+                            warn!("Failed to create 'hypr' group (exit code: {:?})", exit.code());
+                        }
+                        Err(e) => {
+                            warn!("Failed to run groupadd: {}", e);
+                        }
+                    }
+                }
+
                 if !grp.is_null() {
                     let gid = (*grp).gr_gid;
                     // chown socket to root:hypr
@@ -660,7 +683,7 @@ pub async fn start_api_server(
                         warn!("Failed to set socket group to 'hypr', users may need sudo");
                     }
                 } else {
-                    warn!("Group 'hypr' not found, users may need sudo. Create it with: sudo groupadd hypr");
+                    warn!("Group 'hypr' not found and could not be created, users may need sudo");
                 }
             }
         }
