@@ -33,6 +33,8 @@ pub struct CloudHypervisorAdapter {
     kernel_path: PathBuf,
     /// Track virtiofsd daemons by VM ID (for cleanup)
     virtiofsd_daemons: Arc<Mutex<HashMap<String, Vec<VirtiofsdDaemon>>>>,
+    /// Track bound VFIO devices by VM ID (for cleanup/restore)
+    bound_vfio_devices: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
 
 /// Handle to a running virtiofsd daemon.
@@ -62,6 +64,7 @@ impl CloudHypervisorAdapter {
             runtime_dir,
             kernel_path,
             virtiofsd_daemons: Arc::new(Mutex::new(HashMap::new())),
+            bound_vfio_devices: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -572,6 +575,32 @@ impl VmmAdapter for CloudHypervisorAdapter {
             Self::configure_tap_device(&tap_name)?;
         }
 
+        // Bind GPU device to vfio-pci if GPU passthrough is requested
+        if let Some(gpu) = &config.gpu {
+            if let Some(pci_addr) = &gpu.pci_address {
+                info!(pci_address = %pci_addr, "Binding GPU to vfio-pci for passthrough");
+
+                let mut vfio_manager = crate::adapters::vfio::VfioManager::new();
+                let bind_options = crate::adapters::vfio::BindOptions {
+                    force_boot_vga: false, // Never unbind boot VGA automatically
+                    include_iommu_group_devices: true, // Include all devices in IOMMU group
+                    ..Default::default()
+                };
+
+                // Validate and bind device to vfio-pci
+                vfio_manager.validate_devices(&[pci_addr.clone()], &bind_options)?;
+                vfio_manager.bind_devices(&[pci_addr.clone()])?;
+
+                // Track for cleanup on delete
+                {
+                    let mut bound = self.bound_vfio_devices.lock().unwrap();
+                    bound.insert(config.id.clone(), vec![pci_addr.clone()]);
+                }
+
+                info!(pci_address = %pci_addr, "GPU bound to vfio-pci successfully");
+            }
+        }
+
         // Spawn cloud-hypervisor process with stdout/stderr redirected to log file
         let start = Instant::now();
         let child = Command::new(&self.binary_path)
@@ -688,6 +717,29 @@ impl VmmAdapter for CloudHypervisorAdapter {
 
         // Stop virtiofsd daemons
         self.stop_virtiofsd_daemons(&handle.id).await?;
+
+        // Restore GPU to host driver (unbind from vfio-pci)
+        let bound_devices = {
+            let mut bound = self.bound_vfio_devices.lock().unwrap();
+            bound.remove(&handle.id)
+        };
+
+        if let Some(devices) = bound_devices {
+            if !devices.is_empty() {
+                info!("Restoring {} GPU device(s) to host driver", devices.len());
+
+                let mut vfio_manager = crate::adapters::vfio::VfioManager::new();
+                match vfio_manager.unbind_devices(&devices) {
+                    Ok(()) => {
+                        info!("GPU device(s) restored to host driver");
+                    }
+                    Err(e) => {
+                        // Don't fail delete on unbind error - VM is already stopped
+                        warn!("Failed to restore GPU to host driver: {}. Device may need manual rebind.", e);
+                    }
+                }
+            }
+        }
 
         // Clean up TAP device
         let tap_name = format!("tap{}", &handle.id[..handle.id.len().min(12)]);

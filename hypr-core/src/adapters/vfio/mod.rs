@@ -63,7 +63,7 @@ pub use device::PciDevice;
 #[cfg(target_os = "linux")]
 pub use iommu::IommuGroup;
 #[cfg(target_os = "linux")]
-pub use manager::VfioManager;
+pub use manager::{BindOptions, VfioManager};
 
 // macOS stub - GPU detection only (no VFIO)
 #[cfg(target_os = "macos")]
