@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use tracing::{info, instrument};
 
 #[cfg(target_os = "linux")]
-use hypr_core::network::EbpfForwarder;
+use hypr_core::network::{EbpfForwarder, HybridForwarder};
 
 #[cfg(target_os = "linux")]
 use hypr_core::network::bridge::{create_bridge_manager, BridgeConfig};
@@ -72,8 +72,10 @@ impl NetworkManager {
 
             match try_ebpf_forwarder() {
                 Ok(ebpf) => {
-                    info!("Using eBPF port forwarding (10+ Gbps)");
-                    Arc::new(PortForwarder::new(Arc::new(ebpf)))
+                    // Use hybrid forwarder: eBPF for bridge traffic + proxy for localhost
+                    info!("Using hybrid port forwarding (eBPF + proxy for localhost)");
+                    let hybrid = HybridForwarder::new(Arc::new(ebpf));
+                    Arc::new(PortForwarder::new(Arc::new(hybrid)))
                 }
                 Err(e) => {
                     warn!("eBPF unavailable ({}), falling back to userspace proxy", e);
