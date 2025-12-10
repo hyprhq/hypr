@@ -37,36 +37,63 @@ jobs:
 
       - name: Install build dependencies
         run: |
+          # Check if required tools are already installed (self-hosted runners)
+          MISSING=""
+          for tool in gcc make bc bison flex cpio rsync; do
+            if ! command -v $tool &> /dev/null; then
+              MISSING="$MISSING $tool"
+            fi
+          done
+
+          # Check for required dev libraries
+          if [ ! -f /usr/include/libelf.h ] && [ ! -f /usr/include/elfutils/libelf.h ]; then
+            MISSING="$MISSING libelf-dev"
+          fi
+
+          if [ -z "$MISSING" ]; then
+            echo "All required build tools are already installed"
+            gcc --version | head -1
+            make --version | head -1
+            exit 0
+          fi
+
+          echo "Missing tools:$MISSING - attempting to install..."
+
           # Fix potential apt issues on self-hosted runners
           sudo rm -f /var/lib/apt/lists/lock
           sudo rm -f /var/cache/apt/archives/lock
           sudo rm -f /var/lib/dpkg/lock*
 
-          # Clear and rebuild apt cache (fixes corrupted sources)
-          sudo rm -rf /var/lib/apt/lists/*
-          sudo apt-get clean
+          # Try to fix broken packages first
+          sudo dpkg --configure -a || true
+          sudo apt-get -f install -y || true
 
-          # Update package lists (retry on failure)
+          # Update package lists
           for i in 1 2 3; do
             sudo apt-get update && break
-            echo "apt-get update failed (attempt $i), retrying in 5s..."
+            echo "apt-get update failed (attempt $i), retrying..."
+            sudo rm -rf /var/lib/apt/lists/*
             sleep 5
           done
 
-          # Install dependencies
-          # Note: bsdmainutils replaced by bsdextrautils in Ubuntu 22.04+
-          # Note: lz4 package may be named liblz4-tool on some systems
-          sudo apt-get install -y \
-            build-essential \
-            bc \
-            bison \
-            flex \
-            libelf-dev \
-            libssl-dev \
-            libncurses-dev \
-            cpio \
-            rsync \
-            liblz4-tool
+          # Install only missing packages individually to avoid dependency conflicts
+          for pkg in gcc g++ make bc bison flex libelf-dev libssl-dev libncurses-dev cpio rsync; do
+            if ! dpkg -s $pkg &> /dev/null; then
+              echo "Installing $pkg..."
+              sudo apt-get install -y $pkg || echo "Warning: Failed to install $pkg"
+            fi
+          done
+
+          # Verify critical tools
+          for tool in gcc make bc; do
+            if ! command -v $tool &> /dev/null; then
+              echo "ERROR: Required tool '$tool' is not available"
+              exit 1
+            fi
+          done
+
+          echo "Build dependencies ready"
+          gcc --version | head -1
 
       - name: Download mainline kernel
         run: |
