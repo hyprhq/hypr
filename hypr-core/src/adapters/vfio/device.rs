@@ -61,10 +61,7 @@ impl PciDevice {
     pub fn from_address(address: &str) -> Result<Self> {
         if !is_valid_pci_address(address) {
             return Err(HyprError::InvalidConfig {
-                reason: format!(
-                    "Invalid PCI address format: {} (expected: 0000:01:00.0)",
-                    address
-                ),
+                reason: format!("Invalid PCI address format: {} (expected: 0000:01:00.0)", address),
             });
         }
 
@@ -75,12 +72,10 @@ impl PciDevice {
             });
         }
 
-        let vendor_id = read_sysfs_value(&sysfs_path.join("vendor"))?
-            .trim_start_matches("0x")
-            .to_lowercase();
-        let device_id = read_sysfs_value(&sysfs_path.join("device"))?
-            .trim_start_matches("0x")
-            .to_lowercase();
+        let vendor_id =
+            read_sysfs_value(&sysfs_path.join("vendor"))?.trim_start_matches("0x").to_lowercase();
+        let device_id =
+            read_sysfs_value(&sysfs_path.join("device"))?.trim_start_matches("0x").to_lowercase();
         let class = read_sysfs_value(&sysfs_path.join("class"))?;
 
         let driver = read_driver(&sysfs_path);
@@ -190,10 +185,7 @@ fn read_iommu_group(device_path: &Path) -> Option<String> {
 /// Read the NUMA node for a device.
 fn read_numa_node(device_path: &Path) -> i32 {
     let numa_path = device_path.join("numa_node");
-    fs::read_to_string(&numa_path)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(-1)
+    fs::read_to_string(&numa_path).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(-1)
 }
 
 /// Check if this is the boot VGA device.
@@ -202,9 +194,7 @@ fn read_numa_node(device_path: &Path) -> i32 {
 /// Unbinding this device can hang the host system.
 fn check_boot_vga(device_path: &Path) -> bool {
     let boot_vga_path = device_path.join("boot_vga");
-    fs::read_to_string(&boot_vga_path)
-        .ok()
-        .is_some_and(|s| s.trim() == "1")
+    fs::read_to_string(&boot_vga_path).ok().is_some_and(|s| s.trim() == "1")
 }
 
 #[cfg(test)]

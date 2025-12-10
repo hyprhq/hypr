@@ -4,9 +4,9 @@ use crate::client::HyprClient;
 use anyhow::Result;
 use hypr_core::adapters::vfio::detect_gpus;
 use hypr_core::types::network::{NetworkConfig, Protocol};
-use hypr_core::types::vm::{DiskConfig, DiskFormat, GpuConfig};
 #[cfg(target_os = "linux")]
 use hypr_core::types::vm::GpuVendor;
+use hypr_core::types::vm::{DiskConfig, DiskFormat, GpuConfig};
 use hypr_core::{VmConfig, VmResources};
 
 /// Run a VM from an image
@@ -176,13 +176,9 @@ fn auto_detect_gpu() -> Result<Option<GpuConfig>> {
         #[cfg(target_os = "macos")]
         {
             #[cfg(target_arch = "aarch64")]
-            return Err(anyhow::anyhow!(
-                "No GPU detected (unexpected on Apple Silicon)"
-            ));
+            return Err(anyhow::anyhow!("No GPU detected (unexpected on Apple Silicon)"));
             #[cfg(not(target_arch = "aarch64"))]
-            return Err(anyhow::anyhow!(
-                "GPU passthrough not available on Intel Macs"
-            ));
+            return Err(anyhow::anyhow!("GPU passthrough not available on Intel Macs"));
         }
 
         #[cfg(target_os = "linux")]
@@ -197,20 +193,17 @@ fn auto_detect_gpu() -> Result<Option<GpuConfig>> {
     #[cfg(target_os = "linux")]
     {
         // Skip boot VGA devices by default, prefer vfio-ready devices
-        let gpu = gpus
-            .iter()
-            .filter(|g| !g.is_boot_vga)
-            .max_by_key(|g| {
-                // Prefer vfio-ready, then NVIDIA, then by memory
-                let vfio_score = if g.is_vfio_ready { 1000 } else { 0 };
-                let vendor_score = match g.vendor {
-                    GpuVendor::Nvidia => 100,
-                    GpuVendor::Amd => 50,
-                    _ => 0,
-                };
-                let memory_score = g.memory_mb.unwrap_or(0) / 1024; // GB
-                vfio_score + vendor_score + memory_score as u64
-            });
+        let gpu = gpus.iter().filter(|g| !g.is_boot_vga).max_by_key(|g| {
+            // Prefer vfio-ready, then NVIDIA, then by memory
+            let vfio_score = if g.is_vfio_ready { 1000 } else { 0 };
+            let vendor_score = match g.vendor {
+                GpuVendor::Nvidia => 100,
+                GpuVendor::Amd => 50,
+                _ => 0,
+            };
+            let memory_score = g.memory_mb.unwrap_or(0) / 1024; // GB
+            vfio_score + vendor_score + memory_score as u64
+        });
 
         match gpu {
             Some(g) => {

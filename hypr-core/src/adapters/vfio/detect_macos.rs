@@ -64,9 +64,8 @@ fn detect_apple_silicon_gpu() -> Result<Vec<DetectedGpu>> {
 
     // Parse JSON output
     let json_str = String::from_utf8_lossy(&output.stdout);
-    let model = parse_gpu_model(&json_str).unwrap_or_else(|| {
-        get_chip_name().unwrap_or_else(|| "Apple Silicon GPU".to_string())
-    });
+    let model = parse_gpu_model(&json_str)
+        .unwrap_or_else(|| get_chip_name().unwrap_or_else(|| "Apple Silicon GPU".to_string()));
 
     debug!(model = %model, "Detected Apple Silicon GPU");
 
@@ -82,10 +81,7 @@ fn detect_apple_silicon_gpu() -> Result<Vec<DetectedGpu>> {
 /// Get Apple chip name (M1, M2, M3, etc.) via sysctl.
 #[cfg(target_arch = "aarch64")]
 fn get_chip_name() -> Option<String> {
-    let output = Command::new("sysctl")
-        .args(["-n", "machdep.cpu.brand_string"])
-        .output()
-        .ok()?;
+    let output = Command::new("sysctl").args(["-n", "machdep.cpu.brand_string"]).output().ok()?;
 
     if output.status.success() {
         let brand = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -99,10 +95,7 @@ fn get_chip_name() -> Option<String> {
 /// Get unified memory size in MB.
 #[cfg(target_arch = "aarch64")]
 fn get_unified_memory() -> Option<u64> {
-    let output = Command::new("sysctl")
-        .args(["-n", "hw.memsize"])
-        .output()
-        .ok()?;
+    let output = Command::new("sysctl").args(["-n", "hw.memsize"]).output().ok()?;
 
     if output.status.success() {
         let mem_str = String::from_utf8_lossy(&output.stdout).trim().to_string();

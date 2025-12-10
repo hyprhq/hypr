@@ -735,7 +735,8 @@ impl VmmAdapter for CloudHypervisorAdapter {
         if gpu.pci_address.is_none() {
             return Err(HyprError::GpuNotBound {
                 pci_address: "unspecified".to_string(),
-                hint: "Linux GPU passthrough requires a PCI address (e.g., 0000:01:00.0)".to_string(),
+                hint: "Linux GPU passthrough requires a PCI address (e.g., 0000:01:00.0)"
+                    .to_string(),
             });
         }
 

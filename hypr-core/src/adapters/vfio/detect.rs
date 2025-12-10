@@ -42,8 +42,8 @@ pub fn detect_gpus() -> Result<Vec<DetectedGpu>> {
 
     let mut gpus = Vec::new();
 
-    for entry in
-        fs::read_dir(&pci_path).map_err(|e| HyprError::IoError { path: pci_path.clone(), source: e })?
+    for entry in fs::read_dir(&pci_path)
+        .map_err(|e| HyprError::IoError { path: pci_path.clone(), source: e })?
     {
         let entry = entry.map_err(|e| HyprError::Internal(e.to_string()))?;
         let address = entry.file_name().to_string_lossy().to_string();

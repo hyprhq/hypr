@@ -48,9 +48,9 @@
 //! ```
 
 #[cfg(target_os = "linux")]
-mod device;
-#[cfg(target_os = "linux")]
 mod detect;
+#[cfg(target_os = "linux")]
+mod device;
 #[cfg(target_os = "linux")]
 mod iommu;
 #[cfg(target_os = "linux")]

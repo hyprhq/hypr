@@ -50,10 +50,9 @@ impl IommuGroup {
         let mut devices = Vec::new();
 
         if devices_path.exists() {
-            for entry in fs::read_dir(&devices_path).map_err(|e| HyprError::IoError {
-                path: devices_path.clone(),
-                source: e,
-            })? {
+            for entry in fs::read_dir(&devices_path)
+                .map_err(|e| HyprError::IoError { path: devices_path.clone(), source: e })?
+            {
                 let entry = entry.map_err(|e| HyprError::Internal(e.to_string()))?;
                 if let Some(name) = entry.file_name().to_str() {
                     devices.push(name.to_string());
@@ -188,7 +187,9 @@ pub fn list_iommu_groups() -> Result<Vec<IommuGroup>> {
 
     let mut groups = Vec::new();
 
-    for entry in fs::read_dir(&path).map_err(|e| HyprError::IoError { path: path.clone(), source: e })? {
+    for entry in
+        fs::read_dir(&path).map_err(|e| HyprError::IoError { path: path.clone(), source: e })?
+    {
         let entry = entry.map_err(|e| HyprError::Internal(e.to_string()))?;
         if let Some(name) = entry.file_name().to_str() {
             if let Ok(group) = IommuGroup::from_id(name) {

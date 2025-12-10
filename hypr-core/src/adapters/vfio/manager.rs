@@ -114,9 +114,7 @@ impl VfioManager {
                         hint: format!(
                             "Device {} ({}) not in allowlist. \
                              Allowed: {:?}",
-                            addr,
-                            device_id,
-                            options.allowlist
+                            addr, device_id, options.allowlist
                         ),
                     });
                 }

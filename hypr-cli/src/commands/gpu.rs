@@ -28,8 +28,10 @@ pub fn list() -> Result<()> {
 
     #[cfg(target_os = "linux")]
     {
-        println!("{:<15} {:<10} {:<30} {:<12} {:<10} {:<8}",
-            "PCI ADDRESS", "VENDOR", "MODEL", "DRIVER", "IOMMU", "STATUS");
+        println!(
+            "{:<15} {:<10} {:<30} {:<12} {:<10} {:<8}",
+            "PCI ADDRESS", "VENDOR", "MODEL", "DRIVER", "IOMMU", "STATUS"
+        );
         println!("{}", "-".repeat(95));
 
         for gpu in &gpus {
@@ -44,26 +46,36 @@ pub fn list() -> Result<()> {
                 "available"
             };
 
-            println!("{:<15} {:<10} {:<30} {:<12} {:<10} {:<8}",
-                gpu.pci_address, vendor_str, truncate(&gpu.model, 30), driver, iommu, status);
+            println!(
+                "{:<15} {:<10} {:<30} {:<12} {:<10} {:<8}",
+                gpu.pci_address,
+                vendor_str,
+                truncate(&gpu.model, 30),
+                driver,
+                iommu,
+                status
+            );
         }
     }
 
     #[cfg(target_os = "macos")]
     {
-        println!("{:<10} {:<40} {:<15} {:<10}",
-            "VENDOR", "MODEL", "MEMORY", "STATUS");
+        println!("{:<10} {:<40} {:<15} {:<10}", "VENDOR", "MODEL", "MEMORY", "STATUS");
         println!("{}", "-".repeat(80));
 
         for gpu in &gpus {
             let vendor_str = format!("{:?}", gpu.vendor);
-            let memory = gpu.memory_mb
-                .map(|mb| format_memory(mb))
-                .unwrap_or_else(|| "-".to_string());
+            let memory =
+                gpu.memory_mb.map(|mb| format_memory(mb)).unwrap_or_else(|| "-".to_string());
             let status = if gpu.available { "available" } else { "unavailable" };
 
-            println!("{:<10} {:<40} {:<15} {:<10}",
-                vendor_str, truncate(&gpu.model, 40), memory, status);
+            println!(
+                "{:<10} {:<40} {:<15} {:<10}",
+                vendor_str,
+                truncate(&gpu.model, 40),
+                memory,
+                status
+            );
         }
     }
 
@@ -76,7 +88,10 @@ pub fn list() -> Result<()> {
         let boot_vga = gpus.iter().filter(|g| g.is_boot_vga).count();
 
         if boot_vga > 0 {
-            println!("Note: {} GPU(s) marked as boot-vga (cannot unbind without --force)", boot_vga);
+            println!(
+                "Note: {} GPU(s) marked as boot-vga (cannot unbind without --force)",
+                boot_vga
+            );
         }
         if vfio_ready > 0 {
             println!("Note: {} GPU(s) already bound to vfio-pci", vfio_ready);

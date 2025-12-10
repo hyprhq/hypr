@@ -394,9 +394,7 @@ impl HvfAdapter {
     fn check_gpu_support(&self, config: &VmConfig) -> Result<()> {
         if config.gpu.is_some() {
             if self.gpu_capable {
-                info!(
-                    "GPU requested - will be enabled via virtio-gpu + Venus (Metal backend)"
-                );
+                info!("GPU requested - will be enabled via virtio-gpu + Venus (Metal backend)");
             } else {
                 warn!(
                     "GPU requested but {} does not support GPU passthrough.\n\
@@ -411,7 +409,6 @@ impl HvfAdapter {
         }
         Ok(())
     }
-
 }
 
 impl Default for HvfAdapter {
