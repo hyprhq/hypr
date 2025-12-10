@@ -91,6 +91,17 @@ struct conntrack_value {
 	__u64 last_seen;       // Timestamp for connection tracking
 };
 
+// ============================================================================
+// Compile-time Configuration
+// ============================================================================
+//
+// These constants can be overridden at compile time via -D flags:
+//   clang -DCONNTRACK_MAX_ENTRIES=131072 ...
+
+#ifndef CONNTRACK_MAX_ENTRIES
+#define CONNTRACK_MAX_ENTRIES 65536  // Default: ~64K concurrent connections
+#endif
+
 // Conntrack table (LRU evicts oldest entries automatically)
 //
 // IMPORTANT: LRU Eviction Behavior & Risks
@@ -109,18 +120,21 @@ struct conntrack_value {
 //    - Keep entries for connections that have already closed (until LRU eviction)
 //    - Evict entries for connections that are still active
 //
-// 3. **Sizing Considerations**: The 65536 entry limit should be tuned based on expected
-//    concurrent connection count. For high-throughput scenarios, consider:
-//    - Increasing max_entries (costs more memory in kernel space)
-//    - Implementing active expiration based on last_seen timestamp
+// 3. **Sizing Considerations**: The CONNTRACK_MAX_ENTRIES limit should be tuned based on
+//    expected concurrent connection count. For high-throughput scenarios, consider:
+//    - Increasing via -DCONNTRACK_MAX_ENTRIES=N (costs more memory in kernel space)
+//    - Implementing active expiration based on last_seen timestamp (user-space reaper)
 //    - Adding per-CPU maps to reduce contention
 //
 // 4. **Failure Mode**: When an entry is evicted prematurely, return traffic will not
 //    be correctly SNATed on egress, causing asymmetric routing that breaks the connection.
 //
+// Memory usage: ~96 bytes/entry (key=24 + value=24 + LRU overhead ~48)
+// Default 64K entries ≈ 6MB kernel memory
+//
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(max_entries, 65536);
+	__uint(max_entries, CONNTRACK_MAX_ENTRIES);
 	__type(key, struct conntrack_key);
 	__type(value, struct conntrack_value);
 } conntrack SEC(".maps");

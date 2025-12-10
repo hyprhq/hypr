@@ -2,6 +2,75 @@
 //!
 //! Manages cached build layers to speed up subsequent builds.
 //! Each layer is stored as a tarball with metadata, indexed by cache key.
+//!
+//! # Current Implementation
+//!
+//! Layers are stored as complete tarballs with LRU eviction:
+//! - Cache key is SHA256 of build context
+//! - 50GB default size limit
+//! - Oldest layers evicted when limit exceeded
+//!
+//! # Future Enhancement: Content Addressable Storage (CAS)
+//!
+//! A future phase should implement CAS to deduplicate identical files across layers.
+//! This would provide 30-60% space savings for similar images.
+//!
+//! ## Proposed CAS Architecture
+//!
+//! ```text
+//! cache/
+//! ├── blobs/                    # Content-addressed file storage
+//! │   ├── sha256/
+//! │   │   ├── 3a7b8c...        # Deduplicated file content
+//! │   │   └── 9f2e1a...
+//! │   └── metadata.db           # SQLite: blob -> [layers using it]
+//! ├── layers/
+//! │   ├── layer-abc123.manifest # JSON: list of (path, blob_hash, mode, mtime)
+//! │   └── layer-def456.manifest
+//! └── index.json                # Cache key -> layer manifest mapping
+//! ```
+//!
+//! ## Key Components
+//!
+//! ```rust,ignore
+//! struct CasStore {
+//!     blobs_dir: PathBuf,
+//!     db: rusqlite::Connection,  // For reference counting
+//! }
+//!
+//! struct LayerManifest {
+//!     entries: Vec<FileEntry>,   // Files in this layer
+//!     total_size: u64,           // Sum of all file sizes
+//!     created_at: u64,
+//! }
+//!
+//! struct FileEntry {
+//!     path: String,              // File path in layer
+//!     blob_hash: String,         // SHA256 of content (CAS key)
+//!     mode: u32,                 // Unix permissions
+//!     size: u64,
+//!     mtime: u64,
+//! }
+//!
+//! impl CasStore {
+//!     /// Store a file, returning its content hash.
+//!     /// Deduplicates automatically - same content = same hash.
+//!     fn store_blob(&self, data: &[u8]) -> Result<String>;
+//!
+//!     /// Reconstruct a layer tarball from manifest.
+//!     fn materialize_layer(&self, manifest: &LayerManifest) -> Result<PathBuf>;
+//!
+//!     /// Garbage collect unreferenced blobs.
+//!     fn gc(&self) -> Result<usize>;
+//! }
+//! ```
+//!
+//! ## Benefits
+//!
+//! - Identical files across layers stored only once
+//! - Typical 30-60% space savings for similar images
+//! - Faster cache operations (only store new/changed files)
+//! - Enables efficient layer diffing
 
 use serde::{Deserialize, Serialize};
 use std::fs;

@@ -887,78 +887,208 @@ static void run_build_mode(void) {
 // ============================================================================
 // JSON PARSING (minimal implementation for RuntimeManifest)
 // ============================================================================
+//
+// SECURITY: These parsers use a state machine to track JSON structure depth.
+// This prevents injection attacks where keys could be spoofed inside string values.
+// Example attack: {"description": "fake \"ip\": \"malicious\"", "ip": "192.168.1.1"}
+// Without depth tracking, strstr() might find the fake "ip" inside the description.
 
-// Extract a string value from JSON by key (returns malloc'd string or NULL)
-// Only handles simple cases: {"key": "value"} or nested {"key": {"subkey": "value"}}
-static char* json_get_string(const char *json, const char *key) {
-    if (!json || !key) return NULL;
+// JSON parser state for tracking string context
+typedef enum {
+    JSON_STATE_VALUE,      // Outside strings (parsing structure)
+    JSON_STATE_STRING,     // Inside a quoted string
+    JSON_STATE_ESCAPE      // After backslash inside string
+} json_state_t;
 
-    // Build search pattern: "key":
-    char pattern[256];
-    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
-
-    const char *pos = strstr(json, pattern);
-    if (!pos) return NULL;
-
-    // Skip to value
-    pos += strlen(pattern);
-    while (*pos && (*pos == ' ' || *pos == '\t' || *pos == '\n')) pos++;
-
-    if (*pos != '"') return NULL;  // Not a string value
-    pos++;  // Skip opening quote
-
-    // Find closing quote (handle escaped quotes)
-    const char *end = pos;
-    while (*end && *end != '"') {
-        if (*end == '\\' && *(end + 1)) end++;  // Skip escaped char
-        end++;
-    }
-
-    if (!*end) return NULL;
-
-    size_t len = end - pos;
-    char *result = malloc(len + 1);
-    if (!result) return NULL;
-
-    memcpy(result, pos, len);
-    result[len] = '\0';
-    return result;
+// Internal: Skip whitespace
+static const char* json_skip_ws(const char *p) {
+    while (*p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
+    return p;
 }
 
-// Extract array of strings from JSON by key (returns malloc'd array, sets count)
+// Internal: Check if we're at a specific key pattern at current position
+// Returns pointer past the colon if matched, NULL otherwise
+static const char* json_match_key(const char *pos, const char *key) {
+    if (*pos != '"') return NULL;
+    pos++;
+
+    size_t key_len = strlen(key);
+    if (strncmp(pos, key, key_len) != 0) return NULL;
+    pos += key_len;
+
+    if (*pos != '"') return NULL;
+    pos++;
+
+    pos = json_skip_ws(pos);
+    if (*pos != ':') return NULL;
+    pos++;
+
+    return json_skip_ws(pos);
+}
+
+// Extract a string value from JSON by key using depth-aware parsing
+// target_depth: The brace depth at which to search (1 = inside root object)
+// Returns malloc'd string or NULL
+static char* json_get_string_at_depth(const char *json, const char *key, int target_depth) {
+    if (!json || !key) return NULL;
+
+    json_state_t state = JSON_STATE_VALUE;
+    int brace_depth = 0;
+    int bracket_depth = 0;
+
+    const char *pos = json;
+    while (*pos) {
+        switch (state) {
+            case JSON_STATE_VALUE:
+                if (*pos == '"') {
+                    // Check if this starts our target key at the correct depth
+                    if (brace_depth == target_depth) {
+                        const char *value_start = json_match_key(pos, key);
+                        if (value_start && *value_start == '"') {
+                            // Found key at correct depth, extract string value
+                            value_start++;  // Skip opening quote
+
+                            const char *end = value_start;
+                            while (*end && *end != '"') {
+                                if (*end == '\\' && *(end + 1)) end++;
+                                end++;
+                            }
+                            if (!*end) return NULL;
+
+                            size_t len = end - value_start;
+                            char *result = malloc(len + 1);
+                            if (!result) return NULL;
+                            memcpy(result, value_start, len);
+                            result[len] = '\0';
+                            return result;
+                        }
+                    }
+                    // Enter string state (skip this string)
+                    state = JSON_STATE_STRING;
+                } else if (*pos == '{') {
+                    brace_depth++;
+                } else if (*pos == '}') {
+                    brace_depth--;
+                } else if (*pos == '[') {
+                    bracket_depth++;
+                } else if (*pos == ']') {
+                    bracket_depth--;
+                }
+                break;
+
+            case JSON_STATE_STRING:
+                if (*pos == '\\') {
+                    state = JSON_STATE_ESCAPE;
+                } else if (*pos == '"') {
+                    state = JSON_STATE_VALUE;
+                }
+                break;
+
+            case JSON_STATE_ESCAPE:
+                state = JSON_STATE_STRING;
+                break;
+        }
+        pos++;
+    }
+    return NULL;
+}
+
+// Convenience wrapper: search at depth 1 (inside root object)
+// This is the correct depth for: {"key": "value"} where we want "key"
+static char* json_get_string(const char *json, const char *key) {
+    return json_get_string_at_depth(json, key, 1);
+}
+
+// Extract array of strings from JSON by key using depth-aware parsing
+// target_depth: The brace depth at which to search (1 = inside root object)
 // Only handles: "key": ["val1", "val2"]
-static char** json_get_string_array(const char *json, const char *key, int *count) {
+static char** json_get_string_array_at_depth(const char *json, const char *key, int *count, int target_depth) {
     if (!json || !key || !count) return NULL;
     *count = 0;
 
-    char pattern[256];
-    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
+    json_state_t state = JSON_STATE_VALUE;
+    int brace_depth = 0;
+    int bracket_depth = 0;
+    const char *array_start = NULL;
 
-    const char *pos = strstr(json, pattern);
-    if (!pos) return NULL;
+    // First pass: find the array at the correct depth
+    const char *pos = json;
+    while (*pos) {
+        switch (state) {
+            case JSON_STATE_VALUE:
+                if (*pos == '"') {
+                    // Check if this starts our target key at the correct depth
+                    if (brace_depth == target_depth) {
+                        const char *value_start = json_match_key(pos, key);
+                        if (value_start && *value_start == '[') {
+                            array_start = value_start + 1;  // Skip '['
+                            goto found_array;
+                        }
+                    }
+                    // Enter string state (skip this string)
+                    state = JSON_STATE_STRING;
+                } else if (*pos == '{') {
+                    brace_depth++;
+                } else if (*pos == '}') {
+                    brace_depth--;
+                } else if (*pos == '[') {
+                    bracket_depth++;
+                } else if (*pos == ']') {
+                    bracket_depth--;
+                }
+                break;
 
-    pos += strlen(pattern);
-    while (*pos && (*pos == ' ' || *pos == '\t' || *pos == '\n')) pos++;
+            case JSON_STATE_STRING:
+                if (*pos == '\\') {
+                    state = JSON_STATE_ESCAPE;
+                } else if (*pos == '"') {
+                    state = JSON_STATE_VALUE;
+                }
+                break;
 
-    if (*pos != '[') return NULL;  // Not an array
-    pos++;  // Skip [
+            case JSON_STATE_ESCAPE:
+                state = JSON_STATE_STRING;
+                break;
+        }
+        pos++;
+    }
+    return NULL;  // Key not found
 
-    // Count elements first
+found_array:
+    // Second pass: count and extract elements from the array
+    // At this point we're inside the array, so string parsing is safe
+    pos = array_start;
+
+    // Count elements first (simple count of top-level strings in array)
     int n = 0;
     const char *scan = pos;
-    int depth = 0;
-    while (*scan && !(*scan == ']' && depth == 0)) {
-        if (*scan == '"') {
-            n++;
-            scan++;
-            while (*scan && *scan != '"') {
-                if (*scan == '\\' && *(scan + 1)) scan++;
-                scan++;
-            }
+    int arr_depth = 0;
+    state = JSON_STATE_VALUE;
+
+    while (*scan && !(*scan == ']' && arr_depth == 0 && state == JSON_STATE_VALUE)) {
+        switch (state) {
+            case JSON_STATE_VALUE:
+                if (*scan == '"') {
+                    if (arr_depth == 0) n++;  // Count top-level strings
+                    state = JSON_STATE_STRING;
+                } else if (*scan == '[') {
+                    arr_depth++;
+                } else if (*scan == ']') {
+                    arr_depth--;
+                }
+                break;
+            case JSON_STATE_STRING:
+                if (*scan == '\\') {
+                    state = JSON_STATE_ESCAPE;
+                } else if (*scan == '"') {
+                    state = JSON_STATE_VALUE;
+                }
+                break;
+            case JSON_STATE_ESCAPE:
+                state = JSON_STATE_STRING;
+                break;
         }
-        if (*scan == '[') depth++;
-        if (*scan == ']') depth--;
-        if (*scan) scan++;
+        scan++;
     }
 
     if (n == 0) return NULL;
@@ -969,31 +1099,62 @@ static char** json_get_string_array(const char *json, const char *key, int *coun
     // Extract elements
     int i = 0;
     scan = pos;
-    while (*scan && *scan != ']' && i < n) {
-        while (*scan && *scan != '"' && *scan != ']') scan++;
-        if (*scan != '"') break;
-        scan++;  // Skip opening quote
+    arr_depth = 0;
+    state = JSON_STATE_VALUE;
 
-        const char *end = scan;
-        while (*end && *end != '"') {
-            if (*end == '\\' && *(end + 1)) end++;
-            end++;
+    while (*scan && i < n) {
+        switch (state) {
+            case JSON_STATE_VALUE:
+                if (*scan == '"') {
+                    if (arr_depth == 0) {
+                        // Extract this string
+                        scan++;  // Skip opening quote
+                        const char *end = scan;
+                        while (*end && !(*end == '"' && *(end-1) != '\\')) {
+                            if (*end == '\\' && *(end + 1)) end++;
+                            end++;
+                        }
+
+                        size_t len = end - scan;
+                        result[i] = malloc(len + 1);
+                        if (result[i]) {
+                            memcpy(result[i], scan, len);
+                            result[i][len] = '\0';
+                            i++;
+                        }
+                        scan = end;  // Will be incremented at end of loop
+                    }
+                    state = JSON_STATE_STRING;
+                } else if (*scan == '[') {
+                    arr_depth++;
+                } else if (*scan == ']') {
+                    if (arr_depth == 0) goto done_extracting;
+                    arr_depth--;
+                }
+                break;
+            case JSON_STATE_STRING:
+                if (*scan == '\\') {
+                    state = JSON_STATE_ESCAPE;
+                } else if (*scan == '"') {
+                    state = JSON_STATE_VALUE;
+                }
+                break;
+            case JSON_STATE_ESCAPE:
+                state = JSON_STATE_STRING;
+                break;
         }
-
-        size_t len = end - scan;
-        result[i] = malloc(len + 1);
-        if (result[i]) {
-            memcpy(result[i], scan, len);
-            result[i][len] = '\0';
-            i++;
-        }
-
-        scan = end + 1;
+        scan++;
     }
 
+done_extracting:
     result[i] = NULL;
     *count = i;
     return result;
+}
+
+// Convenience wrapper: search at depth 1 (inside root object)
+static char** json_get_string_array(const char *json, const char *key, int *count) {
+    return json_get_string_array_at_depth(json, key, count, 1);
 }
 
 // Free string array
@@ -1005,46 +1166,84 @@ static void free_string_array(char **arr, int count) {
     free(arr);
 }
 
-// Get nested JSON object as string (returns malloc'd string or NULL)
-static char* json_get_object(const char *json, const char *key) {
+// Get nested JSON object as string using depth-aware parsing (returns malloc'd string or NULL)
+// target_depth: The brace depth at which to search (1 = inside root object)
+static char* json_get_object_at_depth(const char *json, const char *key, int target_depth) {
     if (!json || !key) return NULL;
 
-    char pattern[256];
-    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
+    json_state_t state = JSON_STATE_VALUE;
+    int brace_depth = 0;
 
-    const char *pos = strstr(json, pattern);
-    if (!pos) return NULL;
+    const char *pos = json;
+    while (*pos) {
+        switch (state) {
+            case JSON_STATE_VALUE:
+                if (*pos == '"') {
+                    // Check if this starts our target key at the correct depth
+                    if (brace_depth == target_depth) {
+                        const char *value_start = json_match_key(pos, key);
+                        if (value_start && *value_start == '{') {
+                            // Found key at correct depth, extract object
+                            const char *obj_start = value_start;
+                            const char *obj_end = value_start + 1;
+                            int obj_depth = 1;
+                            json_state_t obj_state = JSON_STATE_VALUE;
 
-    pos += strlen(pattern);
-    while (*pos && (*pos == ' ' || *pos == '\t' || *pos == '\n')) pos++;
+                            while (*obj_end && obj_depth > 0) {
+                                switch (obj_state) {
+                                    case JSON_STATE_VALUE:
+                                        if (*obj_end == '{') obj_depth++;
+                                        else if (*obj_end == '}') obj_depth--;
+                                        else if (*obj_end == '"') obj_state = JSON_STATE_STRING;
+                                        break;
+                                    case JSON_STATE_STRING:
+                                        if (*obj_end == '\\') obj_state = JSON_STATE_ESCAPE;
+                                        else if (*obj_end == '"') obj_state = JSON_STATE_VALUE;
+                                        break;
+                                    case JSON_STATE_ESCAPE:
+                                        obj_state = JSON_STATE_STRING;
+                                        break;
+                                }
+                                obj_end++;
+                            }
 
-    if (*pos != '{') return NULL;
+                            size_t len = obj_end - obj_start;
+                            char *result = malloc(len + 1);
+                            if (!result) return NULL;
+                            memcpy(result, obj_start, len);
+                            result[len] = '\0';
+                            return result;
+                        }
+                    }
+                    // Enter string state (skip this string)
+                    state = JSON_STATE_STRING;
+                } else if (*pos == '{') {
+                    brace_depth++;
+                } else if (*pos == '}') {
+                    brace_depth--;
+                }
+                break;
 
-    // Find matching closing brace
-    int depth = 1;
-    const char *start = pos;
-    pos++;
-    while (*pos && depth > 0) {
-        if (*pos == '{') depth++;
-        else if (*pos == '}') depth--;
-        else if (*pos == '"') {
-            // Skip string content
-            pos++;
-            while (*pos && *pos != '"') {
-                if (*pos == '\\' && *(pos + 1)) pos++;
-                pos++;
-            }
+            case JSON_STATE_STRING:
+                if (*pos == '\\') {
+                    state = JSON_STATE_ESCAPE;
+                } else if (*pos == '"') {
+                    state = JSON_STATE_VALUE;
+                }
+                break;
+
+            case JSON_STATE_ESCAPE:
+                state = JSON_STATE_STRING;
+                break;
         }
-        if (*pos) pos++;
+        pos++;
     }
+    return NULL;
+}
 
-    size_t len = pos - start;
-    char *result = malloc(len + 1);
-    if (!result) return NULL;
-
-    memcpy(result, start, len);
-    result[len] = '\0';
-    return result;
+// Convenience wrapper: search at depth 1 (inside root object)
+static char* json_get_object(const char *json, const char *key) {
+    return json_get_object_at_depth(json, key, 1);
 }
 
 // ============================================================================
@@ -1671,16 +1870,23 @@ static void run_runtime_mode(void) {
     // Note: env_vars are used by putenv, don't free them
 
     // Main loop: reap zombies, wait for shutdown
+    // As PID 1, we must reap ALL orphaned processes (not just direct children).
+    // Using a while loop ensures we drain all pending zombies before sleeping,
+    // because SIGCHLD signals are not queued - multiple exits may coalesce.
     for (;;) {
         int status;
-        pid_t pid = waitpid(-1, &status, WNOHANG);
-        if (pid > 0) {
+        pid_t pid;
+
+        // Drain ALL available zombies in one iteration
+        while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
             if (WIFEXITED(status)) {
                 LOG("Process %d exited with code %d", pid, WEXITSTATUS(status));
             } else if (WIFSIGNALED(status)) {
                 LOG("Process %d killed by signal %d", pid, WTERMSIG(status));
             }
         }
+
+        // Sleep only when no more zombies to reap
         sleep(1);
     }
 }

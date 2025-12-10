@@ -35,6 +35,19 @@
 #endif
 
 // ============================================================================
+// Compile-time Configuration
+// ============================================================================
+//
+// These constants can be overridden at compile time via -D flags:
+//   clang -DCONNTRACK_MAX_ENTRIES=131072 ...
+//
+// IMPORTANT: Must match the value used for drift_l4_ingress.c!
+
+#ifndef CONNTRACK_MAX_ENTRIES
+#define CONNTRACK_MAX_ENTRIES 65536  // Default: ~64K concurrent connections
+#endif
+
+// ============================================================================
 // Connection Tracking
 // ============================================================================
 //
@@ -61,9 +74,10 @@ struct conntrack_value {
 };
 
 // Conntrack table (shared with ingress via pinned map)
+// Size must match ingress program for consistent behavior
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(max_entries, 65536);
+	__uint(max_entries, CONNTRACK_MAX_ENTRIES);
 	__type(key, struct conntrack_key);
 	__type(value, struct conntrack_value);
 } conntrack SEC(".maps");

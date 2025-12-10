@@ -94,28 +94,42 @@ impl HvfAdapter {
         Err(HyprError::HypervisorNotFound { hypervisor: "vfkit".to_string() })
     }
 
-    /// Convert a squashfs file to a raw disk image for macOS Virtualization.framework.
+    /// Prepare a disk image for macOS Virtualization.framework.
     ///
-    /// macOS VZ framework doesn't recognize squashfs format, so we create a raw disk image
-    /// that contains the squashfs data. The guest kernel can then mount /dev/vda as squashfs.
+    /// # Optimization Strategy
     ///
-    /// Uses streaming I/O (io::copy) to avoid loading large images into memory.
+    /// 1. **Fast Path (Upstream Alignment)**: If the image is already 4KB-aligned
+    ///    (built by HYPR), use it directly without any conversion.
+    ///
+    /// 2. **Fast Path (Cache Hit)**: If we've already converted this image, use the cached copy.
+    ///
+    /// 3. **Fallback (APFS CoW)**: For unaligned external images, use `fs::copy()` which
+    ///    leverages macOS APFS Copy-on-Write (via `fclonefileat` syscall). This creates
+    ///    an instant clone that shares disk blocks with the original until modified.
+    ///    We then append padding to align to 4KB sectors.
     fn convert_to_raw_disk(squashfs_path: &std::path::Path) -> Result<PathBuf> {
         use std::fs;
-        use std::io::{self, Write};
+        use std::io::Write;
+        use std::os::unix::fs::MetadataExt;
 
-        // Get squashfs file size
+        // Get squashfs file metadata
         let metadata = fs::metadata(squashfs_path)
             .map_err(|e| HyprError::IoError { path: squashfs_path.to_path_buf(), source: e })?;
-        let squashfs_size = metadata.len();
+        let current_size = metadata.len();
 
-        // Calculate padded size (align to 512-byte sectors)
-        let sector_size = 512u64;
-        let padded_size = squashfs_size.div_ceil(sector_size) * sector_size;
+        // Alignment for macOS Virtualization.framework (covers both 512 and 4K sectors)
+        const SECTOR_ALIGN: u64 = 4096;
 
-        // Create output path in cache directory for reuse
+        // FAST PATH 1: Upstream Alignment
+        // If the image was built by HYPR, it's already padded to 4KB. Use it directly.
+        if current_size % SECTOR_ALIGN == 0 {
+            debug!("Image is already 4KB-aligned ({} bytes), using directly", current_size);
+            return Ok(squashfs_path.to_path_buf());
+        }
+
+        // Generate cache key using path + mtime + size (fast, avoids SHA256 of large files)
         let cache_dir = crate::paths::cache_dir();
-        std::fs::create_dir_all(&cache_dir)
+        fs::create_dir_all(&cache_dir)
             .map_err(|e| HyprError::IoError { path: cache_dir.clone(), source: e })?;
 
         let hash = {
@@ -123,54 +137,62 @@ impl HvfAdapter {
             use std::hash::{Hash, Hasher};
             let mut hasher = DefaultHasher::new();
             squashfs_path.hash(&mut hasher);
-            squashfs_size.hash(&mut hasher);
+            metadata.mtime().hash(&mut hasher);
+            current_size.hash(&mut hasher);
             hasher.finish()
         };
         let raw_path = cache_dir.join(format!("rootfs-{:x}.raw", hash));
 
-        // Check if already converted (same size means same content)
+        // Calculate aligned size
+        let padded_size = current_size.div_ceil(SECTOR_ALIGN) * SECTOR_ALIGN;
+
+        // FAST PATH 2: Cache Hit
         if raw_path.exists() {
             if let Ok(raw_meta) = fs::metadata(&raw_path) {
                 if raw_meta.len() == padded_size {
-                    debug!("Using cached raw disk image: {}", raw_path.display());
+                    debug!("Using cached aligned disk image: {}", raw_path.display());
                     return Ok(raw_path);
                 }
             }
         }
 
+        // FALLBACK: APFS Clone & Pad
+        // On macOS, fs::copy() uses fclonefileat() which creates a CoW copy.
+        // This is instant and takes ~0 additional disk space until modified.
         info!(
-            "Converting squashfs to raw disk image: {} -> {} ({} bytes)",
+            "Aligning image for macOS Virtualization.framework (APFS CoW): {} -> {}",
             squashfs_path.display(),
-            raw_path.display(),
-            padded_size
+            raw_path.display()
         );
 
-        // Open source file for streaming read
-        let mut src_file = fs::File::open(squashfs_path)
-            .map_err(|e| HyprError::IoError { path: squashfs_path.to_path_buf(), source: e })?;
-
-        // Create destination file
-        let mut dst_file = fs::File::create(&raw_path)
+        fs::copy(squashfs_path, &raw_path)
             .map_err(|e| HyprError::IoError { path: raw_path.clone(), source: e })?;
 
-        // Stream copy squashfs data (no memory buffering of entire file)
-        io::copy(&mut src_file, &mut dst_file)
-            .map_err(|e| HyprError::IoError { path: raw_path.clone(), source: e })?;
+        // Append padding to reach alignment
+        let padding_needed = (padded_size - current_size) as usize;
+        if padding_needed > 0 {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .append(true)
+                .open(&raw_path)
+                .map_err(|e| HyprError::IoError { path: raw_path.clone(), source: e })?;
 
-        // Pad to sector alignment (at most 511 bytes)
-        let padding_size = (padded_size - squashfs_size) as usize;
-        if padding_size > 0 {
-            let padding = [0u8; 512]; // Stack-allocated, reuse for any padding <= 512
-            dst_file
-                .write_all(&padding[..padding_size])
+            // Write zeros to pad (ensures the block is allocated, not sparse at the end)
+            let zeros = vec![0u8; padding_needed];
+            file.write_all(&zeros)
+                .map_err(|e| HyprError::IoError { path: raw_path.clone(), source: e })?;
+
+            file.sync_all()
                 .map_err(|e| HyprError::IoError { path: raw_path.clone(), source: e })?;
         }
 
-        dst_file
-            .sync_all()
-            .map_err(|e| HyprError::IoError { path: raw_path.clone(), source: e })?;
+        debug!(
+            "Created aligned disk image via APFS clone: {} ({} bytes, padded {} bytes)",
+            raw_path.display(),
+            padded_size,
+            padding_needed
+        );
 
-        info!("Raw disk image created: {}", raw_path.display());
         Ok(raw_path)
     }
 

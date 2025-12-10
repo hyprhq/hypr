@@ -946,8 +946,13 @@ impl BuildExecutor for NativeBuilder {
 #[cfg(target_os = "linux")]
 impl NativeBuilder {
     /// Generates a SquashFS image from the current rootfs.
+    ///
+    /// The output is padded to 4KB alignment for macOS Virtualization.framework compatibility.
+    /// Linux ignores trailing data in squashfs, so this is safe for cross-platform use.
     fn generate_squashfs(&self) -> BuildResult<PathBuf> {
-        use tracing::info;
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use tracing::{debug, info};
 
         let squashfs_path = self.work_dir.join("rootfs.squashfs");
 
@@ -989,7 +994,34 @@ impl NativeBuilder {
             });
         }
 
-        let size_mb = std::fs::metadata(&squashfs_path)?.len() as f64 / (1024.0 * 1024.0);
+        // Align file size to 4KB boundary for macOS Virtualization.framework compatibility.
+        // 4KB covers both 512-byte and 4096-byte sector sizes.
+        // Linux squashfs ignores trailing data, so this is safe for both platforms.
+        const ALIGNMENT: u64 = 4096;
+        let metadata = std::fs::metadata(&squashfs_path)?;
+        let current_size = metadata.len();
+        let remainder = current_size % ALIGNMENT;
+
+        if remainder != 0 {
+            let padding_needed = ALIGNMENT - remainder;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .append(true)
+                .open(&squashfs_path)?;
+
+            let zeros = vec![0u8; padding_needed as usize];
+            file.write_all(&zeros)?;
+
+            debug!(
+                original_size = current_size,
+                padding = padding_needed,
+                final_size = current_size + padding_needed,
+                "Aligned squashfs image to 4KB boundary"
+            );
+        }
+
+        let final_size = std::fs::metadata(&squashfs_path)?.len();
+        let size_mb = final_size as f64 / (1024.0 * 1024.0);
         info!(
             path = %squashfs_path.display(),
             size_mb = format!("{:.2}", size_mb),
