@@ -312,20 +312,21 @@ impl VmBuilder {
             // For libkrun, we don't have a child process to return
             // Create a dummy child that represents the in-process VM
             // The actual VM lifecycle is managed by the adapter
-            let dummy_child = tokio::process::Command::new("sleep")
-                .arg("infinity")
-                .spawn()
-                .map_err(|e| {
+            let dummy_child =
+                tokio::process::Command::new("sleep").arg("infinity").spawn().map_err(|e| {
                     error!("Failed to create placeholder process: {}", e);
-                    HyprError::BuildFailed { reason: format!("Failed to create placeholder: {}", e) }
+                    HyprError::BuildFailed {
+                        reason: format!("Failed to create placeholder: {}", e),
+                    }
                 })?;
 
             Ok((handle, dummy_child))
         } else {
             // External process (cloud-hypervisor)
-            let log_file = std::fs::File::create(&log_path).map_err(|e| HyprError::BuildFailed {
-                reason: format!("Failed to create log file at {}: {}", log_path.display(), e),
-            })?;
+            let log_file =
+                std::fs::File::create(&log_path).map_err(|e| HyprError::BuildFailed {
+                    reason: format!("Failed to create log file at {}: {}", log_path.display(), e),
+                })?;
 
             // Spawn VM process with stdout/stderr redirected to log file
             info!("Spawning builder VM: {} {:?}", cmd_spec.program, cmd_spec.args);

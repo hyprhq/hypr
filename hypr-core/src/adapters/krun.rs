@@ -88,12 +88,7 @@ impl LibkrunAdapter {
             "libkrun adapter initialized"
         );
 
-        Ok(Self {
-            libkrun,
-            kernel_path,
-            contexts: Mutex::new(HashMap::new()),
-            gpu_available,
-        })
+        Ok(Self { libkrun, kernel_path, contexts: Mutex::new(HashMap::new()), gpu_available })
     }
 
     /// Write embedded initramfs to a temporary file and return its path.
@@ -282,24 +277,18 @@ impl VmmAdapter for LibkrunAdapter {
         // Store context
         {
             let mut contexts = self.contexts.lock().await;
-            contexts.insert(config.id.clone(), VmContext {
-                ctx_id,
-                shutdown_eventfd,
-            });
+            contexts.insert(config.id.clone(), VmContext { ctx_id, shutdown_eventfd });
         }
 
         // Record metrics
-        let histogram = metrics::histogram!("hypr_vm_boot_duration_seconds", "adapter" => "libkrun");
+        let histogram =
+            metrics::histogram!("hypr_vm_boot_duration_seconds", "adapter" => "libkrun");
         histogram.record(start.elapsed().as_secs_f64());
 
         let counter = metrics::counter!("hypr_vm_created_total", "adapter" => "libkrun");
         counter.increment(1);
 
-        info!(
-            ctx_id,
-            duration_ms = start.elapsed().as_millis(),
-            "VM created successfully"
-        );
+        info!(ctx_id, duration_ms = start.elapsed().as_millis(), "VM created successfully");
 
         Ok(VmHandle {
             id: config.id.clone(),
@@ -312,7 +301,8 @@ impl VmmAdapter for LibkrunAdapter {
     async fn start(&self, handle: &VmHandle) -> Result<()> {
         let ctx_id = {
             let contexts = self.contexts.lock().await;
-            contexts.get(&handle.id)
+            contexts
+                .get(&handle.id)
                 .map(|c| c.ctx_id)
                 .ok_or_else(|| HyprError::VmNotFound { vm_id: handle.id.clone() })?
         };
@@ -441,7 +431,8 @@ impl VmmAdapter for LibkrunAdapter {
 
         let ctx_id = {
             let contexts = self.contexts.lock().await;
-            contexts.get(&handle.id)
+            contexts
+                .get(&handle.id)
                 .map(|c| c.ctx_id)
                 .ok_or_else(|| HyprError::VmNotFound { vm_id: handle.id.clone() })?
         };
@@ -470,7 +461,10 @@ impl VmmAdapter for LibkrunAdapter {
             metadata: HashMap::from([
                 ("adapter".to_string(), "libkrun".to_string()),
                 ("backend".to_string(), "libkrun-efi".to_string()),
-                ("gpu_backend".to_string(), if self.gpu_available { "metal" } else { "none" }.to_string()),
+                (
+                    "gpu_backend".to_string(),
+                    if self.gpu_available { "metal" } else { "none" }.to_string(),
+                ),
             ]),
         }
     }

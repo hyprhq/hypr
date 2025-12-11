@@ -5,7 +5,7 @@
 
 use crate::error::{HyprError, Result};
 use libloading::{Library, Symbol};
-use std::ffi::{CString, c_char, c_int, c_uint};
+use std::ffi::{c_char, c_int, c_uint, CString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -42,7 +42,8 @@ pub enum GpuFlags {
 type KrunSetLogLevel = unsafe extern "C" fn(level: c_uint) -> c_int;
 type KrunCreateCtx = unsafe extern "C" fn() -> c_int;
 type KrunFreeCtx = unsafe extern "C" fn(ctx_id: c_uint) -> c_int;
-type KrunSetVmConfig = unsafe extern "C" fn(ctx_id: c_uint, num_vcpus: u8, ram_mib: c_uint) -> c_int;
+type KrunSetVmConfig =
+    unsafe extern "C" fn(ctx_id: c_uint, num_vcpus: u8, ram_mib: c_uint) -> c_int;
 type KrunSetKernel = unsafe extern "C" fn(
     ctx_id: c_uint,
     kernel_path: *const c_char,
@@ -57,16 +58,10 @@ type KrunAddDisk = unsafe extern "C" fn(
     disk_path: *const c_char,
     read_only: bool,
 ) -> c_int;
-type KrunAddVirtiofs = unsafe extern "C" fn(
-    ctx_id: c_uint,
-    tag: *const c_char,
-    path: *const c_char,
-) -> c_int;
-type KrunAddVsockPort = unsafe extern "C" fn(
-    ctx_id: c_uint,
-    port: c_uint,
-    filepath: *const c_char,
-) -> c_int;
+type KrunAddVirtiofs =
+    unsafe extern "C" fn(ctx_id: c_uint, tag: *const c_char, path: *const c_char) -> c_int;
+type KrunAddVsockPort =
+    unsafe extern "C" fn(ctx_id: c_uint, port: c_uint, filepath: *const c_char) -> c_int;
 type KrunAddVsockPort2 = unsafe extern "C" fn(
     ctx_id: c_uint,
     port: c_uint,
@@ -80,7 +75,8 @@ type KrunStartEnter = unsafe extern "C" fn(ctx_id: c_uint) -> c_int;
 type KrunSetNestedVirt = unsafe extern "C" fn(ctx_id: c_uint, enabled: bool) -> c_int;
 type KrunSetNetMac = unsafe extern "C" fn(ctx_id: c_uint, mac: *const u8) -> c_int;
 type KrunSetPasstFd = unsafe extern "C" fn(ctx_id: c_uint, fd: c_int) -> c_int;
-type KrunSetSmbiosOemStrings = unsafe extern "C" fn(ctx_id: c_uint, oem_strings: *const *const c_char) -> c_int;
+type KrunSetSmbiosOemStrings =
+    unsafe extern "C" fn(ctx_id: c_uint, oem_strings: *const *const c_char) -> c_int;
 
 /// Safe wrapper around libkrun-efi.
 ///
@@ -120,7 +116,11 @@ impl Libkrun {
         // Safety: We're loading a known library with a stable C ABI
         let library = unsafe {
             Library::new(&library_path).map_err(|e| HyprError::HypervisorNotFound {
-                hypervisor: format!("libkrun-efi: failed to load {}: {}", library_path.display(), e),
+                hypervisor: format!(
+                    "libkrun-efi: failed to load {}: {}",
+                    library_path.display(),
+                    e
+                ),
             })?
         };
 
@@ -130,41 +130,59 @@ impl Libkrun {
         // Load all function pointers
         // Safety: These are documented C functions with stable ABI
         unsafe {
-            let set_log_level: Symbol<KrunSetLogLevel> = lib_clone.get(b"krun_set_log_level\0")
+            let set_log_level: Symbol<KrunSetLogLevel> = lib_clone
+                .get(b"krun_set_log_level\0")
                 .map_err(|e| Self::symbol_error("krun_set_log_level", e))?;
-            let create_ctx: Symbol<KrunCreateCtx> = lib_clone.get(b"krun_create_ctx\0")
+            let create_ctx: Symbol<KrunCreateCtx> = lib_clone
+                .get(b"krun_create_ctx\0")
                 .map_err(|e| Self::symbol_error("krun_create_ctx", e))?;
-            let free_ctx: Symbol<KrunFreeCtx> = lib_clone.get(b"krun_free_ctx\0")
+            let free_ctx: Symbol<KrunFreeCtx> = lib_clone
+                .get(b"krun_free_ctx\0")
                 .map_err(|e| Self::symbol_error("krun_free_ctx", e))?;
-            let set_vm_config: Symbol<KrunSetVmConfig> = lib_clone.get(b"krun_set_vm_config\0")
+            let set_vm_config: Symbol<KrunSetVmConfig> = lib_clone
+                .get(b"krun_set_vm_config\0")
                 .map_err(|e| Self::symbol_error("krun_set_vm_config", e))?;
-            let set_kernel: Symbol<KrunSetKernel> = lib_clone.get(b"krun_set_kernel\0")
+            let set_kernel: Symbol<KrunSetKernel> = lib_clone
+                .get(b"krun_set_kernel\0")
                 .map_err(|e| Self::symbol_error("krun_set_kernel", e))?;
-            let set_root_disk: Symbol<KrunSetRootDisk> = lib_clone.get(b"krun_set_root_disk\0")
+            let set_root_disk: Symbol<KrunSetRootDisk> = lib_clone
+                .get(b"krun_set_root_disk\0")
                 .map_err(|e| Self::symbol_error("krun_set_root_disk", e))?;
-            let add_disk: Symbol<KrunAddDisk> = lib_clone.get(b"krun_add_disk\0")
+            let add_disk: Symbol<KrunAddDisk> = lib_clone
+                .get(b"krun_add_disk\0")
                 .map_err(|e| Self::symbol_error("krun_add_disk", e))?;
-            let add_virtiofs: Symbol<KrunAddVirtiofs> = lib_clone.get(b"krun_add_virtiofs\0")
+            let add_virtiofs: Symbol<KrunAddVirtiofs> = lib_clone
+                .get(b"krun_add_virtiofs\0")
                 .map_err(|e| Self::symbol_error("krun_add_virtiofs", e))?;
-            let add_vsock_port: Symbol<KrunAddVsockPort> = lib_clone.get(b"krun_add_vsock_port\0")
+            let add_vsock_port: Symbol<KrunAddVsockPort> = lib_clone
+                .get(b"krun_add_vsock_port\0")
                 .map_err(|e| Self::symbol_error("krun_add_vsock_port", e))?;
-            let add_vsock_port2: Symbol<KrunAddVsockPort2> = lib_clone.get(b"krun_add_vsock_port2\0")
+            let add_vsock_port2: Symbol<KrunAddVsockPort2> = lib_clone
+                .get(b"krun_add_vsock_port2\0")
                 .map_err(|e| Self::symbol_error("krun_add_vsock_port2", e))?;
-            let set_gpu_options: Symbol<KrunSetGpuOptions> = lib_clone.get(b"krun_set_gpu_options\0")
+            let set_gpu_options: Symbol<KrunSetGpuOptions> = lib_clone
+                .get(b"krun_set_gpu_options\0")
                 .map_err(|e| Self::symbol_error("krun_set_gpu_options", e))?;
-            let set_console_output: Symbol<KrunSetConsoleOutput> = lib_clone.get(b"krun_set_console_output\0")
+            let set_console_output: Symbol<KrunSetConsoleOutput> = lib_clone
+                .get(b"krun_set_console_output\0")
                 .map_err(|e| Self::symbol_error("krun_set_console_output", e))?;
-            let get_shutdown_eventfd: Symbol<KrunGetShutdownEventfd> = lib_clone.get(b"krun_get_shutdown_eventfd\0")
+            let get_shutdown_eventfd: Symbol<KrunGetShutdownEventfd> = lib_clone
+                .get(b"krun_get_shutdown_eventfd\0")
                 .map_err(|e| Self::symbol_error("krun_get_shutdown_eventfd", e))?;
-            let start_enter: Symbol<KrunStartEnter> = lib_clone.get(b"krun_start_enter\0")
+            let start_enter: Symbol<KrunStartEnter> = lib_clone
+                .get(b"krun_start_enter\0")
                 .map_err(|e| Self::symbol_error("krun_start_enter", e))?;
-            let set_nested_virt: Symbol<KrunSetNestedVirt> = lib_clone.get(b"krun_set_nested_virt\0")
+            let set_nested_virt: Symbol<KrunSetNestedVirt> = lib_clone
+                .get(b"krun_set_nested_virt\0")
                 .map_err(|e| Self::symbol_error("krun_set_nested_virt", e))?;
-            let set_net_mac: Symbol<KrunSetNetMac> = lib_clone.get(b"krun_set_net_mac\0")
+            let set_net_mac: Symbol<KrunSetNetMac> = lib_clone
+                .get(b"krun_set_net_mac\0")
                 .map_err(|e| Self::symbol_error("krun_set_net_mac", e))?;
-            let set_passt_fd: Symbol<KrunSetPasstFd> = lib_clone.get(b"krun_set_passt_fd\0")
+            let set_passt_fd: Symbol<KrunSetPasstFd> = lib_clone
+                .get(b"krun_set_passt_fd\0")
                 .map_err(|e| Self::symbol_error("krun_set_passt_fd", e))?;
-            let set_smbios_oem_strings: Symbol<KrunSetSmbiosOemStrings> = lib_clone.get(b"krun_set_smbios_oem_strings\0")
+            let set_smbios_oem_strings: Symbol<KrunSetSmbiosOemStrings> = lib_clone
+                .get(b"krun_set_smbios_oem_strings\0")
                 .map_err(|e| Self::symbol_error("krun_set_smbios_oem_strings", e))?;
 
             // Store original library to keep it alive, use cloned refs for symbols
@@ -212,7 +230,8 @@ impl Libkrun {
         }
 
         Err(HyprError::HypervisorNotFound {
-            hypervisor: "libkrun-efi (install: brew tap slp/krunkit && brew install libkrun-efi)".to_string(),
+            hypervisor: "libkrun-efi (install: brew tap slp/krunkit && brew install libkrun-efi)"
+                .to_string(),
         })
     }
 
@@ -314,7 +333,13 @@ impl Libkrun {
     }
 
     /// Add additional disk.
-    pub fn add_disk(&self, ctx_id: u32, block_id: &str, disk_path: &Path, read_only: bool) -> Result<()> {
+    pub fn add_disk(
+        &self,
+        ctx_id: u32,
+        block_id: &str,
+        disk_path: &Path,
+        read_only: bool,
+    ) -> Result<()> {
         let block_id_cstr = CString::new(block_id).map_err(|_| HyprError::InvalidConfig {
             reason: "Block ID contains null byte".to_string(),
         })?;
@@ -350,7 +375,13 @@ impl Libkrun {
     }
 
     /// Add vsock port with listen option.
-    pub fn add_vsock_port2(&self, ctx_id: u32, port: u32, socket_path: &Path, listen: bool) -> Result<()> {
+    pub fn add_vsock_port2(
+        &self,
+        ctx_id: u32,
+        port: u32,
+        socket_path: &Path,
+        listen: bool,
+    ) -> Result<()> {
         let path_cstr = Self::path_to_cstring(socket_path)?;
         debug!(ctx_id, port, path = %socket_path.display(), listen, "Adding vsock port");
         let ret = unsafe { (self.add_vsock_port2)(ctx_id, port, path_cstr.as_ptr(), listen) };
@@ -417,9 +448,11 @@ impl Libkrun {
     pub fn set_smbios_oem_strings(&self, ctx_id: u32, strings: &[&str]) -> Result<()> {
         let cstrings: Vec<CString> = strings
             .iter()
-            .map(|s| CString::new(*s).map_err(|_| HyprError::InvalidConfig {
-                reason: "OEM string contains null byte".to_string(),
-            }))
+            .map(|s| {
+                CString::new(*s).map_err(|_| HyprError::InvalidConfig {
+                    reason: "OEM string contains null byte".to_string(),
+                })
+            })
             .collect::<Result<Vec<_>>>()?;
 
         let ptrs: Vec<*const c_char> = cstrings.iter().map(|c| c.as_ptr()).collect();
