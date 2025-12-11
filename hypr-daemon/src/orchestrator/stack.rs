@@ -6,6 +6,8 @@
 
 use hypr_core::adapters::VmmAdapter;
 use hypr_core::compose::{ComposeConverter, ComposeParser};
+use hypr_core::registry::ImagePuller;
+use hypr_core::types::vm::{DiskConfig, DiskFormat};
 use hypr_core::{
     HyprError, Result, ServiceConfig, StackConfig, StateManager, Vm, VmHandle, VmStatus,
 };
@@ -210,40 +212,79 @@ impl StackOrchestrator {
                 vm_config.network.ip_address = Some(ipv4);
             }
 
+            // Get image reference from service config
+            let image_ref = if !service.image.is_empty() {
+                service.image.clone()
+            } else {
+                // Fallback: try to extract from disk path
+                vm_config
+                    .disks
+                    .first()
+                    .and_then(|d| d.path.parent())
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.replace('_', ":"))
+                    .unwrap_or_else(|| "unknown:latest".to_string())
+            };
+
+            // Parse name and tag
+            let (image_name, image_tag) = if let Some(pos) = image_ref.rfind(':') {
+                (&image_ref[..pos], &image_ref[pos + 1..])
+            } else {
+                (image_ref.as_str(), "latest")
+            };
+
+            // Ensure image is pulled (auto-pull from registry if not found locally)
+            let image = match self.state.get_image_by_name_tag(image_name, image_tag).await {
+                Ok(img) => {
+                    info!(service = %service.name, image = %image_ref, "Image found locally");
+                    img
+                }
+                Err(_) => {
+                    // Image not found locally - pull from registry
+                    info!(service = %service.name, image = %image_ref, "Pulling image from registry...");
+
+                    let mut puller = ImagePuller::new().map_err(|e| {
+                        HyprError::Internal(format!("Failed to create image puller: {}", e))
+                    })?;
+
+                    let image = puller.pull(&image_ref).await.map_err(|e| {
+                        HyprError::Internal(format!(
+                            "Failed to pull image {} for service {}: {}",
+                            image_ref, service.name, e
+                        ))
+                    })?;
+
+                    // Store in database
+                    self.state.insert_image(&image).await?;
+                    info!(service = %service.name, image = %image_ref, "Image pulled successfully");
+                    image
+                }
+            };
+
+            // Update disk path to use actual pulled image rootfs
+            if !vm_config.disks.is_empty() {
+                vm_config.disks[0] = DiskConfig {
+                    path: image.rootfs_path.clone(),
+                    readonly: true,
+                    format: DiskFormat::Squashfs,
+                };
+            }
+
             // Build RuntimeManifest for runtime mode
             // Get entrypoint from service config or from image manifest
             let (entrypoint, workdir, image_env) = if !service.entrypoint.is_empty() {
                 // Use explicit entrypoint from compose
                 (service.entrypoint.clone(), service.workdir.clone(), HashMap::new())
             } else {
-                // Try to get entrypoint from image manifest
-                // Parse image name from the first disk (rootfs)
-                let image_name = if let Some(disk) = vm_config.disks.first() {
-                    // Extract image name from path like /path/to/images/nginx/rootfs.squashfs
-                    disk.path
-                        .parent()
-                        .and_then(|p| p.file_name())
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("unknown")
-                        .to_string()
-                } else {
-                    "unknown".to_string()
-                };
-
-                // Try to load image from state
-                if let Ok(image) = self.state.get_image_by_name_tag(&image_name, "latest").await {
-                    let mut ep = image.manifest.entrypoint.clone();
-                    if ep.is_empty() {
-                        ep = image.manifest.cmd.clone();
-                    } else if !image.manifest.cmd.is_empty() {
-                        ep.extend(image.manifest.cmd.clone());
-                    }
-                    (ep, image.manifest.workdir.clone(), image.manifest.env.clone())
-                } else {
-                    // Fallback: no entrypoint found
-                    warn!(service = %service.name, "No entrypoint found for service, VM will idle");
-                    (vec![], String::new(), HashMap::new())
+                // Use entrypoint from pulled image
+                let mut ep = image.manifest.entrypoint.clone();
+                if ep.is_empty() {
+                    ep = image.manifest.cmd.clone();
+                } else if !image.manifest.cmd.is_empty() {
+                    ep.extend(image.manifest.cmd.clone());
                 }
+                (ep, image.manifest.workdir.clone(), image.manifest.env.clone())
             };
 
             if !entrypoint.is_empty() {
@@ -609,6 +650,7 @@ mod tests {
     fn create_test_service(name: &str, depends_on: Vec<String>) -> ServiceConfig {
         ServiceConfig {
             name: name.to_string(),
+            image: format!("{}:latest", name),
             vm_config: VmConfig {
                 network_enabled: true,
                 id: format!("{}_vm", name),

@@ -146,8 +146,14 @@ services:
 "#;
     let compose = ComposeParser::parse(yaml).unwrap();
     let service = &compose.services["app"];
-    assert_eq!(service.command.as_ref().map(|c| c.to_vec()), Some(vec!["python".to_string(), "app.py".to_string()]));
-    assert_eq!(service.entrypoint.as_ref().map(|c| c.to_vec()), Some(vec!["/bin/sh".to_string(), "-c".to_string()]));
+    assert_eq!(
+        service.command.as_ref().map(|c| c.to_vec()),
+        Some(vec!["python".to_string(), "app.py".to_string()])
+    );
+    assert_eq!(
+        service.entrypoint.as_ref().map(|c| c.to_vec()),
+        Some(vec!["/bin/sh".to_string(), "-c".to_string()])
+    );
 }
 
 #[test]

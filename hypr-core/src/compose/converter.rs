@@ -485,8 +485,20 @@ impl ComposeConverter {
 
             let workdir = service.working_dir.clone().unwrap_or_default();
 
+            // Determine image reference - use service.image if set, otherwise unknown
+            let image_ref = if !service.image.is_empty() {
+                if service.image.contains(':') {
+                    service.image.clone()
+                } else {
+                    format!("{}:latest", service.image)
+                }
+            } else {
+                String::new() // Will be set from build output if applicable
+            };
+
             let config = ServiceConfig {
                 name: name.clone(),
+                image: image_ref,
                 vm_config,
                 depends_on: service.depends_on.to_list(),
                 healthcheck: None, // Health check parsing will be added when Phase 2 health checks are implemented
@@ -969,6 +981,7 @@ mod tests {
         let services = vec![
             ServiceConfig {
                 name: "web".to_string(),
+                image: "nginx:latest".to_string(),
                 vm_config: VmConfig {
                     network_enabled: true,
                     id: "web".to_string(),
@@ -992,6 +1005,7 @@ mod tests {
             },
             ServiceConfig {
                 name: "db".to_string(),
+                image: "postgres:latest".to_string(),
                 vm_config: VmConfig {
                     network_enabled: true,
                     id: "db".to_string(),
@@ -1026,6 +1040,7 @@ mod tests {
         let services = vec![
             ServiceConfig {
                 name: "a".to_string(),
+                image: "a:latest".to_string(),
                 vm_config: VmConfig {
                     network_enabled: true,
                     id: "a".to_string(),
@@ -1049,6 +1064,7 @@ mod tests {
             },
             ServiceConfig {
                 name: "b".to_string(),
+                image: "b:latest".to_string(),
                 vm_config: VmConfig {
                     network_enabled: true,
                     id: "b".to_string(),
@@ -1081,6 +1097,7 @@ mod tests {
     fn test_missing_dependency_detection() {
         let services = vec![ServiceConfig {
             name: "web".to_string(),
+            image: "nginx:latest".to_string(),
             vm_config: VmConfig {
                 network_enabled: true,
                 id: "web".to_string(),

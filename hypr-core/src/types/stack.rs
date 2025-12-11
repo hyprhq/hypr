@@ -59,6 +59,10 @@ pub struct ServiceConfig {
     /// Service name
     pub name: String,
 
+    /// Image reference (e.g., "nginx:latest", "ghcr.io/org/repo:tag")
+    #[serde(default)]
+    pub image: String,
+
     /// VM configuration for this service
     pub vm_config: VmConfig,
 
