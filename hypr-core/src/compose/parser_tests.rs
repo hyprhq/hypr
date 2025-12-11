@@ -87,7 +87,7 @@ services:
     image: postgres
 "#;
     let compose = ComposeParser::parse(yaml).unwrap();
-    assert_eq!(compose.services["web"].depends_on, vec!["db"]);
+    assert_eq!(compose.services["web"].depends_on.to_list(), vec!["db"]);
 }
 
 #[test]
@@ -129,8 +129,8 @@ networks:
   backend:
 "#;
     let compose = ComposeParser::parse(yaml).unwrap();
-    assert_eq!(compose.services["web"].networks, vec!["frontend"]);
-    assert_eq!(compose.services["db"].networks, vec!["backend"]);
+    assert_eq!(compose.services["web"].networks.to_list(), vec!["frontend"]);
+    assert_eq!(compose.services["db"].networks.to_list(), vec!["backend"]);
     assert!(compose.networks.contains_key("frontend"));
     assert!(compose.networks.contains_key("backend"));
 }
@@ -146,8 +146,8 @@ services:
 "#;
     let compose = ComposeParser::parse(yaml).unwrap();
     let service = &compose.services["app"];
-    assert_eq!(service.command, Some(vec!["python".to_string(), "app.py".to_string()]));
-    assert_eq!(service.entrypoint, Some(vec!["/bin/sh".to_string(), "-c".to_string()]));
+    assert_eq!(service.command.as_ref().map(|c| c.to_vec()), Some(vec!["python".to_string(), "app.py".to_string()]));
+    assert_eq!(service.entrypoint.as_ref().map(|c| c.to_vec()), Some(vec!["/bin/sh".to_string(), "-c".to_string()]));
 }
 
 #[test]
@@ -209,7 +209,7 @@ volumes:
     assert_eq!(compose.services.len(), 2);
     assert!(compose.services.contains_key("web"));
     assert!(compose.services.contains_key("db"));
-    assert_eq!(compose.services["web"].depends_on, vec!["db"]);
+    assert_eq!(compose.services["web"].depends_on.to_list(), vec!["db"]);
 }
 
 #[test]
