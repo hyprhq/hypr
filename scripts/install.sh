@@ -118,8 +118,6 @@ install_linux_deps() {
     fmt_success "Dependencies checked"
 }
 
-}
-
 setup_systemd() {
     fmt_header "System Integration (systemd)"
     
