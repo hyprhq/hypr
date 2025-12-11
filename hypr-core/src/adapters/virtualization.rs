@@ -20,8 +20,7 @@ use objc2::{msg_send, AllocAnyThread};
 use objc2_foundation::{NSArray, NSError, NSString, NSURL};
 use objc2_virtualization::{
     VZDiskImageStorageDeviceAttachment, VZLinuxBootLoader, VZNATNetworkDeviceAttachment,
-    VZSharedDirectory, VZSingleDirectoryShare,
-    VZVirtioBlockDeviceConfiguration,
+    VZSharedDirectory, VZSingleDirectoryShare, VZVirtioBlockDeviceConfiguration,
     VZVirtioEntropyDeviceConfiguration, VZVirtioFileSystemDeviceConfiguration,
     VZVirtioGraphicsDeviceConfiguration, VZVirtioGraphicsScanoutConfiguration,
     VZVirtioNetworkDeviceConfiguration, VZVirtioSocketDeviceConfiguration,
@@ -182,10 +181,8 @@ impl VirtualizationAdapter {
             let initramfs_url = Self::path_to_nsurl(&initramfs_path)?;
             let cmdline_ns = NSString::from_str(&cmdline);
 
-            let boot_loader = VZLinuxBootLoader::initWithKernelURL(
-                VZLinuxBootLoader::alloc(),
-                &kernel_url,
-            );
+            let boot_loader =
+                VZLinuxBootLoader::initWithKernelURL(VZLinuxBootLoader::alloc(), &kernel_url);
             boot_loader.setInitialRamdiskURL(Some(&initramfs_url));
             boot_loader.setCommandLine(&cmdline_ns);
 
@@ -212,8 +209,9 @@ impl VirtualizationAdapter {
             if !storage_devices.is_empty() {
                 let storage_array = NSArray::from_retained_slice(&storage_devices);
                 // Cast through transmute since VZVirtioBlockDeviceConfiguration conforms to VZStorageDeviceConfiguration
-                let storage_array_cast: &NSArray<objc2_virtualization::VZStorageDeviceConfiguration> =
-                    std::mem::transmute(&*storage_array);
+                let storage_array_cast: &NSArray<
+                    objc2_virtualization::VZStorageDeviceConfiguration,
+                > = std::mem::transmute(&*storage_array);
                 vm_config.setStorageDevices(storage_array_cast);
             }
 
@@ -221,8 +219,9 @@ impl VirtualizationAdapter {
             if config.network_enabled {
                 let network_config = self.configure_network()?;
                 let network_array = NSArray::from_retained_slice(&[network_config]);
-                let network_array_cast: &NSArray<objc2_virtualization::VZNetworkDeviceConfiguration> =
-                    std::mem::transmute(&*network_array);
+                let network_array_cast: &NSArray<
+                    objc2_virtualization::VZNetworkDeviceConfiguration,
+                > = std::mem::transmute(&*network_array);
                 vm_config.setNetworkDevices(network_array_cast);
             }
 
@@ -249,8 +248,9 @@ impl VirtualizationAdapter {
 
             if !fs_devices.is_empty() {
                 let fs_array = NSArray::from_retained_slice(&fs_devices);
-                let fs_array_cast: &NSArray<objc2_virtualization::VZDirectorySharingDeviceConfiguration> =
-                    std::mem::transmute(&*fs_array);
+                let fs_array_cast: &NSArray<
+                    objc2_virtualization::VZDirectorySharingDeviceConfiguration,
+                > = std::mem::transmute(&*fs_array);
                 vm_config.setDirectorySharingDevices(fs_array_cast);
             }
 
@@ -272,8 +272,9 @@ impl VirtualizationAdapter {
             if config.resources.balloon_enabled {
                 let balloon_config = VZVirtioTraditionalMemoryBalloonDeviceConfiguration::new();
                 let balloon_array = NSArray::from_retained_slice(&[balloon_config]);
-                let balloon_array_cast: &NSArray<objc2_virtualization::VZMemoryBalloonDeviceConfiguration> =
-                    std::mem::transmute(&*balloon_array);
+                let balloon_array_cast: &NSArray<
+                    objc2_virtualization::VZMemoryBalloonDeviceConfiguration,
+                > = std::mem::transmute(&*balloon_array);
                 vm_config.setMemoryBalloonDevices(balloon_array_cast);
             }
 
@@ -281,8 +282,9 @@ impl VirtualizationAdapter {
             if config.gpu.is_some() && self.gpu_available {
                 let graphics_config = self.configure_graphics()?;
                 let graphics_array = NSArray::from_retained_slice(&[graphics_config]);
-                let graphics_array_cast: &NSArray<objc2_virtualization::VZGraphicsDeviceConfiguration> =
-                    std::mem::transmute(&*graphics_array);
+                let graphics_array_cast: &NSArray<
+                    objc2_virtualization::VZGraphicsDeviceConfiguration,
+                > = std::mem::transmute(&*graphics_array);
                 vm_config.setGraphicsDevices(graphics_array_cast);
                 info!("GPU enabled via virtio-gpu");
             }
@@ -315,11 +317,9 @@ impl VirtualizationAdapter {
                 disk.readonly,
             );
 
-            let attachment = attachment.map_err(|e| {
-                HyprError::VmStartFailed {
-                    vm_id: "disk".to_string(),
-                    reason: format!("Failed to attach disk {}: {}", disk.path.display(), e),
-                }
+            let attachment = attachment.map_err(|e| HyprError::VmStartFailed {
+                vm_id: "disk".to_string(),
+                reason: format!("Failed to attach disk {}: {}", disk.path.display(), e),
             })?;
 
             let block_config = VZVirtioBlockDeviceConfiguration::initWithAttachment(
@@ -386,9 +386,7 @@ impl VirtualizationAdapter {
 
     /// Configure Rosetta directory share for x86_64 emulation.
     #[cfg(target_arch = "aarch64")]
-    fn configure_rosetta(
-        &self,
-    ) -> Result<Retained<VZVirtioFileSystemDeviceConfiguration>> {
+    fn configure_rosetta(&self) -> Result<Retained<VZVirtioFileSystemDeviceConfiguration>> {
         use objc2_virtualization::VZLinuxRosettaDirectoryShare;
 
         unsafe {
@@ -413,11 +411,12 @@ impl VirtualizationAdapter {
             let graphics_config = VZVirtioGraphicsDeviceConfiguration::new();
 
             // Create scanout configuration (display)
-            let scanout = VZVirtioGraphicsScanoutConfiguration::initWithWidthInPixels_heightInPixels(
-                VZVirtioGraphicsScanoutConfiguration::alloc(),
-                1920,
-                1080,
-            );
+            let scanout =
+                VZVirtioGraphicsScanoutConfiguration::initWithWidthInPixels_heightInPixels(
+                    VZVirtioGraphicsScanoutConfiguration::alloc(),
+                    1920,
+                    1080,
+                );
 
             let scanout_array = NSArray::from_retained_slice(&[scanout]);
             graphics_config.setScanouts(&scanout_array);
@@ -447,7 +446,8 @@ impl VirtualizationAdapter {
         if !can_start {
             return Err(HyprError::VmStartFailed {
                 vm_id: vm_id.to_string(),
-                reason: "VM cannot be started (may already be running or in error state)".to_string(),
+                reason: "VM cannot be started (may already be running or in error state)"
+                    .to_string(),
             });
         }
 
@@ -568,10 +568,7 @@ impl VmmAdapter for VirtualizationAdapter {
         };
 
         // Store VM state
-        vms.insert(
-            vm_id.clone(),
-            VmState { vm, vsock_path: vsock_path.clone(), log_path },
-        );
+        vms.insert(vm_id.clone(), VmState { vm, vsock_path: vsock_path.clone(), log_path });
 
         // Drop lock before any more awaits
         drop(vms);
@@ -600,7 +597,8 @@ impl VmmAdapter for VirtualizationAdapter {
         // Get VM and start it in a single sync block
         {
             let vms = self.vms.lock().await;
-            let state = vms.get(&handle.id)
+            let state = vms
+                .get(&handle.id)
                 .ok_or_else(|| HyprError::VmNotFound { vm_id: handle.id.clone() })?;
 
             // VZVirtualMachine is not thread-safe, so we must call start on the current thread.

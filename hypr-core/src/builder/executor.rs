@@ -1683,7 +1683,10 @@ impl MacOsVmBuilder {
 
         // Create VMM adapter for macOS (Virtualization.framework)
         let adapter = VirtualizationAdapter::new().map_err(|e| {
-            BuildError::ContextError(format!("Failed to create Virtualization.framework adapter: {}", e))
+            BuildError::ContextError(format!(
+                "Failed to create Virtualization.framework adapter: {}",
+                e
+            ))
         })?;
 
         let vm_builder = crate::builder::VmBuilder::new(
