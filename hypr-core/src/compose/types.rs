@@ -15,13 +15,13 @@ pub struct ComposeFile {
     /// Services to be created
     pub services: HashMap<String, Service>,
 
-    /// Named volumes
+    /// Named volumes (null/~ means default options)
     #[serde(default)]
-    pub volumes: HashMap<String, VolumeDefinition>,
+    pub volumes: HashMap<String, Option<VolumeDefinition>>,
 
-    /// Networks
+    /// Networks (null/~ means default options)
     #[serde(default)]
-    pub networks: HashMap<String, NetworkDefinition>,
+    pub networks: HashMap<String, Option<NetworkDefinition>>,
 }
 
 /// A service in a docker-compose file.
@@ -43,25 +43,29 @@ pub struct Service {
     #[serde(default)]
     pub environment: Environment,
 
+    /// Path(s) to env file(s) to load environment variables from
+    #[serde(default)]
+    pub env_file: EnvFile,
+
     /// Volume mounts (e.g., ["./data:/data", "db:/var/lib/db"])
     #[serde(default)]
     pub volumes: Vec<String>,
 
     /// Networks to connect to
     #[serde(default)]
-    pub networks: Vec<String>,
+    pub networks: ServiceNetworks,
 
     /// Services this service depends on
     #[serde(default)]
-    pub depends_on: Vec<String>,
+    pub depends_on: DependsOn,
 
-    /// Override the default command
+    /// Override the default command (string or array)
     #[serde(default)]
-    pub command: Option<Vec<String>>,
+    pub command: Option<Command>,
 
-    /// Override the default entrypoint
+    /// Override the default entrypoint (string or array)
     #[serde(default)]
-    pub entrypoint: Option<Vec<String>>,
+    pub entrypoint: Option<Command>,
 
     /// Working directory inside the container
     #[serde(default)]
@@ -78,6 +82,14 @@ pub struct Service {
     /// Deployment configuration (Compose v3 swarm mode)
     #[serde(default)]
     pub deploy: Option<DeployConfig>,
+
+    /// Container name
+    #[serde(default)]
+    pub container_name: Option<String>,
+
+    /// Restart policy
+    #[serde(default)]
+    pub restart: Option<String>,
 }
 
 /// Build configuration for a service.
@@ -192,6 +204,128 @@ impl Environment {
                 .collect(),
         }
     }
+}
+
+/// Env file paths can be a single string or a list of strings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum EnvFile {
+    /// Single env file path
+    Single(String),
+    /// Multiple env file paths
+    List(Vec<String>),
+}
+
+impl Default for EnvFile {
+    fn default() -> Self {
+        EnvFile::List(vec![])
+    }
+}
+
+impl EnvFile {
+    /// Get env file paths as a list.
+    pub fn to_list(&self) -> Vec<String> {
+        match self {
+            EnvFile::Single(path) => vec![path.clone()],
+            EnvFile::List(paths) => paths.clone(),
+        }
+    }
+}
+
+/// Command can be a string or array of strings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Command {
+    /// Shell form: "cmd arg1 arg2"
+    Shell(String),
+    /// Exec form: ["cmd", "arg1", "arg2"]
+    Exec(Vec<String>),
+}
+
+impl Command {
+    /// Convert command to a list of strings (splitting shell form on whitespace).
+    pub fn to_vec(&self) -> Vec<String> {
+        match self {
+            Command::Shell(s) => {
+                // Simple shell-like parsing (doesn't handle quotes perfectly, but good enough)
+                shell_words::split(s).unwrap_or_else(|_| {
+                    s.split_whitespace().map(|s| s.to_string()).collect()
+                })
+            }
+            Command::Exec(v) => v.clone(),
+        }
+    }
+}
+
+/// Service networks can be a list of network names or a map with config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ServiceNetworks {
+    /// List form: ["network1", "network2"]
+    List(Vec<String>),
+    /// Map form with per-network config
+    Map(HashMap<String, Option<ServiceNetworkConfig>>),
+}
+
+impl Default for ServiceNetworks {
+    fn default() -> Self {
+        ServiceNetworks::List(vec![])
+    }
+}
+
+impl ServiceNetworks {
+    /// Get network names as a list.
+    pub fn to_list(&self) -> Vec<String> {
+        match self {
+            ServiceNetworks::List(names) => names.clone(),
+            ServiceNetworks::Map(map) => map.keys().cloned().collect(),
+        }
+    }
+}
+
+/// Per-service network configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceNetworkConfig {
+    /// Static IP address
+    #[serde(default)]
+    pub ipv4_address: Option<String>,
+    /// Aliases
+    #[serde(default)]
+    pub aliases: Vec<String>,
+}
+
+/// depends_on can be a simple list or a map with condition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DependsOn {
+    /// List form: ["service1", "service2"]
+    List(Vec<String>),
+    /// Map form with conditions
+    Map(HashMap<String, DependsOnCondition>),
+}
+
+impl Default for DependsOn {
+    fn default() -> Self {
+        DependsOn::List(vec![])
+    }
+}
+
+impl DependsOn {
+    /// Get dependency service names as a list.
+    pub fn to_list(&self) -> Vec<String> {
+        match self {
+            DependsOn::List(names) => names.clone(),
+            DependsOn::Map(map) => map.keys().cloned().collect(),
+        }
+    }
+}
+
+/// Dependency condition configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DependsOnCondition {
+    /// Condition for starting (service_started, service_healthy, service_completed_successfully)
+    #[serde(default)]
+    pub condition: Option<String>,
 }
 
 /// Deployment configuration (Compose v3 swarm mode).

@@ -1,0 +1,92 @@
+{
+    "name": "hypr Documentation",
+    "initialRoute": "introduction",
+    "colors": {
+        "light": {
+            "brand": "#dedede",
+            "heading": "#1a1a1a",
+            "text": "#374151"
+        },
+        "dark": {
+            "brand": "#e8e8e8",
+            "heading": "#f2f2f2",
+            "text": "#c1c1c1"
+        }
+    },
+    "navigation": {
+        "tabs": [
+            {
+                "tab": "Documentation",
+                "icon": "book",
+                "groups": [
+                    {
+                        "group": "Introduction",
+                        "icon": "rocket",
+                        "pages": [
+                            {
+                                "title": "Index",
+                                "path": "index",
+                                "icon": "star"
+                            },
+                            {
+                                "title": "Getting Started",
+                                "path": "getting-started.md",
+                                "icon": "zap"
+                            }
+                        ]
+                    },
+                    {
+                        "group": "Core Concepts",
+                        "icon": "compass",
+                        "pages": [
+                            {
+                                "title": "Configuration",
+                                "path": "configuration",
+                                "icon": "settings"
+                            },
+                            {
+                                "title": "Architecture",
+                                "path": "architecture",
+                                "icon": "terminal"
+                            },
+                            {
+                                "title": "Building Images",
+                                "path": "building-images",
+                                "icon": "play"
+                            },
+                            {
+                                "title": "Compose Stacks",
+                                "path": "compose",
+                                "icon": "play"
+                            }
+                        ]
+                    }
+                ]
+            },
+            {
+                "group": "References",
+                "icon": "code",
+                "pages": [
+                    {
+                        "title": "CLI Reference",
+                        "path": "cli-reference",
+                        "icon": "code"
+                    },
+                    {
+                        "title": "GPU Passthrough",
+                        "path": "gpu",
+                        "icon": "tool"
+                    },
+                    {
+                        "title": "Troubleshooting",
+                        "path": "troubleshooting",
+                        "icon": "code"
+                    }
+                ]
+            }
+        ]
+    },
+    "logo-dark": "https://blob-cdn.documentation.ai/org-eca4f561-64ba-44aa-a5af-1dde95a4608f/doc-0bf87c43-8d19-4aa3-aba6-5ed76d70b22f/1765423527500-usx2zcfrrk-hypr-logo-white.svg?q=85&fm=auto&auto=compress%2Cformat",
+    "favicon": "https://blob-cdn.documentation.ai/org-eca4f561-64ba-44aa-a5af-1dde95a4608f/doc-0bf87c43-8d19-4aa3-aba6-5ed76d70b22f/1765423556419-c7y4b699jam-android-chrome-512x512.png?q=85&fm=auto&auto=compress%2Cformat",
+    "logo-light": "https://blob-cdn.documentation.ai/org-eca4f561-64ba-44aa-a5af-1dde95a4608f/doc-0bf87c43-8d19-4aa3-aba6-5ed76d70b22f/1765423593799-v0uz7klgixe-hypr-logo-black.svg?q=85&fm=auto&auto=compress%2Cformat"
+}

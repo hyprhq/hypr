@@ -409,7 +409,20 @@ async fn main() -> Result<()> {
                             })?
                     }
                 };
-                commands::compose::up(&compose_file, name, detach, force_recreate, build).await?;
+
+                // Convert to absolute path (daemon runs in different working directory)
+                let compose_path = std::path::Path::new(&compose_file);
+                let absolute_path = if compose_path.is_absolute() {
+                    compose_file.clone()
+                } else {
+                    std::env::current_dir()
+                        .map_err(|e| anyhow::anyhow!("Failed to get current directory: {}", e))?
+                        .join(&compose_file)
+                        .to_string_lossy()
+                        .to_string()
+                };
+
+                commands::compose::up(&absolute_path, name, detach, force_recreate, build).await?;
             }
 
             ComposeCommands::Down { stack_name, force } => {

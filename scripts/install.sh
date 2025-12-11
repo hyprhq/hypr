@@ -161,6 +161,10 @@ setup_systemd() {
     sudo mkdir -p /var/lib/hypr/{logs,images,cache} /var/log/hypr /run/hypr
 
     # Service file
+    # Note: hyprd needs broad system access for:
+    # - /dev/kvm, /dev/vhost-*, /dev/net/tun (virtualization)
+    # - /sys (network config, VFIO)
+    # - Network namespace and bridge management
     sudo tee /etc/systemd/system/hyprd.service >/dev/null << 'EOF'
 [Unit]
 Description=HYPR Daemon
@@ -172,11 +176,6 @@ Type=simple
 ExecStart=/usr/local/bin/hyprd
 Restart=always
 RestartSec=5
-NoNewPrivileges=false
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-ReadWritePaths=/var/lib/hypr /var/log/hypr /run/hypr /tmp
 Environment=RUST_LOG=info
 Environment=HOME=/var/lib/hypr
 LimitNOFILE=65536

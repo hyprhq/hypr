@@ -1,185 +1,212 @@
-### The Pivot: Why Volant became HYPR
-
-**Volant** was built like a cloud platform—a distributed set of microservices (Daemon, CLI, Builder, Load Balancer) written in Go. It was powerful but heavy. It required external dependencies (`skopeo`, `umoci`, `cloud-hypervisor`) and the Guest Agent was a 10MB+ Go binary.
-
-**HYPR** is a systems tool. It is rewritten in **Rust** to achieve three critical goals that Volant missed:
-
-1.  **Zero-Dependency Distribution:** HYPR embeds the Hypervisor, Kernel, and Initramfs directly into a single binary. No `apt-get install`. You download one file, and it runs anywhere.
-2.  **The "No-Tax" Guest Agent:** We replaced the Go agent with **Kestrel (C)**—a 20KB static binary. This reduces boot overhead from ~400ms to <50ms.
-3.  **True Docker Parity:** Volant required conversion tools (`volant-compose`). HYPR parses `Dockerfile` and `docker-compose.yml` natively. It is a drop-in replacement, not a migration project.
-
----
-***
-
 # HYPR
 
-**The hardware-isolated runtime for the container era.**
+HYPR is a microVM orchestration platform that runs OCI container images as lightweight virtual machines. It provides container-like ergonomics with VM-level isolation, supporting GPU passthrough and sub-second boot times.
 
-[![Build Status](https://img.shields.io/github/actions/workflow/status/hyprhq/hypr/ci.yml?branch=main&style=flat-square)](https://github.com/hypr-net/hypr/actions)
-[![Rust](https://img.shields.io/badge/Built%20with-Rust-orange?style=flat-square)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/License-BSL_1.1-black.svg?style=flat-square)](LICENSE)
+## Overview
 
-> **"Your `docker-compose.yml` already works. Just faster, safer, and with true hardware isolation."**
+HYPR converts standard container images into bootable microVMs. Each VM runs a minimal Linux kernel with the container's rootfs mounted as a squashfs filesystem. This architecture provides hardware-level isolation while maintaining the developer experience of containers.
 
-HYPR (formerly Volant) is a drop-in replacement for Docker that runs your workloads in **microVMs** instead of containers. It provides the developer experience you know (`hypr build`, `hypr run`) with the security and isolation of a dedicated kernel.
+```
+hypr run nginx
+```
 
-It solves the "Security vs. Speed" trade-off by embedding a custom hypervisor stack directly into a single binary. No heavy background daemons, no Kubernetes sprawl, just instant, secure VMs.
+## Features
 
----
+- **OCI-Compatible**: Pull images from Docker Hub, GHCR, and any OCI registry
+- **Dockerfile Builds**: Build images using standard Dockerfile syntax
+- **Compose Support**: Deploy multi-service stacks with docker-compose.yml files
+- **GPU Passthrough**: NVIDIA/AMD via VFIO (Linux), Metal via Venus (macOS ARM64)
+- **Sub-Second Boot**: VMs boot in under 500ms on warm cache
+- **Exec Support**: Execute commands in running VMs like `docker exec`
+- **Cross-Platform**: Linux (x86_64, ARM64) and macOS (Apple Silicon, Intel)
 
-## ⚡️ The 30-Second Pitch
+## Installation
 
-1.  **It's just Docker (on the surface):** Supports `Dockerfile`, `docker-compose.yml`, and OCI images out of the box.
-2.  **It's a VM (under the hood):** Every container gets its own Linux Kernel. A kernel panic in one app cannot crash the host or leak data to neighbors.
-3.  **It's Fast:** Boots in **<50ms** thanks to **Kestrel**, our 20KB static C guest agent.
-4.  **It's Everywhere:** Develop on macOS (Apple Silicon/Intel) with native virtualization, deploy to Linux with eBPF networking.
-
----
-
-## 🚀 Quick Start
-
-### 1. Install
-HYPR is a single binary with zero external dependencies.
-
-```bash
+```sh
 curl -fsSL https://get.hypr.tech | sh
-hypr daemon start
 ```
 
-### 2. Run a Container (as a VM)
-Use the commands you already know.
+This installs:
+- `hypr` - CLI tool
+- `hyprd` - Background daemon (installed as systemd service or LaunchDaemon)
 
-```bash
-# Pulls nginx from Docker Hub, converts to rootfs, boots in a microVM
-hypr run -p 8080:80 --name web nginx:latest
+### Requirements
+
+**Linux:**
+- x86_64 or ARM64
+- Kernel 5.10+ with KVM support
+- `squashfs-tools` for image builds
+- `virtiofsd` for shared filesystem support
+
+**macOS:**
+- macOS 14+ (Sonoma) for Apple Silicon GPU support
+- Apple Silicon: `krunkit` (installed via Homebrew)
+- Intel: `vfkit` (installed via Homebrew)
+- `squashfs` from Homebrew
+
+## Quick Start
+
+Run a VM from a registry image:
+```sh
+hypr run nginx -p 8080:80
 ```
 
-### 3. Run a Stack
-Navigate to any folder with a `docker-compose.yml`:
-
-```bash
-# Boots the whole stack in parallel microVMs
-hypr compose up
+List running VMs:
+```sh
+hypr ps
 ```
 
-That's it. You are now running hardware-isolated infrastructure.
-
----
-
-## 🏗 Architecture
-
-HYPR is a monolithic Rust application designed for extreme density and speed.
-
-```mermaid
-graph TD
-    CLI[hypr CLI] -->|gRPC| D[hyprd Daemon]
-    D -->|Manage| DB[(SQLite State)]
-    D -->|Control| VMM[VMM Adapter]
-    
-    subgraph Host
-        VMM -->|Linux| CH[Cloud Hypervisor]
-        VMM -->|macOS| VF[Apple Virtualization]
-        
-        D -->|Load Balance| EBPF[Drift eBPF]
-    end
-    
-    subgraph MicroVM
-        CH --> Kernel[Linux Kernel]
-        Kernel --> Kestrel[Kestrel Agent (PID 1)]
-        Kestrel --> App[User Workload]
-    end
+Execute a command in a VM:
+```sh
+hypr exec <vm> -- ls -la
 ```
 
-### Key Components
-
-*   **`hyprd` (Rust):** The brain. Handles image building (DAG solver), state management (SQLite), and orchestration.
-*   **Kestrel (C):** The heart. A ~500KB static guest agent that replaces systemd. It handles mounting, networking, and process supervision inside the VM instantly.
-*   **Hybrid Networking:** On Linux, HYPR uses a dual-path approach:
-    *   **Drift (eBPF):** TC hooks on the bridge interface for external traffic at line rate (10+ Gbps)
-    *   **Proxy:** Userspace TCP/UDP proxy for localhost port forwarding
-*   **Hermetic Builder:** HYPR doesn't use BuildKit. It spins up ephemeral microVMs to run `RUN` commands, ensuring your build process is completely isolated from the host.
-
----
-
-## 🛠 Features
-
-### 1. Universal Compatibility
-Don't rewrite your manifests. HYPR parses standard `Dockerfile` and `docker-compose.yml` files. It automatically handles volume mounts, port forwarding, and environment variables.
-
-### 2. True Dev/Prod Parity
-*   **macOS:** Uses `HVF` (Hypervisor.framework) and `virtio-fs` for native speed.
-*   **Linux:** Uses `KVM` and `io_uring` for production performance.
-*   **The Result:** The exact same kernel and userspace run on your laptop and your server.
-
-### 3. GPU Passthrough (VFIO)
-AI/ML workloads are first-class citizens. HYPR handles the complexity of IOMMU groups and VFIO binding.
-
-```bash
-# Pass a specific NVIDIA GPU to the VM
-hypr run --gpu pci:0000:01:00.0 pytorch/pytorch:latest
+Stream logs:
+```sh
+hypr logs <vm> -f
 ```
 
-### 4. Hermetic Builds
-Builds happen inside a disposable VM. A malicious `npm install` script cannot access your host filesystem, SSH keys, or environment variables.
-
-```bash
-# Builds in a secure VM, outputs a signed SquashFS image
-hypr build -t my-app .
+Stop and remove:
+```sh
+hypr stop <vm>
+hypr rm <vm>
 ```
 
----
+## Building Images
 
-## 📊 Performance: HYPR vs The World
+Build from a Dockerfile:
+```sh
+hypr build -t myapp:latest .
+```
 
-| Feature | Docker | Firecracker | HYPR |
-| :--- | :--- | :--- | :--- |
-| **Isolation** | Process (Weak) | Hardware (Strong) | **Hardware (Strong)** |
-| **Boot Time** | ~1s | ~150ms | **<100ms** |
-| **Agent Overhead** | High (Host) | N/A | **Minimal (~500KB C binary)** |
-| **Networking** | Bridge/IPTables | Tap/Tun | **eBPF + Proxy Hybrid** |
-| **UX** | Excellent | Low-level | **Excellent (Docker-like)** |
-| **State** | Mutable | Ephemeral | **Persistent (SQLite)** |
+Supported Dockerfile instructions:
+- FROM, RUN, COPY, ADD, ENV, ARG
+- WORKDIR, USER, EXPOSE, CMD, ENTRYPOINT
+- HEALTHCHECK, LABEL, VOLUME, SHELL
+- Multi-stage builds with `--target`
 
----
+## Compose Stacks
 
-## 🗺 Roadmap
+Deploy a multi-service stack:
+```sh
+hypr compose up -f docker-compose.yml
+```
 
-*   **Phase 1: Foundation** ✅
-    *   Core Rust Architecture
-    *   Cloud Hypervisor / HVF Adapters
-    *   SQLite State Management
-*   **Phase 2: Networking & Compose** ✅
-    *   `docker-compose` parsing
-    *   Bridge networking with TAP devices
-    *   Hybrid port forwarding (eBPF + Proxy)
-    *   IPAM (automatic IP allocation)
-*   **Phase 3: The Builder** ✅
-    *   DAG Solver
-    *   Hermetic VM Builds
-    *   Content-Addressable Caching
-*   **Phase 4: Hardware Acceleration** (Next Up 🟡)
-    *   VFIO / GPU Passthrough
-    *   Apple Metal Passthrough (via `libkrun`)
+Supported compose file names (searched in order):
+- `hypr-compose.yml`, `hypr-compose.yaml`
+- `Hyprfile`, `Hyprfile.yml`, `Hyprfile.yaml`
+- `docker-compose.yml`, `docker-compose.yaml`
+- `compose.yml`, `compose.yaml`
 
----
+Manage stacks:
+```sh
+hypr compose ps              # List stacks
+hypr compose down <stack>    # Destroy stack
+```
 
-## 🤝 Contributing
+## GPU Passthrough
 
-HYPR is built in **Rust** and **C**. We value clean architecture, zero compiler warnings, and observability.
+**Linux (VFIO):**
+```sh
+hypr gpu list                           # List available GPUs
+hypr run --gpu 0000:01:00.0 <image>     # Attach specific GPU
+```
 
-1.  Clone the repo: `git clone https://github.com/hyprhq/hypr`
-2.  Run tests: `cargo test`
-3.  Check the [Contributing Guide](docs/CONTRIBUTING.md).
+**macOS Apple Silicon (Metal):**
+```sh
+hypr run --gpu <image>                  # Enable Metal GPU
+```
 
----
+GPU passthrough is not available on Intel Macs.
 
-## 📄 License
+## Architecture
 
-**Business Source License 1.1**
-*   Free for personal, educational, and internal business use.
-*   Commercial resale/hosting requires a license.
-*   Converts to **Apache 2.0** automatically on **October 4, 2029**.
+```
+┌─────────────────────────────────────────────────────────────┐
+│                         hypr CLI                            │
+│                   (gRPC client, user interface)             │
+└─────────────────────────┬───────────────────────────────────┘
+                          │ gRPC
+┌─────────────────────────▼───────────────────────────────────┐
+│                         hyprd                               │
+│         (daemon: VM lifecycle, networking, state)           │
+├─────────────────────────────────────────────────────────────┤
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
+│  │ StateManager│  │ NetworkMgr  │  │   VmmAdapter        │  │
+│  │  (SQLite)   │  │ (bridge,DNS)│  │ (CHV/krunkit/vfkit) │  │
+│  └─────────────┘  └─────────────┘  └─────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+                          │
+┌─────────────────────────▼───────────────────────────────────┐
+│                       microVM                               │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │  Linux Kernel + Kestrel (PID 1 guest agent)         │    │
+│  │  SquashFS rootfs + overlayfs (copy-on-write)        │    │
+│  └─────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
+```
 
-*Designed for stealth, speed, and scale.*
+### Hypervisor Adapters
 
-**© 2025 HYPR PTE. LTD.**
+| Platform       | Hypervisor        | GPU Support |
+|----------------|-------------------|-------------|
+| Linux          | cloud-hypervisor  | VFIO        |
+| macOS ARM64    | krunkit           | Metal       |
+| macOS Intel    | vfkit             | None        |
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `HYPR_DATA_DIR` | Data directory (default: `/var/lib/hypr`) |
+| `HYPR_RUNTIME_DIR` | Runtime directory (default: `/run/hypr` or `/tmp/hypr`) |
+| `RUST_LOG` | Log level (e.g., `info`, `debug`, `hypr_core=debug`) |
+| `HYPR_OTLP_ENABLED` | Enable OpenTelemetry tracing |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP endpoint for traces |
+
+### Data Paths
+
+| Path | Description |
+|------|-------------|
+| `/var/lib/hypr/hypr.db` | SQLite database |
+| `/var/lib/hypr/images/` | Built and pulled images |
+| `/var/lib/hypr/logs/` | VM logs |
+| `/var/lib/hypr/cache/` | Build cache |
+
+### Ports
+
+HYPR uses ports in the 41000-41999 range to avoid conflicts:
+
+| Port  | Service |
+|-------|---------|
+| 41000 | gRPC API |
+| 41001 | REST gateway |
+| 41002 | Prometheus metrics |
+| 41003 | DNS server |
+
+## System Maintenance
+
+View disk usage:
+```sh
+hypr system df
+```
+
+Clean up unused resources:
+```sh
+hypr system prune          # Remove dangling images and cache
+hypr system prune --all    # Also remove stopped VMs
+```
+
+## Documentation
+
+Full documentation is available in the [docs/](docs/) directory.
+
+## License
+
+Business Source License 1.1 (BSL-1.1)
+
+## Repository
+
+https://github.com/hyprhq/hypr

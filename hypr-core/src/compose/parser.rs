@@ -151,17 +151,7 @@ mod tests {
             Service {
                 image: "".to_string(),
                 build: None,
-                ports: vec![],
-                environment: Environment::default(),
-                volumes: vec![],
-                networks: vec![],
-                depends_on: vec![],
-                command: None,
-                entrypoint: None,
-                working_dir: None,
-                user: None,
-                labels: HashMap::new(),
-                deploy: None,
+                ..Default::default()
             },
         );
         assert!(ComposeParser::validate_services(&services).is_err());
@@ -174,18 +164,7 @@ mod tests {
             "web".to_string(),
             Service {
                 image: "nginx:latest".to_string(),
-                build: None,
-                ports: vec![],
-                environment: Environment::default(),
-                volumes: vec![],
-                networks: vec![],
-                depends_on: vec![],
-                command: None,
-                entrypoint: None,
-                working_dir: None,
-                user: None,
-                labels: HashMap::new(),
-                deploy: None,
+                ..Default::default()
             },
         );
         assert!(ComposeParser::validate_services(&services).is_ok());
@@ -197,19 +176,8 @@ mod tests {
         services.insert(
             "web".to_string(),
             Service {
-                image: "".to_string(),
                 build: Some(BuildSpec::Path("./app".to_string())),
-                ports: vec![],
-                environment: Environment::default(),
-                volumes: vec![],
-                networks: vec![],
-                depends_on: vec![],
-                command: None,
-                entrypoint: None,
-                working_dir: None,
-                user: None,
-                labels: HashMap::new(),
-                deploy: None,
+                ..Default::default()
             },
         );
         assert!(ComposeParser::validate_services(&services).is_ok());
@@ -223,17 +191,7 @@ mod tests {
             Service {
                 image: "myapp:latest".to_string(),
                 build: Some(BuildSpec::Path("./app".to_string())),
-                ports: vec![],
-                environment: Environment::default(),
-                volumes: vec![],
-                networks: vec![],
-                depends_on: vec![],
-                command: None,
-                entrypoint: None,
-                working_dir: None,
-                user: None,
-                labels: HashMap::new(),
-                deploy: None,
+                ..Default::default()
             },
         );
         assert!(ComposeParser::validate_services(&services).is_ok());

@@ -21,6 +21,7 @@ indicatif = "0.17"
 console = "0.15"
 regex = "1.10"
 once_cell = "1.19"
+shell-words = "1.1"
 
 # Serialization
 serde = { workspace = true }

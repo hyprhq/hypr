@@ -27,8 +27,8 @@ impl ComposeConverter {
 
         let name = stack_name.unwrap_or_else(|| "default".to_string());
 
-        // Convert services to VM configs
-        let services = Self::convert_services(&compose.services, &HashMap::new())?;
+        // Convert services to VM configs (no compose_dir in sync version)
+        let services = Self::convert_services(&compose.services, &HashMap::new(), None)?;
 
         // Convert volumes
         let volumes = Self::convert_volumes(&compose.volumes, &compose.services);
@@ -63,7 +63,8 @@ impl ComposeConverter {
         let built_images = Self::build_service_images(&compose.services, &compose_dir).await?;
 
         // Convert services to VM configs, using built images where available
-        let services = Self::convert_services(&compose.services, &built_images)?;
+        // Pass compose_dir for automatic .env loading
+        let services = Self::convert_services(&compose.services, &built_images, Some(&compose_dir))?;
 
         // Convert volumes
         let volumes = Self::convert_volumes(&compose.volumes, &compose.services);
@@ -100,6 +101,7 @@ impl ComposeConverter {
                 // Get depends_on for ordering (services that must be built first)
                 let deps: Vec<String> = service
                     .depends_on
+                    .to_list()
                     .iter()
                     .filter(|dep| services.get(*dep).map(|s| s.build.is_some()).unwrap_or(false))
                     .cloned()
@@ -457,25 +459,26 @@ impl ComposeConverter {
     }
 
     /// Convert compose services to service configurations.
-    #[instrument(skip(services, built_images))]
+    #[instrument(skip(services, built_images, compose_dir))]
     fn convert_services(
         services: &HashMap<String, Service>,
         built_images: &HashMap<String, PathBuf>,
+        compose_dir: Option<&Path>,
     ) -> Result<Vec<ServiceConfig>> {
         let mut configs = Vec::new();
 
         for (name, service) in services {
-            let vm_config = Self::service_to_vm_config(name, service, built_images.get(name))?;
+            let vm_config = Self::service_to_vm_config(name, service, built_images.get(name), compose_dir)?;
 
             // Build entrypoint: entrypoint takes precedence, command is appended as args
             let entrypoint = if let Some(ep) = &service.entrypoint {
-                let mut result = ep.clone();
+                let mut result = ep.to_vec();
                 if let Some(cmd) = &service.command {
-                    result.extend(cmd.clone());
+                    result.extend(cmd.to_vec());
                 }
                 result
             } else {
-                service.command.clone().unwrap_or_default()
+                service.command.as_ref().map(|c| c.to_vec()).unwrap_or_default()
             };
 
             let workdir = service.working_dir.clone().unwrap_or_default();
@@ -483,7 +486,7 @@ impl ComposeConverter {
             let config = ServiceConfig {
                 name: name.clone(),
                 vm_config,
-                depends_on: service.depends_on.clone(),
+                depends_on: service.depends_on.to_list(),
                 healthcheck: None, // Health check parsing will be added when Phase 2 health checks are implemented
                 entrypoint,
                 workdir,
@@ -496,11 +499,12 @@ impl ComposeConverter {
     }
 
     /// Convert a single service to a VM configuration.
-    #[instrument(skip(service, built_image_path), fields(name = %name))]
+    #[instrument(skip(service, built_image_path, compose_dir), fields(name = %name))]
     fn service_to_vm_config(
         name: &str,
         service: &Service,
         built_image_path: Option<&PathBuf>,
+        compose_dir: Option<&Path>,
     ) -> Result<VmConfig> {
         info!("Converting service to VM config");
 
@@ -510,8 +514,42 @@ impl ComposeConverter {
         // Parse ports
         let ports = Self::parse_ports(&service.ports)?;
 
-        // Parse environment
-        let env = service.environment.to_map();
+        // Parse environment with priority: .env (auto) < env_file < environment
+        let mut env = HashMap::new();
+
+        // 1. Auto-load .env from compose directory (like Docker Compose)
+        if let Some(dir) = compose_dir {
+            let auto_env_path = dir.join(".env");
+            if auto_env_path.exists() {
+                if let Ok(content) = std::fs::read_to_string(&auto_env_path) {
+                    info!("Auto-loading .env from {:?}", auto_env_path);
+                    Self::parse_env_file_content(&content, &mut env);
+                }
+            }
+        }
+
+        // 2. Load explicit env_file(s) - these override .env
+        for env_file_path in service.env_file.to_list() {
+            // Resolve relative paths against compose_dir
+            let resolved_path = if let Some(dir) = compose_dir {
+                if Path::new(&env_file_path).is_relative() {
+                    dir.join(&env_file_path)
+                } else {
+                    PathBuf::from(&env_file_path)
+                }
+            } else {
+                PathBuf::from(&env_file_path)
+            };
+
+            if let Ok(content) = std::fs::read_to_string(&resolved_path) {
+                Self::parse_env_file_content(&content, &mut env);
+            } else {
+                warn!("Failed to read env_file: {}", env_file_path);
+            }
+        }
+
+        // 3. Merge environment variables (highest priority - override env_file)
+        env.extend(service.environment.to_map());
 
         // Create disk config for rootfs
         // Use built image path if available, otherwise use pre-built image
@@ -559,6 +597,26 @@ impl ComposeConverter {
             gpu: None,
             virtio_fs_mounts: vec![],
         })
+    }
+
+    /// Parse an env file's content into a HashMap.
+    /// Handles KEY=VALUE format, comments (#), and quoted values.
+    fn parse_env_file_content(content: &str, env: &mut HashMap<String, String>) {
+        for line in content.lines() {
+            let line = line.trim();
+            // Skip comments and empty lines
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            // Parse KEY=VALUE format
+            if let Some(pos) = line.find('=') {
+                let key = line[..pos].trim().to_string();
+                let value = line[pos + 1..].trim().to_string();
+                // Remove quotes if present
+                let value = value.trim_matches('"').trim_matches('\'').to_string();
+                env.insert(key, value);
+            }
+        }
     }
 
     /// Parse resource limits from deploy config.
@@ -697,7 +755,7 @@ impl ComposeConverter {
     /// Convert volume definitions.
     #[instrument(skip(volume_defs, services))]
     fn convert_volumes(
-        volume_defs: &HashMap<String, VolumeDefinition>,
+        volume_defs: &HashMap<String, Option<VolumeDefinition>>,
         services: &HashMap<String, Service>,
     ) -> Vec<VolumeConfig> {
         let mut volumes = Vec::new();
@@ -1080,9 +1138,10 @@ mod tests {
 
     #[test]
     fn test_volume_parsing() {
+        // Volume definitions can be None (null/~) or Some with config
         let volume_defs = HashMap::from([(
             "db-data".to_string(),
-            VolumeDefinition { driver: None, driver_opts: HashMap::new() },
+            Some(VolumeDefinition { driver: None, driver_opts: HashMap::new() }),
         )]);
 
         let services = HashMap::from([(
