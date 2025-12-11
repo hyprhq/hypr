@@ -5,9 +5,9 @@ use anyhow::Result;
 use colored::Colorize;
 use hypr_api::hypr::v1::{PortMapping as ProtoPortMapping, VmConfig as ProtoVmConfig, VmResources};
 use hypr_core::adapters::vfio::detect_gpus;
+use hypr_core::types::vm::GpuConfig;
 #[cfg(target_os = "linux")]
 use hypr_core::types::vm::GpuVendor;
-use hypr_core::types::vm::GpuConfig;
 use std::io::{self, Write};
 
 /// Run a VM from an image

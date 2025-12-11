@@ -515,8 +515,7 @@ impl HyprService for HyprServiceImpl {
     type DeployStackStream =
         Pin<Box<dyn Stream<Item = std::result::Result<DeployStackEvent, Status>> + Send>>;
 
-    type RunVMStream =
-        Pin<Box<dyn Stream<Item = std::result::Result<RunVmEvent, Status>> + Send>>;
+    type RunVMStream = Pin<Box<dyn Stream<Item = std::result::Result<RunVmEvent, Status>> + Send>>;
 
     #[instrument(skip(self), fields(image = %request.get_ref().image))]
     async fn run_vm(
@@ -547,13 +546,12 @@ impl HyprService for HyprServiceImpl {
                 vm_name,
                 config,
                 &tx,
-            ).await;
+            )
+            .await;
 
             if let Err(e) = result {
                 let event = RunVmEvent {
-                    event: Some(run_vm_event::Event::Error(RunError {
-                        message: e.to_string(),
-                    })),
+                    event: Some(run_vm_event::Event::Error(RunError { message: e.to_string() })),
                 };
                 let _ = tx.send(Ok(event)).await;
             }
@@ -941,16 +939,23 @@ async fn run_vm_with_progress(
     };
 
     // Stage 1: Resolve image
-    send_run_progress(tx, "resolving", &format!("Resolving image {}:{}", image_name, image_tag)).await;
+    send_run_progress(tx, "resolving", &format!("Resolving image {}:{}", image_name, image_tag))
+        .await;
 
     let image = match state.get_image_by_name_tag(image_name, image_tag).await {
         Ok(img) => {
-            send_run_progress(tx, "cached", &format!("Using cached image {}:{}", image_name, image_tag)).await;
+            send_run_progress(
+                tx,
+                "cached",
+                &format!("Using cached image {}:{}", image_name, image_tag),
+            )
+            .await;
             img
         }
         Err(_) => {
             // Need to pull
-            send_run_progress(tx, "pulling", &format!("Pulling {}:{}", image_name, image_tag)).await;
+            send_run_progress(tx, "pulling", &format!("Pulling {}:{}", image_name, image_tag))
+                .await;
 
             let mut puller = ImagePuller::new().map_err(|e| {
                 HyprError::Internal(format!("Failed to create image puller: {}", e))
@@ -961,7 +966,8 @@ async fn run_vm_with_progress(
             })?;
 
             state.insert_image(&image).await?;
-            send_run_progress(tx, "pulled", &format!("Image {}:{} ready", image_name, image_tag)).await;
+            send_run_progress(tx, "pulled", &format!("Image {}:{} ready", image_name, image_tag))
+                .await;
             image
         }
     };
@@ -1009,9 +1015,10 @@ async fn run_vm_with_progress(
     }];
 
     // Allocate IP
-    let vm_ip = network_mgr.allocate_ip(&vm_config.id).await.map_err(|e| {
-        HyprError::Internal(format!("Failed to allocate IP: {}", e))
-    })?;
+    let vm_ip = network_mgr
+        .allocate_ip(&vm_config.id)
+        .await
+        .map_err(|e| HyprError::Internal(format!("Failed to allocate IP: {}", e)))?;
     vm_config.network.ip_address = Some(vm_ip);
 
     // Build RuntimeManifest
@@ -1075,9 +1082,7 @@ async fn run_vm_with_progress(
     // Send complete event
     let final_vm = state.get_vm(&vm_config.id).await?;
     let event = RunVmEvent {
-        event: Some(run_vm_event::Event::Complete(RunComplete {
-            vm: Some(final_vm.into()),
-        })),
+        event: Some(run_vm_event::Event::Complete(RunComplete { vm: Some(final_vm.into()) })),
     };
     let _ = tx.send(Ok(event)).await;
 

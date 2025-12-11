@@ -36,7 +36,8 @@ impl HyprClient {
         Ok(Self { client })
     }
 
-    /// Create a new VM
+    /// Create a new VM (use run_vm for streaming progress)
+    #[allow(dead_code)]
     pub async fn create_vm(&mut self, config: VmConfig, image: String) -> Result<Vm> {
         let request = tonic::Request::new(CreateVmRequest {
             name: config.name.clone(),
@@ -69,13 +70,9 @@ impl HyprClient {
         mut on_progress: F,
     ) -> Result<Vm>
     where
-        F: FnMut(&str, &str) + Send,  // (stage, message)
+        F: FnMut(&str, &str) + Send, // (stage, message)
     {
-        let request = tonic::Request::new(RunVmRequest {
-            image: image.to_string(),
-            name,
-            config,
-        });
+        let request = tonic::Request::new(RunVmRequest { image: image.to_string(), name, config });
 
         let mut stream = self.client.run_vm(request).await?.into_inner();
         let mut final_vm: Option<Vm> = None;
