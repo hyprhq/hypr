@@ -13,6 +13,7 @@ use tracing::{debug, info};
 /// Kernel format constants from libkrun.h
 #[repr(u32)]
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // Variants for future use
 pub enum KernelFormat {
     /// Raw binary
     Raw = 0,
@@ -31,6 +32,7 @@ pub enum KernelFormat {
 /// GPU/virgl flags for krun_set_gpu_options
 #[repr(u32)]
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // Variants for future use
 pub enum GpuFlags {
     /// No GPU
     None = 0,
@@ -82,6 +84,7 @@ type KrunSetSmbiosOemStrings =
 ///
 /// Handles dynamic loading of the library and provides safe Rust methods
 /// for all libkrun operations.
+#[allow(dead_code)] // Some fields/methods for future use
 pub struct Libkrun {
     _library: Arc<Library>,
     // Function pointers
@@ -105,6 +108,7 @@ pub struct Libkrun {
     set_smbios_oem_strings: KrunSetSmbiosOemStrings,
 }
 
+#[allow(dead_code)] // Some methods for future use
 impl Libkrun {
     /// Load libkrun-efi dynamically.
     ///
