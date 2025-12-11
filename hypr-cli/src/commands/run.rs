@@ -2,12 +2,13 @@
 
 use crate::client::HyprClient;
 use anyhow::Result;
+use colored::Colorize;
+use hypr_api::hypr::v1::{PortMapping as ProtoPortMapping, VmConfig as ProtoVmConfig, VmResources};
 use hypr_core::adapters::vfio::detect_gpus;
-use hypr_core::types::network::{NetworkConfig, Protocol};
 #[cfg(target_os = "linux")]
 use hypr_core::types::vm::GpuVendor;
-use hypr_core::types::vm::{DiskConfig, DiskFormat, GpuConfig};
-use hypr_core::{VmConfig, VmResources};
+use hypr_core::types::vm::GpuConfig;
+use std::io::{self, Write};
 
 /// Run a VM from an image
 pub async fn run(
@@ -16,95 +17,73 @@ pub async fn run(
     cpus: Option<u32>,
     memory_mb: Option<u32>,
     ports: Vec<(u16, u16)>,
-    env: Vec<(String, String)>,
+    _env: Vec<(String, String)>,
     gpu_option: Option<String>,
 ) -> Result<()> {
     let mut client = HyprClient::connect().await?;
 
-    // Parse image name and tag (e.g., "nginx:latest" or "nginx")
-    let (image_name, image_tag) =
-        if let Some((name, tag)) = image.split_once(':') { (name, tag) } else { (image, "latest") };
+    // Configure GPU if requested (print warning but daemon handles it)
+    let _gpu_config = resolve_gpu_config(gpu_option)?;
 
-    // Resolve image to get actual rootfs path (auto-pulls from registry if not found locally)
-    println!("Resolving image {}:{}...", image_name, image_tag);
-    let image_info = client
-        .get_image(image_name, image_tag)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to get image {}:{} - {}", image_name, image_tag, e))?;
-
-    // Generate VM ID and name
-    let vm_id = format!("vm-{}", uuid::Uuid::new_v4());
-    let vm_name = name.unwrap_or_else(|| format!("vm-{}", &vm_id[3..11]));
-
-    // Combine user-specified ports with EXPOSE ports from image
-    let mut port_mappings = ports
+    // Build proto config with resources
+    let port_mappings: Vec<ProtoPortMapping> = ports
         .into_iter()
-        .map(|(host, guest)| hypr_core::PortMapping {
-            host_port: host,
-            vm_port: guest,
-            protocol: Protocol::Tcp,
+        .map(|(host, guest)| ProtoPortMapping {
+            host_port: host as u32,
+            guest_port: guest as u32,
+            protocol: "tcp".to_string(),
         })
-        .collect::<Vec<_>>();
+        .collect();
 
-    // Auto-map EXPOSE ports if no ports were manually specified
-    if port_mappings.is_empty() {
-        for exposed_port in &image_info.manifest.exposed_ports {
-            port_mappings.push(hypr_core::PortMapping {
-                host_port: *exposed_port,
-                vm_port: *exposed_port,
-                protocol: Protocol::Tcp,
-            });
-            println!("Auto-mapping port {} (from EXPOSE)", exposed_port);
-        }
-    }
-
-    // Configure GPU if requested
-    let gpu_config = resolve_gpu_config(gpu_option)?;
-    if gpu_config.is_some() {
-        println!("GPU passthrough enabled");
-    }
-
-    // Build VM config
-    let config = VmConfig {
-        network_enabled: true,
-        id: vm_id.clone(),
-        name: vm_name.clone(),
-        resources: VmResources {
+    let config = ProtoVmConfig {
+        id: String::new(),
+        name: String::new(),
+        resources: Some(VmResources {
             cpus: cpus.unwrap_or(2),
             memory_mb: memory_mb.unwrap_or(512),
             balloon_enabled: true,
-        },
-        kernel_path: None, // Use default
-        kernel_args: vec![],
-        initramfs_path: None, // Only used for build VMs
-        disks: vec![
-            // Root disk (use actual image rootfs path from database)
-            DiskConfig {
-                path: image_info.rootfs_path.clone(),
-                readonly: true,
-                format: DiskFormat::Squashfs,
-            },
-        ],
-        network: NetworkConfig::default(),
+        }),
+        kernel_path: None,
+        disks: vec![],
+        network: None,
         ports: port_mappings,
-        env: env.into_iter().collect(),
+        env: std::collections::HashMap::new(),
         volumes: vec![],
-        gpu: gpu_config,
-        virtio_fs_mounts: vec![],
+        kernel_args: vec![],
+        gpu: None,
+        vsock_path: String::new(),
     };
 
-    println!("Creating VM '{}'...", vm_name);
-    let image_ref = format!("{}:{}", image_name, image_tag);
-    let vm = client.create_vm(config, image_ref).await?;
-    println!("VM created: {}", vm.id);
+    // Run with streaming progress
+    let vm = client
+        .run_vm(image, name, Some(config), |stage, message| {
+            let symbol = match stage {
+                "resolving" => "→".cyan(),
+                "cached" => "✓".green(),
+                "pulling" => "↓".yellow(),
+                "pulled" => "✓".green(),
+                "creating" => "◐".yellow(),
+                "starting" => "◐".yellow(),
+                "running" => "✓".green(),
+                _ => "•".dimmed(),
+            };
 
-    println!("Starting VM...");
-    let vm = client.start_vm(&vm.id).await?;
-    println!("VM started: {}", vm.name);
+            print!("\r\x1b[K");
+            print!("{} {}", symbol.bold(), message);
+            io::stdout().flush().ok();
 
+            if stage == "running" || stage == "cached" || stage == "pulled" {
+                println!();
+            }
+        })
+        .await?;
+
+    println!();
+    println!("{} VM running: {}", "✓".green().bold(), vm.name.bold());
     if let Some(ip) = vm.ip_address {
-        println!("IP address: {}", ip);
+        println!("  IP: {}", ip.cyan());
     }
+    println!("  ID: {}", vm.id.dimmed());
 
     Ok(())
 }

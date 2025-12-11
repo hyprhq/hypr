@@ -4,6 +4,7 @@
 //! from docker-compose files, including dependency resolution, network setup,
 //! and lifecycle management.
 
+use hypr_api::hypr::v1::{deploy_stack_event, DeployProgress, DeployStackEvent};
 use hypr_core::adapters::VmmAdapter;
 use hypr_core::compose::{ComposeConverter, ComposeParser};
 use hypr_core::registry::ImagePuller;
@@ -16,7 +17,12 @@ use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use tokio::sync::mpsc::Sender;
+use tonic::Status;
 use tracing::{error, info, instrument, warn};
+
+/// Type alias for progress event sender
+pub type ProgressSender = Sender<std::result::Result<DeployStackEvent, Status>>;
 
 /// State of a stack.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,7 +112,8 @@ impl StackOrchestrator {
         }
     }
 
-    /// Deploy a stack from a docker-compose file.
+    /// Deploy a stack from a docker-compose file (non-streaming version).
+    #[allow(dead_code)]
     #[instrument(skip(self, compose_file_path), fields(path = %compose_file_path.as_ref().display()))]
     pub async fn deploy_stack(
         &self,
@@ -181,7 +188,121 @@ impl StackOrchestrator {
         }
     }
 
-    /// Internal deployment logic.
+    /// Deploy a stack with streaming progress updates.
+    #[instrument(skip(self, compose_file_path, progress_tx), fields(path = %compose_file_path.as_ref().display()))]
+    pub async fn deploy_stack_with_progress(
+        &self,
+        compose_file_path: impl AsRef<Path> + std::fmt::Debug,
+        stack_name: Option<String>,
+        build: bool,
+        progress_tx: ProgressSender,
+    ) -> Result<String> {
+        info!("Deploying stack with progress (build={})", build);
+
+        let compose_path = compose_file_path.as_ref().to_path_buf();
+        let compose_dir = compose_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+
+        // Send parsing progress
+        Self::send_progress(&progress_tx, "", "parsing", "Parsing compose file...").await;
+
+        // Parse compose file
+        let compose = ComposeParser::parse_file(&compose_path)
+            .map_err(|e| HyprError::Internal(format!("Failed to parse compose file: {}", e)))?;
+
+        // Convert to stack config
+        let stack_config =
+            ComposeConverter::convert_async(compose, stack_name, compose_dir).await?;
+
+        // Generate stack ID
+        let stack_id = format!(
+            "stack_{}",
+            std::time::SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs()
+        );
+
+        info!(stack_id = %stack_id, stack_name = %stack_config.name, "Generated stack ID");
+
+        // Create stack info
+        let mut stack_info = StackInfo {
+            id: stack_id.clone(),
+            name: stack_config.name.clone(),
+            services: Vec::new(),
+            created_at: SystemTime::now(),
+            state: StackState::Deploying,
+        };
+
+        // Store initial stack state
+        {
+            let mut stacks = self.stacks.write().await;
+            stacks.insert(stack_id.clone(), stack_info.clone());
+        }
+
+        // Deploy with progress
+        match self.deploy_stack_internal_with_progress(&stack_config, &stack_id, &progress_tx).await
+        {
+            Ok(services) => {
+                stack_info.services = services;
+                stack_info.state = StackState::Running;
+
+                let mut stacks = self.stacks.write().await;
+                stacks.insert(stack_id.clone(), stack_info);
+
+                info!(stack_id = %stack_id, "Stack deployed successfully");
+                Ok(stack_id)
+            }
+            Err(e) => {
+                error!(stack_id = %stack_id, error = %e, "Stack deployment failed, rolling back");
+
+                if let Err(rollback_err) = self.rollback_stack(&stack_id).await {
+                    warn!(error = %rollback_err, "Rollback encountered errors");
+                }
+
+                stack_info.state = StackState::Failed;
+                let mut stacks = self.stacks.write().await;
+                stacks.insert(stack_id.clone(), stack_info);
+
+                Err(e)
+            }
+        }
+    }
+
+    /// Send a progress event
+    async fn send_progress(tx: &ProgressSender, service: &str, stage: &str, message: &str) {
+        let event = DeployStackEvent {
+            event: Some(deploy_stack_event::Event::Progress(DeployProgress {
+                service: service.to_string(),
+                stage: stage.to_string(),
+                message: message.to_string(),
+                current: 0,
+                total: 0,
+            })),
+        };
+        let _ = tx.send(Ok(event)).await;
+    }
+
+    /// Send progress with byte counts (for future use with streaming downloads)
+    #[allow(dead_code)]
+    async fn send_progress_bytes(
+        tx: &ProgressSender,
+        service: &str,
+        stage: &str,
+        message: &str,
+        current: u64,
+        total: u64,
+    ) {
+        let event = DeployStackEvent {
+            event: Some(deploy_stack_event::Event::Progress(DeployProgress {
+                service: service.to_string(),
+                stage: stage.to_string(),
+                message: message.to_string(),
+                current,
+                total,
+            })),
+        };
+        let _ = tx.send(Ok(event)).await;
+    }
+
+    /// Internal deployment logic (non-streaming version).
+    #[allow(dead_code)]
     async fn deploy_stack_internal(
         &self,
         stack_config: &StackConfig,
@@ -378,6 +499,219 @@ impl StackOrchestrator {
             });
 
             info!(service = %service.name, vm_id = %vm.id, ip = %ip, "Service started successfully");
+        }
+
+        Ok(service_statuses)
+    }
+
+    /// Internal deployment with progress reporting.
+    async fn deploy_stack_internal_with_progress(
+        &self,
+        stack_config: &StackConfig,
+        stack_id: &str,
+        progress_tx: &ProgressSender,
+    ) -> Result<Vec<ServiceStatus>> {
+        let ordered_services = self.topological_sort(&stack_config.services)?;
+        let total_services = ordered_services.len();
+
+        let mut service_statuses = Vec::new();
+        let mut created_vms = Vec::new();
+
+        for (idx, service_name) in ordered_services.iter().enumerate() {
+            let service =
+                stack_config.services.iter().find(|s| s.name == *service_name).ok_or_else(
+                    || HyprError::Internal(format!("Service {} not found", service_name)),
+                )?;
+
+            // Progress: starting service
+            Self::send_progress(
+                progress_tx,
+                &service.name,
+                "preparing",
+                &format!("[{}/{}] Preparing {}", idx + 1, total_services, service.name),
+            )
+            .await;
+
+            // Allocate IP
+            let mut allocator = self.ip_allocator.lock().await;
+            let ip = allocator.allocate(service.vm_config.id.clone());
+            drop(allocator);
+
+            let mut vm_config = service.vm_config.clone();
+            if let std::net::IpAddr::V4(ipv4) = ip {
+                vm_config.network.ip_address = Some(ipv4);
+            }
+
+            // Get image
+            let image_ref = &service.image;
+            let (image_name, image_tag) = hypr_core::registry::parse_image_ref(image_ref);
+
+            let image = match self.state.get_image_by_name_tag(&image_name, &image_tag).await {
+                Ok(img) => {
+                    Self::send_progress(
+                        progress_tx,
+                        &service.name,
+                        "cached",
+                        &format!(
+                            "[{}/{}] {} using cached image",
+                            idx + 1,
+                            total_services,
+                            service.name
+                        ),
+                    )
+                    .await;
+                    img
+                }
+                Err(_) => {
+                    // Progress: pulling image
+                    Self::send_progress(
+                        progress_tx,
+                        &service.name,
+                        "pulling",
+                        &format!(
+                            "[{}/{}] {} pulling {}",
+                            idx + 1,
+                            total_services,
+                            service.name,
+                            image_ref
+                        ),
+                    )
+                    .await;
+
+                    let mut puller = ImagePuller::new().map_err(|e| {
+                        HyprError::Internal(format!("Failed to create image puller: {}", e))
+                    })?;
+
+                    let image = puller.pull(image_ref).await.map_err(|e| {
+                        HyprError::Internal(format!(
+                            "Failed to pull image {} for service {}: {}",
+                            image_ref, service.name, e
+                        ))
+                    })?;
+
+                    self.state.insert_image(&image).await?;
+
+                    Self::send_progress(
+                        progress_tx,
+                        &service.name,
+                        "pulled",
+                        &format!("[{}/{}] {} image ready", idx + 1, total_services, service.name),
+                    )
+                    .await;
+
+                    image
+                }
+            };
+
+            // Update disk path
+            if !vm_config.disks.is_empty() {
+                vm_config.disks[0] = DiskConfig {
+                    path: image.rootfs_path.clone(),
+                    readonly: true,
+                    format: DiskFormat::Squashfs,
+                };
+            }
+
+            // Build RuntimeManifest
+            let (entrypoint, workdir, image_env) = if !service.entrypoint.is_empty() {
+                (service.entrypoint.clone(), service.workdir.clone(), HashMap::new())
+            } else {
+                let mut ep = image.manifest.entrypoint.clone();
+                if ep.is_empty() {
+                    ep = image.manifest.cmd.clone();
+                } else if !image.manifest.cmd.is_empty() {
+                    ep.extend(image.manifest.cmd.clone());
+                }
+                (ep, image.manifest.workdir.clone(), image.manifest.env.clone())
+            };
+
+            if !entrypoint.is_empty() {
+                use hypr_core::manifest::runtime_manifest::{
+                    NetworkConfig as ManifestNetworkConfig, RuntimeManifest,
+                };
+
+                let mut env_vars: Vec<String> =
+                    image_env.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
+                for (k, v) in &vm_config.env {
+                    env_vars.push(format!("{}={}", k, v));
+                }
+
+                let mut manifest = RuntimeManifest::new(entrypoint.clone()).with_env(env_vars);
+                if !workdir.is_empty() {
+                    manifest = manifest.with_workdir(workdir.clone());
+                }
+                manifest = manifest.with_network(ManifestNetworkConfig {
+                    ip: ip.to_string(),
+                    netmask: "255.255.255.0".to_string(),
+                    gateway: "10.88.0.1".to_string(),
+                    dns: vec!["8.8.8.8".to_string(), "1.1.1.1".to_string()],
+                });
+
+                match manifest.encode() {
+                    Ok(encoded) => {
+                        vm_config.kernel_args.push(format!("manifest={}", encoded));
+                    }
+                    Err(e) => {
+                        return Err(HyprError::Internal(format!(
+                            "Failed to encode RuntimeManifest: {}",
+                            e
+                        )));
+                    }
+                }
+            }
+
+            // Progress: starting VM
+            Self::send_progress(
+                progress_tx,
+                &service.name,
+                "starting",
+                &format!("[{}/{}] {} starting VM", idx + 1, total_services, service.name),
+            )
+            .await;
+
+            // Create VM
+            let handle = self.adapter.create(&vm_config).await.map_err(|e| {
+                error!(service = %service.name, error = %e, "Failed to create VM");
+                e
+            })?;
+
+            let vm = Vm {
+                id: vm_config.id.clone(),
+                name: vm_config.name.clone(),
+                image_id: format!("stack_{}", stack_id),
+                status: VmStatus::Creating,
+                config: vm_config.clone(),
+                ip_address: Some(ip.to_string()),
+                pid: handle.pid,
+                created_at: SystemTime::now(),
+                started_at: None,
+                stopped_at: None,
+            };
+
+            self.state.insert_vm(&vm).await?;
+            self.adapter.start(&handle).await.map_err(|e| {
+                error!(service = %service.name, vm_id = %vm.id, error = %e, "Failed to start VM");
+                e
+            })?;
+
+            created_vms.push((vm.id.clone(), handle));
+            self.state.update_vm_status(&vm.id, VmStatus::Running).await?;
+
+            // Progress: running
+            Self::send_progress(
+                progress_tx,
+                &service.name,
+                "running",
+                &format!("[{}/{}] {} running ({})", idx + 1, total_services, service.name, ip),
+            )
+            .await;
+
+            service_statuses.push(ServiceStatus {
+                name: service.name.clone(),
+                vm_id: vm.id.clone(),
+                status: VmStatus::Running,
+                ip: Some(ip),
+            });
         }
 
         Ok(service_statuses)

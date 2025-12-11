@@ -199,7 +199,7 @@ impl Default for ImagePuller {
 }
 
 /// Parse an image reference into name and tag.
-fn parse_image_ref(image_ref: &str) -> (String, String) {
+pub fn parse_image_ref(image_ref: &str) -> (String, String) {
     // Handle digest references (image@sha256:...)
     if image_ref.contains('@') {
         let parts: Vec<&str> = image_ref.splitn(2, '@').collect();

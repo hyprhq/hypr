@@ -4,9 +4,13 @@ use crate::network_manager::NetworkManager;
 use crate::orchestrator::StackOrchestrator;
 use base64::Engine;
 use hypr_api::hypr::v1::hypr_service_server::{HyprService, HyprServiceServer};
-use hypr_api::hypr::v1::*;
+use hypr_api::hypr::v1::{self as proto, *};
 use hypr_core::adapters::VmmAdapter;
-use hypr_core::{HyprError, Result, StateManager, Vm, VmConfig, VmStatus};
+use hypr_core::registry::ImagePuller;
+use hypr_core::{HyprError, Result, StateManager, Vm, VmConfig, VmHandle, VmStatus};
+
+/// Alias for core VmConfig to avoid confusion with proto VmConfig
+type CoreVmConfig = VmConfig;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -508,6 +512,57 @@ impl HyprService for HyprServiceImpl {
     type StreamLogsStream =
         Pin<Box<dyn Stream<Item = std::result::Result<LogEntry, Status>> + Send>>;
 
+    type DeployStackStream =
+        Pin<Box<dyn Stream<Item = std::result::Result<DeployStackEvent, Status>> + Send>>;
+
+    type RunVMStream =
+        Pin<Box<dyn Stream<Item = std::result::Result<RunVmEvent, Status>> + Send>>;
+
+    #[instrument(skip(self), fields(image = %request.get_ref().image))]
+    async fn run_vm(
+        &self,
+        request: Request<RunVmRequest>,
+    ) -> std::result::Result<Response<Self::RunVMStream>, Status> {
+        info!("gRPC: RunVM (streaming)");
+
+        let req = request.into_inner();
+        let image_ref = req.image.clone();
+        let vm_name = req.name.filter(|s| !s.is_empty());
+        let config = req.config;
+
+        // Create channel for progress events
+        let (tx, rx) = tokio::sync::mpsc::channel::<std::result::Result<RunVmEvent, Status>>(100);
+
+        // Clone what we need for the spawned task
+        let state = self.state.clone();
+        let adapter = self.adapter.clone();
+        let network_mgr = self.network_mgr.clone();
+
+        tokio::spawn(async move {
+            let result = run_vm_with_progress(
+                &state,
+                &adapter,
+                &network_mgr,
+                &image_ref,
+                vm_name,
+                config,
+                &tx,
+            ).await;
+
+            if let Err(e) = result {
+                let event = RunVmEvent {
+                    event: Some(run_vm_event::Event::Error(RunError {
+                        message: e.to_string(),
+                    })),
+                };
+                let _ = tx.send(Ok(event)).await;
+            }
+        });
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream) as Self::RunVMStream))
+    }
+
     #[instrument(skip(self), fields(vm_id = %request.get_ref().vm_id))]
     async fn stream_logs(
         &self,
@@ -555,8 +610,8 @@ impl HyprService for HyprServiceImpl {
     async fn deploy_stack(
         &self,
         request: Request<DeployStackRequest>,
-    ) -> std::result::Result<Response<DeployStackResponse>, Status> {
-        info!("gRPC: DeployStack");
+    ) -> std::result::Result<Response<Self::DeployStackStream>, Status> {
+        info!("gRPC: DeployStack (streaming)");
 
         let req = request.into_inner();
 
@@ -564,22 +619,46 @@ impl HyprService for HyprServiceImpl {
         let stack_name = req.stack_name.filter(|s| !s.is_empty());
         let build = req.build;
 
-        let stack_id = self
-            .orchestrator
-            .deploy_stack(compose_path, stack_name, build)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        // Create channel for progress events
+        let (tx, rx) =
+            tokio::sync::mpsc::channel::<std::result::Result<DeployStackEvent, Status>>(100);
 
-        // Get stack info
-        let stack_info = self
-            .orchestrator
-            .get_stack(&stack_id)
-            .await
-            .ok_or_else(|| Status::internal("Stack created but not found"))?;
+        // Clone orchestrator for the spawned task
+        let orchestrator = self.orchestrator.clone();
 
-        let response = DeployStackResponse { stack: Some(stack_info.into()) };
+        // Spawn deployment task
+        tokio::spawn(async move {
+            match orchestrator
+                .deploy_stack_with_progress(compose_path, stack_name, build, tx.clone())
+                .await
+            {
+                Ok(stack_id) => {
+                    // Get final stack info
+                    if let Some(stack_info) = orchestrator.get_stack(&stack_id).await {
+                        let event = DeployStackEvent {
+                            event: Some(deploy_stack_event::Event::Complete(DeployComplete {
+                                stack: Some(stack_info.into()),
+                            })),
+                        };
+                        let _ = tx.send(Ok(event)).await;
+                    }
+                }
+                Err(e) => {
+                    let event = DeployStackEvent {
+                        event: Some(deploy_stack_event::Event::Error(DeployError {
+                            service: String::new(),
+                            message: e.to_string(),
+                        })),
+                    };
+                    let _ = tx.send(Ok(event)).await;
+                }
+            }
+        });
 
-        Ok(Response::new(response))
+        // Convert channel receiver to stream
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        Ok(Response::new(Box::pin(stream) as Self::DeployStackStream))
     }
 
     #[instrument(skip(self))]
@@ -824,6 +903,183 @@ async fn stream_log_file(
             }
         }
     }
+
+    Ok(())
+}
+
+/// Type alias for run progress sender
+type RunProgressSender = tokio::sync::mpsc::Sender<std::result::Result<RunVmEvent, Status>>;
+
+/// Send run progress event
+async fn send_run_progress(tx: &RunProgressSender, stage: &str, message: &str) {
+    let event = RunVmEvent {
+        event: Some(run_vm_event::Event::Progress(RunProgress {
+            stage: stage.to_string(),
+            message: message.to_string(),
+            current: 0,
+            total: 0,
+        })),
+    };
+    let _ = tx.send(Ok(event)).await;
+}
+
+/// Run VM with streaming progress
+async fn run_vm_with_progress(
+    state: &Arc<StateManager>,
+    adapter: &Arc<dyn VmmAdapter>,
+    network_mgr: &Arc<NetworkManager>,
+    image_ref: &str,
+    vm_name: Option<String>,
+    proto_config: Option<proto::VmConfig>,
+    tx: &RunProgressSender,
+) -> Result<()> {
+    // Parse image reference
+    let (image_name, image_tag) = if let Some(pos) = image_ref.rfind(':') {
+        (&image_ref[..pos], &image_ref[pos + 1..])
+    } else {
+        (image_ref, "latest")
+    };
+
+    // Stage 1: Resolve image
+    send_run_progress(tx, "resolving", &format!("Resolving image {}:{}", image_name, image_tag)).await;
+
+    let image = match state.get_image_by_name_tag(image_name, image_tag).await {
+        Ok(img) => {
+            send_run_progress(tx, "cached", &format!("Using cached image {}:{}", image_name, image_tag)).await;
+            img
+        }
+        Err(_) => {
+            // Need to pull
+            send_run_progress(tx, "pulling", &format!("Pulling {}:{}", image_name, image_tag)).await;
+
+            let mut puller = ImagePuller::new().map_err(|e| {
+                HyprError::Internal(format!("Failed to create image puller: {}", e))
+            })?;
+
+            let image = puller.pull(image_ref).await.map_err(|e| {
+                HyprError::Internal(format!("Failed to pull image {}: {}", image_ref, e))
+            })?;
+
+            state.insert_image(&image).await?;
+            send_run_progress(tx, "pulled", &format!("Image {}:{} ready", image_name, image_tag)).await;
+            image
+        }
+    };
+
+    // Stage 2: Create VM
+    send_run_progress(tx, "creating", "Creating VM...").await;
+
+    // Generate VM ID and name
+    let vm_id = format!("vm-{}", uuid::Uuid::new_v4());
+    let final_vm_name = vm_name.unwrap_or_else(|| format!("vm-{}", &vm_id[3..11]));
+
+    // Build VM config from proto or defaults
+    let (cpus, memory_mb) = if let Some(ref cfg) = proto_config {
+        let r = cfg.resources.as_ref();
+        (r.map(|r| r.cpus).unwrap_or(2), r.map(|r| r.memory_mb).unwrap_or(512))
+    } else {
+        (2, 512)
+    };
+
+    let mut vm_config = CoreVmConfig {
+        id: String::new(),
+        name: String::new(),
+        resources: hypr_core::VmResources { cpus, memory_mb, balloon_enabled: true },
+        kernel_path: None,
+        kernel_args: vec![],
+        initramfs_path: None,
+        disks: vec![],
+        network: hypr_core::types::network::NetworkConfig::default(),
+        ports: vec![],
+        env: std::collections::HashMap::new(),
+        volumes: vec![],
+        gpu: None,
+        virtio_fs_mounts: vec![],
+        network_enabled: true,
+    };
+
+    vm_config.id = vm_id.clone();
+    vm_config.name = final_vm_name.clone();
+
+    // Set disk from image
+    vm_config.disks = vec![hypr_core::types::vm::DiskConfig {
+        path: image.rootfs_path.clone(),
+        readonly: true,
+        format: hypr_core::types::vm::DiskFormat::Squashfs,
+    }];
+
+    // Allocate IP
+    let vm_ip = network_mgr.allocate_ip(&vm_config.id).await.map_err(|e| {
+        HyprError::Internal(format!("Failed to allocate IP: {}", e))
+    })?;
+    vm_config.network.ip_address = Some(vm_ip);
+
+    // Build RuntimeManifest
+    let mut entrypoint = image.manifest.entrypoint.clone();
+    if entrypoint.is_empty() {
+        entrypoint = image.manifest.cmd.clone();
+    } else if !image.manifest.cmd.is_empty() {
+        entrypoint.extend(image.manifest.cmd.clone());
+    }
+
+    if !entrypoint.is_empty() {
+        use hypr_core::manifest::runtime_manifest::{
+            NetworkConfig as ManifestNetworkConfig, RuntimeManifest,
+        };
+
+        let env_vars: Vec<String> =
+            image.manifest.env.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
+
+        let mut manifest = RuntimeManifest::new(entrypoint).with_env(env_vars);
+        if !image.manifest.workdir.is_empty() {
+            manifest = manifest.with_workdir(image.manifest.workdir.clone());
+        }
+        manifest = manifest.with_network(ManifestNetworkConfig {
+            ip: vm_ip.to_string(),
+            netmask: "255.255.255.0".to_string(),
+            gateway: "10.88.0.1".to_string(),
+            dns: vec!["8.8.8.8".to_string(), "1.1.1.1".to_string()],
+        });
+
+        if let Ok(encoded) = manifest.encode() {
+            vm_config.kernel_args.push(format!("manifest={}", encoded));
+        }
+    }
+
+    // Create via adapter
+    let handle = adapter.create(&vm_config).await?;
+
+    // Save to state
+    let vm = Vm {
+        id: vm_config.id.clone(),
+        name: vm_config.name.clone(),
+        image_id: image.id.clone(),
+        status: VmStatus::Creating,
+        config: vm_config.clone(),
+        ip_address: Some(vm_ip.to_string()),
+        pid: handle.pid,
+        created_at: SystemTime::now(),
+        started_at: None,
+        stopped_at: None,
+    };
+    state.insert_vm(&vm).await?;
+
+    // Stage 3: Start VM
+    send_run_progress(tx, "starting", "Starting VM...").await;
+    adapter.start(&handle).await?;
+    state.update_vm_status(&vm_config.id, VmStatus::Running).await?;
+
+    // Done
+    send_run_progress(tx, "running", &format!("VM {} running at {}", final_vm_name, vm_ip)).await;
+
+    // Send complete event
+    let final_vm = state.get_vm(&vm_config.id).await?;
+    let event = RunVmEvent {
+        event: Some(run_vm_event::Event::Complete(RunComplete {
+            vm: Some(final_vm.into()),
+        })),
+    };
+    let _ = tx.send(Ok(event)).await;
 
     Ok(())
 }

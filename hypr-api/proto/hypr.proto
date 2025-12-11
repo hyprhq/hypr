@@ -17,6 +17,9 @@ service HyprService {
   rpc ListVms(ListVmsRequest) returns (ListVmsResponse);
   rpc GetVM(GetVMRequest) returns (GetVMResponse);
 
+  // Combined run with streaming progress (image pull + create + start)
+  rpc RunVM(RunVMRequest) returns (stream RunVMEvent);
+
   // Logging
   rpc StreamLogs(StreamLogsRequest) returns (stream LogEntry);
 
@@ -25,8 +28,8 @@ service HyprService {
   rpc GetImage(GetImageRequest) returns (GetImageResponse);
   rpc DeleteImage(DeleteImageRequest) returns (DeleteImageResponse);
 
-  // Stack operations
-  rpc DeployStack(DeployStackRequest) returns (DeployStackResponse);
+  // Stack operations (streaming for progress updates)
+  rpc DeployStack(DeployStackRequest) returns (stream DeployStackEvent);
   rpc DestroyStack(DestroyStackRequest) returns (DestroyStackResponse);
   rpc ListStacks(ListStacksRequest) returns (ListStacksResponse);
   rpc GetStack(GetStackRequest) returns (GetStackResponse);
@@ -210,6 +213,36 @@ message GetVMResponse {
   VM vm = 1;
 }
 
+// RunVM - Combined streaming operation
+message RunVMRequest {
+  string image = 1;             // Image name:tag (e.g., "nginx:latest")
+  optional string name = 2;     // Optional VM name
+  VMConfig config = 3;          // VM configuration
+}
+
+message RunVMEvent {
+  oneof event {
+    RunProgress progress = 1;
+    RunComplete complete = 2;
+    RunError error = 3;
+  }
+}
+
+message RunProgress {
+  string stage = 1;             // "resolving", "pulling", "creating", "starting", "running"
+  string message = 2;           // Human-readable message
+  uint64 current = 3;           // Current progress (bytes for pull)
+  uint64 total = 4;             // Total size (0 if unknown)
+}
+
+message RunComplete {
+  VM vm = 1;
+}
+
+message RunError {
+  string message = 1;
+}
+
 // Image Operations
 
 message ListImagesRequest {
@@ -249,8 +282,30 @@ message DeployStackRequest {
   bool build = 5; // Build images before deploying
 }
 
-message DeployStackResponse {
+// Streaming events for deploy progress
+message DeployStackEvent {
+  oneof event {
+    DeployProgress progress = 1;
+    DeployComplete complete = 2;
+    DeployError error = 3;
+  }
+}
+
+message DeployProgress {
+  string service = 1;           // Service name
+  string stage = 2;             // "pulling", "extracting", "starting", "running"
+  string message = 3;           // Human-readable message
+  uint64 current = 4;           // Current progress (bytes downloaded, etc.)
+  uint64 total = 5;             // Total size (0 if unknown)
+}
+
+message DeployComplete {
   Stack stack = 1;
+}
+
+message DeployError {
+  string service = 1;           // Service that failed (empty if general error)
+  string message = 2;           // Error message
 }
 
 message DestroyStackRequest {

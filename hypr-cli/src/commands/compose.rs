@@ -10,6 +10,8 @@ use std::io::{self, Write};
 use std::time::Duration;
 use tabled::{settings::Style, Table, Tabled};
 
+// Note: ProgressBar/ProgressStyle still used in down() function
+
 /// Deploy a stack from a docker-compose.yml file
 pub async fn up(
     compose_file: &str,
@@ -33,40 +35,36 @@ pub async fn up(
     );
     println!();
 
-    // Show each service and its image
-    for (name, service) in &compose.services {
-        let image = if !service.image.is_empty() {
-            &service.image
-        } else if service.build.is_some() {
-            "(build)"
-        } else {
-            "(unknown)"
-        };
-        println!("  {} {} {}", "•".dimmed(), name.bold(), image.dimmed());
-    }
-    println!();
-
     let mut client = HyprClient::connect().await?;
 
-    // Show deployment progress
-    let spinner = ProgressBar::new_spinner();
-    spinner.set_style(
-        ProgressStyle::default_spinner()
-            .template("{spinner:.green} {msg}")
-            .unwrap()
-            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-    );
-    spinner.set_message("Pulling images and starting VMs (this may take a while)...".to_string());
-    spinner.enable_steady_tick(Duration::from_millis(100));
-
+    // Deploy with streaming progress
     let stack = client
-        .deploy_stack(compose_file, stack_name, detach, false, false)
+        .deploy_stack(compose_file, stack_name, detach, false, false, |_service, stage, message| {
+            // Color code based on stage
+            let symbol = match stage {
+                "parsing" => "→".cyan(),
+                "preparing" => "→".cyan(),
+                "pulling" => "↓".yellow(),
+                "pulled" | "cached" => "✓".green(),
+                "starting" => "◐".yellow(),
+                "running" => "✓".green(),
+                _ => "•".dimmed(),
+            };
+
+            // Clear line and print progress
+            print!("\r\x1b[K"); // Clear line
+            print!("{} {}", symbol.bold(), message);
+            io::stdout().flush().ok();
+
+            // Add newline for completed stages
+            if stage == "running" || stage == "pulled" || stage == "cached" {
+                println!();
+            }
+        })
         .await
         .context("Failed to deploy stack")?;
 
-    spinner.finish_and_clear();
-
-    // Display deployment result
+    println!();
     println!("{} Stack deployed: {}", "✓".green().bold(), stack.name.bold());
     println!();
 

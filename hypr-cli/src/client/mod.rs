@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use hypr_api::hypr::v1::hypr_service_client::HyprServiceClient;
-use hypr_api::hypr::v1::*;
+use hypr_api::hypr::v1::{self as proto, *};
 use hypr_core::{Stack, Vm, VmConfig};
 use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint, Uri};
@@ -58,6 +58,46 @@ impl HyprClient {
         let vm = response.into_inner().vm.ok_or_else(|| anyhow::anyhow!("No VM in response"))?;
 
         Ok(vm.try_into()?)
+    }
+
+    /// Run a VM with streaming progress (image pull + create + start)
+    pub async fn run_vm<F>(
+        &mut self,
+        image: &str,
+        name: Option<String>,
+        config: Option<proto::VmConfig>,
+        mut on_progress: F,
+    ) -> Result<Vm>
+    where
+        F: FnMut(&str, &str) + Send,  // (stage, message)
+    {
+        let request = tonic::Request::new(RunVmRequest {
+            image: image.to_string(),
+            name,
+            config,
+        });
+
+        let mut stream = self.client.run_vm(request).await?.into_inner();
+        let mut final_vm: Option<Vm> = None;
+
+        while let Some(event) = stream.message().await? {
+            match event.event {
+                Some(run_vm_event::Event::Progress(progress)) => {
+                    on_progress(&progress.stage, &progress.message);
+                }
+                Some(run_vm_event::Event::Complete(complete)) => {
+                    if let Some(vm) = complete.vm {
+                        final_vm = Some(vm.try_into()?);
+                    }
+                }
+                Some(run_vm_event::Event::Error(error)) => {
+                    return Err(anyhow::anyhow!("Run failed: {}", error.message));
+                }
+                None => {}
+            }
+        }
+
+        final_vm.ok_or_else(|| anyhow::anyhow!("No VM returned"))
     }
 
     /// Stop a VM
@@ -152,15 +192,19 @@ impl HyprClient {
         Ok((health.status, health.version))
     }
 
-    /// Deploy a stack from a compose file
-    pub async fn deploy_stack(
+    /// Deploy a stack from a compose file with streaming progress
+    pub async fn deploy_stack<F>(
         &mut self,
         compose_file: &str,
         stack_name: Option<String>,
         detach: bool,
         force_recreate: bool,
         build: bool,
-    ) -> Result<Stack> {
+        mut on_progress: F,
+    ) -> Result<Stack>
+    where
+        F: FnMut(&str, &str, &str) + Send, // (service, stage, message)
+    {
         let request = tonic::Request::new(DeployStackRequest {
             compose_file: compose_file.to_string(),
             stack_name,
@@ -169,11 +213,32 @@ impl HyprClient {
             build,
         });
 
-        let response = self.client.deploy_stack(request).await?;
-        let stack =
-            response.into_inner().stack.ok_or_else(|| anyhow::anyhow!("No stack in response"))?;
+        let mut stream = self.client.deploy_stack(request).await?.into_inner();
 
-        Ok(stack.try_into()?)
+        let mut final_stack: Option<Stack> = None;
+
+        while let Some(event) = stream.message().await? {
+            match event.event {
+                Some(deploy_stack_event::Event::Progress(progress)) => {
+                    on_progress(&progress.service, &progress.stage, &progress.message);
+                }
+                Some(deploy_stack_event::Event::Complete(complete)) => {
+                    if let Some(stack) = complete.stack {
+                        final_stack = Some(stack.try_into()?);
+                    }
+                }
+                Some(deploy_stack_event::Event::Error(error)) => {
+                    return Err(anyhow::anyhow!(
+                        "Deploy failed for {}: {}",
+                        if error.service.is_empty() { "stack" } else { &error.service },
+                        error.message
+                    ));
+                }
+                None => {}
+            }
+        }
+
+        final_stack.ok_or_else(|| anyhow::anyhow!("No stack returned from deployment"))
     }
 
     /// Destroy a stack
