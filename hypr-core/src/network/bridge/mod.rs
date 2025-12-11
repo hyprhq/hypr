@@ -111,7 +111,7 @@ pub trait BridgeManager: Send + Sync {
 ///
 /// # Supported Platforms
 /// * Linux: Uses `ip` command and iptables
-/// * macOS: Uses vmnet framework via vfkit
+/// * macOS: Uses vmnet framework via libkrun
 #[instrument]
 pub fn create_bridge_manager() -> Result<Arc<dyn BridgeManager>> {
     #[cfg(target_os = "linux")]

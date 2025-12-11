@@ -3,7 +3,7 @@
 //! Executes build instructions and produces image layers.
 //! Platform-specific implementations:
 //! - Linux: Native builder with chroot isolation
-//! - macOS: VM-based builder with HVF/vfkit
+//! - macOS: VM-based builder with libkrun
 
 use crate::builder::cache::CacheManager;
 use crate::builder::graph::BuildGraph;
@@ -1054,7 +1054,7 @@ pub struct LinuxVmBuilder {
     stage_outputs: HashMap<String, PathBuf>,
 }
 
-/// macOS VM-based builder using vfkit/HVF.
+/// macOS VM-based builder using libkrun.
 ///
 /// Executes builds in isolated Linux VMs. Base images are pulled on the host
 /// and shared via virtio-fs. The build VM pivots root into the base image.
@@ -1667,7 +1667,7 @@ impl LinuxVmBuilder {
 impl MacOsVmBuilder {
     /// Create a new macOS VM-based builder.
     pub fn new() -> BuildResult<Self> {
-        use crate::adapters::HvfAdapter;
+        use crate::adapters::LibkrunAdapter;
 
         let cache_dir = crate::paths::cache_dir();
         let work_dir = cache_dir.join(format!("build-{}", uuid::Uuid::new_v4()));
@@ -1681,9 +1681,9 @@ impl MacOsVmBuilder {
         // Placeholder: builder_rootfs will be replaced by on-the-fly initramfs
         let builder_rootfs = crate::paths::runtime_dir().join("builder-initramfs.cpio");
 
-        // Create VMM adapter for macOS (HVF)
-        let adapter = HvfAdapter::new().map_err(|e| {
-            BuildError::ContextError(format!("Failed to create HVF adapter: {}", e))
+        // Create VMM adapter for macOS (libkrun)
+        let adapter = LibkrunAdapter::new().map_err(|e| {
+            BuildError::ContextError(format!("Failed to create libkrun adapter: {}", e))
         })?;
 
         let vm_builder = crate::builder::VmBuilder::new(

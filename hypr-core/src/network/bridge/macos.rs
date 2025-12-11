@@ -1,6 +1,6 @@
 //! macOS bridge implementation.
 //!
-//! Delegates to vmnet framework via vfkit.
+//! Delegates to vmnet framework via libkrun.
 
 #[cfg(target_os = "macos")]
 use super::*;
@@ -10,7 +10,7 @@ use tracing::{info, instrument, warn};
 
 /// macOS bridge manager.
 ///
-/// On macOS, network bridging is handled by the vmnet framework through vfkit.
+/// On macOS, network bridging is handled by the vmnet framework through libkrun.
 /// This manager provides a compatibility layer that acknowledges the framework's
 /// automatic handling of bridge creation and NAT.
 #[cfg(target_os = "macos")]
@@ -25,9 +25,8 @@ impl BridgeManager for MacOSBridgeManager {
         info!("Bridge configuration: name={}, ip={}, mtu={}", config.name, config.ip, config.mtu);
 
         // On macOS, we use vmnet framework instead of manual bridge
-        // The actual bridge is created by vfkit/hypervisor framework
+        // The actual bridge is created by libkrun/hypervisor framework
         warn!("macOS bridge creation delegated to vmnet framework");
-        warn!("Ensure vfkit is configured with --net-mode vmnet");
 
         metrics::counter!("hypr_bridge_created_total").increment(1);
 
@@ -50,7 +49,7 @@ impl BridgeManager for MacOSBridgeManager {
     async fn bridge_exists(&self, name: &str) -> Result<bool> {
         info!("Checking if macOS bridge exists: {}", name);
 
-        // vmnet is always available if vfkit is installed
+        // vmnet is always available if libkrun is available
         // We assume the bridge is always available in vmnet mode
         Ok(true)
     }

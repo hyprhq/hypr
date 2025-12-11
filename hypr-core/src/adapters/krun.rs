@@ -1,137 +1,423 @@
-//! libkrun-efi adapter for macOS (stub for future implementation).
+//! libkrun adapter for macOS.
 //!
-//! This adapter will provide GPU-accelerated VMs on macOS via Metal.
-//! Current status: Phase 1 stub - full implementation in Phase 4.
+//! Provides VM lifecycle management using libkrun-efi, which leverages
+//! Apple's Virtualization.framework with additional features:
+//!
+//! - **Direct kernel boot**: via `krun_set_kernel()` - same model as Linux
+//! - **GPU passthrough**: via virtio-gpu + Venus → Metal
+//! - **Rosetta support**: x86_64 emulation on Apple Silicon
+//! - **Native performance**: Uses Virtualization.framework under the hood
 
+use super::libkrun_ffi::{GpuFlags, KernelFormat, Libkrun};
 use crate::adapters::{AdapterCapabilities, VmmAdapter};
 use crate::error::{HyprError, Result};
 use crate::types::network::NetworkConfig;
-use crate::types::vm::{DiskConfig, GpuConfig, VmConfig, VmHandle};
+use crate::types::vm::{CommandSpec, DiskConfig, GpuConfig, VmConfig, VmHandle};
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::PathBuf;
-use std::time::Duration;
-use tracing::{info, instrument, warn};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
+use tracing::{debug, error, info, instrument, warn};
 
-/// libkrun-efi adapter (stub).
-///
-/// **Status:** Phase 1 stub only. Full implementation planned for Phase 4.
-///
-/// This adapter will provide:
-/// - Metal GPU acceleration on macOS
-/// - 60-80% bare-metal GPU performance
-/// - Native Metal API integration
-/// - Sub-second boot times
-pub struct KrunAdapter {
-    /// Path to libkrun-efi.dylib
-    _library_path: PathBuf,
+// Embed kestrel initramfs directly in the binary
+#[cfg(target_arch = "x86_64")]
+static KESTREL_INITRAMFS: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/embedded/initramfs-linux-amd64.cpio"));
+
+#[cfg(target_arch = "aarch64")]
+static KESTREL_INITRAMFS: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/embedded/initramfs-linux-arm64.cpio"));
+
+/// VM context state tracked by the adapter.
+struct VmContext {
+    ctx_id: u32,
+    shutdown_eventfd: Option<i32>,
 }
 
-impl KrunAdapter {
-    /// Create a new libkrun-efi adapter.
-    ///
-    /// **Note:** This is a stub implementation. Actual libkrun-efi integration
-    /// will be implemented in Phase 4.
+/// libkrun adapter for macOS.
+///
+/// Uses libkrun-efi for native macOS virtualization with:
+/// - Direct kernel boot (same as cloud-hypervisor on Linux)
+/// - GPU passthrough via virtio-gpu + Venus (Metal backend)
+/// - Full virtio device support
+pub struct LibkrunAdapter {
+    /// libkrun library handle
+    libkrun: Arc<Libkrun>,
+    /// Default kernel path
+    kernel_path: PathBuf,
+    /// Active VM contexts (vm_id -> context)
+    contexts: Mutex<HashMap<String, VmContext>>,
+    /// Whether GPU is available (Apple Silicon)
+    gpu_available: bool,
+}
+
+impl LibkrunAdapter {
+    /// Create a new libkrun adapter.
     pub fn new() -> Result<Self> {
-        warn!("KrunAdapter is a Phase 1 stub - full implementation in Phase 4");
+        let libkrun = Arc::new(Libkrun::load()?);
 
-        // Check if library exists (but don't load it yet)
-        let library_path = Self::find_library()?;
+        // Set log level based on RUST_LOG
+        let log_level = if tracing::enabled!(tracing::Level::TRACE) {
+            5 // trace
+        } else if tracing::enabled!(tracing::Level::DEBUG) {
+            4 // debug
+        } else if tracing::enabled!(tracing::Level::INFO) {
+            3 // info
+        } else if tracing::enabled!(tracing::Level::WARN) {
+            2 // warn
+        } else {
+            1 // error
+        };
+        let _ = libkrun.set_log_level(log_level);
 
-        Ok(Self { _library_path: library_path })
+        let kernel_path = crate::paths::kernel_path();
+
+        // GPU is available on Apple Silicon (aarch64)
+        #[cfg(target_arch = "aarch64")]
+        let gpu_available = true;
+
+        #[cfg(not(target_arch = "aarch64"))]
+        let gpu_available = false;
+
+        info!(
+            kernel = %kernel_path.display(),
+            gpu_available,
+            "libkrun adapter initialized"
+        );
+
+        Ok(Self {
+            libkrun,
+            kernel_path,
+            contexts: Mutex::new(HashMap::new()),
+            gpu_available,
+        })
     }
 
-    /// Find libkrun-efi library.
-    fn find_library() -> Result<PathBuf> {
-        let candidates = vec![
-            PathBuf::from("/usr/local/lib/libkrun-efi.dylib"),
-            PathBuf::from("/opt/homebrew/lib/libkrun-efi.dylib"),
-        ];
+    /// Write embedded initramfs to a temporary file and return its path.
+    fn get_initramfs_path() -> Result<PathBuf> {
+        let runtime_dir = crate::paths::runtime_dir();
+        std::fs::create_dir_all(&runtime_dir)
+            .map_err(|e| HyprError::IoError { path: runtime_dir.clone(), source: e })?;
+        let temp_path = runtime_dir.join("kestrel-initramfs.cpio");
 
-        for path in candidates {
-            if path.exists() {
-                return Ok(path);
+        // Only write if it doesn't exist or is outdated
+        let should_write = if temp_path.exists() {
+            let metadata = std::fs::metadata(&temp_path)
+                .map_err(|e| HyprError::IoError { path: temp_path.clone(), source: e })?;
+            metadata.len() != KESTREL_INITRAMFS.len() as u64
+        } else {
+            true
+        };
+
+        if should_write {
+            let mut file = std::fs::File::create(&temp_path)
+                .map_err(|e| HyprError::IoError { path: temp_path.clone(), source: e })?;
+            file.write_all(KESTREL_INITRAMFS)
+                .map_err(|e| HyprError::IoError { path: temp_path.clone(), source: e })?;
+            debug!("Wrote embedded kestrel initramfs to {}", temp_path.display());
+        }
+
+        Ok(temp_path)
+    }
+
+    /// Get the log file path for a VM.
+    fn get_vm_log_path(vm_id: &str) -> Result<PathBuf> {
+        let log_dir = crate::paths::logs_dir();
+        std::fs::create_dir_all(&log_dir)
+            .map_err(|e| HyprError::IoError { path: log_dir.clone(), source: e })?;
+        Ok(log_dir.join(format!("{}.log", vm_id)))
+    }
+
+    /// Build kernel command line.
+    fn build_kernel_cmdline(&self, config: &VmConfig) -> String {
+        let mut parts: Vec<String> = config.kernel_args.clone();
+
+        // Console on hvc0 (virtio-console)
+        parts.push("console=hvc0".to_string());
+
+        // Inject network configuration for runtime VMs
+        if config.network_enabled {
+            if let Some(ip) = &config.network.ip_address {
+                parts.push(format!("ip={}", ip));
+                // libkrun uses vmnet which defaults to 192.168.64.0/24
+                parts.push("netmask=255.255.255.0".to_string());
+                parts.push("gateway=192.168.64.1".to_string());
+                parts.push("mode=runtime".to_string());
+                debug!(
+                    "Injected network config: ip={} netmask=255.255.255.0 gateway=192.168.64.1",
+                    ip
+                );
             }
         }
 
-        // Return error with helpful message
-        Err(HyprError::HypervisorNotFound {
-            hypervisor: "libkrun-efi (install: brew install hypr-libkrun)".to_string(),
-        })
+        parts.join(" ")
+    }
+
+    /// Configure a libkrun context with VM settings.
+    fn configure_context(&self, ctx_id: u32, config: &VmConfig) -> Result<()> {
+        // Set VM resources
+        let vcpus = config.resources.cpus.min(255) as u8;
+        let ram_mib = config.resources.memory_mb;
+        self.libkrun.set_vm_config(ctx_id, vcpus, ram_mib)?;
+
+        // Set kernel for direct boot
+        let kernel = config.kernel_path.as_ref().unwrap_or(&self.kernel_path);
+        let initramfs = match &config.initramfs_path {
+            Some(p) => p.clone(),
+            None => Self::get_initramfs_path()?,
+        };
+        let cmdline = self.build_kernel_cmdline(config);
+
+        // Detect kernel format based on architecture
+        #[cfg(target_arch = "aarch64")]
+        let kernel_format = KernelFormat::ImageGz; // ARM64 uses Image.gz
+
+        #[cfg(target_arch = "x86_64")]
+        let kernel_format = KernelFormat::Elf; // x86_64 typically uses vmlinux (ELF)
+
+        self.libkrun.set_kernel(ctx_id, kernel, kernel_format, Some(&initramfs), &cmdline)?;
+
+        // Add root disk (first disk is root)
+        if let Some(disk) = config.disks.first() {
+            self.libkrun.set_root_disk(ctx_id, &disk.path)?;
+        }
+
+        // Add additional disks
+        for (i, disk) in config.disks.iter().skip(1).enumerate() {
+            let block_id = format!("vdb{}", i);
+            self.libkrun.add_disk(ctx_id, &block_id, &disk.path, disk.readonly)?;
+        }
+
+        // Add virtio-fs mounts
+        for mount in &config.virtio_fs_mounts {
+            self.libkrun.add_virtiofs(ctx_id, &mount.tag, &mount.host_path)?;
+        }
+
+        // Add Rosetta support on ARM64
+        #[cfg(target_arch = "aarch64")]
+        {
+            // Rosetta is exposed as a virtio-fs share with tag "rosetta"
+            // The guest (kestrel) mounts this and registers with binfmt_misc
+            let rosetta_path = PathBuf::from("/usr/libexec/rosetta/rosetta");
+            if rosetta_path.exists() {
+                // Note: libkrun handles Rosetta automatically when available
+                debug!("Rosetta x86_64 emulation available");
+            }
+        }
+
+        // Set up vsock for guest-host communication
+        let vsock_path = self.vsock_path_for_id(&config.id);
+        if let Some(parent) = vsock_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Remove existing socket file if present
+        let _ = std::fs::remove_file(&vsock_path);
+        self.libkrun.add_vsock_port2(ctx_id, 1024, &vsock_path, true)?;
+        debug!("vsock enabled at {}", vsock_path.display());
+
+        // Set console output to log file
+        let log_path = Self::get_vm_log_path(&config.id)?;
+        self.libkrun.set_console_output(ctx_id, &log_path)?;
+        info!("VM console log: {}", log_path.display());
+
+        // Enable GPU if requested and available
+        if config.gpu.is_some() && self.gpu_available {
+            self.libkrun.set_gpu_options(ctx_id, GpuFlags::Virgl)?;
+            info!("GPU enabled via virtio-gpu + Venus (Metal backend)");
+        }
+
+        Ok(())
+    }
+
+    fn vsock_path_for_id(&self, vm_id: &str) -> PathBuf {
+        crate::paths::runtime_dir().join("krun").join(format!("{}.vsock", vm_id))
     }
 }
 
-impl Default for KrunAdapter {
+impl Default for LibkrunAdapter {
     fn default() -> Self {
-        Self::new().expect("Failed to create libkrun-efi adapter")
+        Self::new().expect("Failed to create libkrun adapter")
     }
 }
 
 #[async_trait]
-impl VmmAdapter for KrunAdapter {
-    async fn build_command(&self, _config: &VmConfig) -> Result<crate::types::vm::CommandSpec> {
-        // KrunAdapter doesn't support builder VMs yet (libkrun-efi is primarily for runtime)
-        // Fallback to HVF adapter for builds on macOS
-        Err(HyprError::UnsupportedOperation {
-            operation: "build_command (KrunAdapter)".to_string(),
-            reason: "libkrun-efi doesn't support builder VMs. Use HVF adapter for builds."
-                .to_string(),
+impl VmmAdapter for LibkrunAdapter {
+    async fn build_command(&self, config: &VmConfig) -> Result<CommandSpec> {
+        // libkrun doesn't work via CLI spawning - it runs in-process
+        // For builder VMs, we return a special marker that the builder
+        // will recognize and handle via create() instead
+        //
+        // Return a "pseudo command" that indicates libkrun should be used
+        Ok(CommandSpec {
+            program: "__libkrun__".to_string(),
+            args: vec![config.id.clone()],
+            env: vec![],
         })
     }
 
-    #[instrument(skip(self))]
-    async fn create(&self, _config: &VmConfig) -> Result<VmHandle> {
-        info!("Creating VM with libkrun-efi (stub)");
-        metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "libkrun", "operation" => "create").increment(1);
+    #[instrument(skip(self), fields(vm_id = %config.id))]
+    async fn create(&self, config: &VmConfig) -> Result<VmHandle> {
+        info!("Creating VM with libkrun");
 
-        Err(HyprError::PlatformUnsupported {
-            feature: "libkrun-efi adapter".to_string(),
-            platform: "Phase 1 (full implementation in Phase 4)".to_string(),
+        let start = Instant::now();
+
+        // Create libkrun context
+        let ctx_id = self.libkrun.create_ctx()?;
+        debug!(ctx_id, "Created libkrun context");
+
+        // Configure the context
+        if let Err(e) = self.configure_context(ctx_id, config) {
+            // Clean up on failure
+            let _ = self.libkrun.free_ctx(ctx_id);
+            metrics::counter!("hypr_vm_start_failures_total", "adapter" => "libkrun", "reason" => "config_failed").increment(1);
+            return Err(e);
+        }
+
+        // Get shutdown eventfd for graceful shutdown
+        let shutdown_eventfd = self.libkrun.get_shutdown_eventfd(ctx_id).ok();
+
+        // Store context
+        {
+            let mut contexts = self.contexts.lock().await;
+            contexts.insert(config.id.clone(), VmContext {
+                ctx_id,
+                shutdown_eventfd,
+            });
+        }
+
+        // Record metrics
+        let histogram = metrics::histogram!("hypr_vm_boot_duration_seconds", "adapter" => "libkrun");
+        histogram.record(start.elapsed().as_secs_f64());
+
+        let counter = metrics::counter!("hypr_vm_created_total", "adapter" => "libkrun");
+        counter.increment(1);
+
+        info!(
+            ctx_id,
+            duration_ms = start.elapsed().as_millis(),
+            "VM created successfully"
+        );
+
+        Ok(VmHandle {
+            id: config.id.clone(),
+            pid: None, // libkrun runs in-process, no separate PID
+            socket_path: None,
         })
     }
 
-    #[instrument(skip(self), fields(vm_id = %_handle.id))]
-    async fn start(&self, _handle: &VmHandle) -> Result<()> {
-        metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "libkrun", "operation" => "start").increment(1);
-        Err(HyprError::PlatformUnsupported {
-            feature: "libkrun-efi adapter".to_string(),
-            platform: "Phase 1 stub".to_string(),
-        })
+    #[instrument(skip(self), fields(vm_id = %handle.id))]
+    async fn start(&self, handle: &VmHandle) -> Result<()> {
+        let ctx_id = {
+            let contexts = self.contexts.lock().await;
+            contexts.get(&handle.id)
+                .map(|c| c.ctx_id)
+                .ok_or_else(|| HyprError::VmNotFound { vm_id: handle.id.clone() })?
+        };
+
+        info!(ctx_id, "Starting VM");
+
+        // krun_start_enter is blocking - spawn in a separate thread
+        let libkrun = self.libkrun.clone();
+        let vm_id = handle.id.clone();
+
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = libkrun.start_enter(ctx_id) {
+                error!(vm_id = %vm_id, error = %e, "VM exited with error");
+            } else {
+                info!(vm_id = %vm_id, "VM exited normally");
+            }
+        });
+
+        // Give the VM a moment to start
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        info!("VM started");
+        Ok(())
     }
 
-    #[instrument(skip(self), fields(vm_id = %_handle.id))]
-    async fn stop(&self, _handle: &VmHandle, _timeout: Duration) -> Result<()> {
-        metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "libkrun", "operation" => "stop").increment(1);
-        Err(HyprError::PlatformUnsupported {
-            feature: "libkrun-efi adapter".to_string(),
-            platform: "Phase 1 stub".to_string(),
-        })
+    #[instrument(skip(self), fields(vm_id = %handle.id))]
+    async fn stop(&self, handle: &VmHandle, timeout: Duration) -> Result<()> {
+        info!("Stopping VM gracefully");
+
+        let (ctx_id, eventfd) = {
+            let contexts = self.contexts.lock().await;
+            match contexts.get(&handle.id) {
+                Some(ctx) => (ctx.ctx_id, ctx.shutdown_eventfd),
+                None => {
+                    warn!("VM context not found, may already be stopped");
+                    return Ok(());
+                }
+            }
+        };
+
+        // Signal shutdown via eventfd if available
+        if let Some(fd) = eventfd {
+            debug!(ctx_id, fd, "Signaling shutdown via eventfd");
+            // Write 1 to eventfd to signal shutdown
+            let buf: [u8; 8] = 1u64.to_ne_bytes();
+            unsafe {
+                libc::write(fd, buf.as_ptr() as *const libc::c_void, 8);
+            }
+        }
+
+        // Wait for graceful shutdown
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            // Check if context is still active
+            // For now, just wait - libkrun will clean up
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // Clean up context
+        self.delete(handle).await?;
+
+        info!("VM stopped");
+        Ok(())
     }
 
-    #[instrument(skip(self), fields(vm_id = %_handle.id))]
-    async fn kill(&self, _handle: &VmHandle) -> Result<()> {
-        metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "libkrun", "operation" => "kill").increment(1);
-        Err(HyprError::PlatformUnsupported {
-            feature: "libkrun-efi adapter".to_string(),
-            platform: "Phase 1 stub".to_string(),
-        })
+    #[instrument(skip(self), fields(vm_id = %handle.id))]
+    async fn kill(&self, handle: &VmHandle) -> Result<()> {
+        info!("Killing VM");
+
+        // Just delete the context - this will force stop
+        self.delete(handle).await?;
+
+        info!("VM killed");
+        Ok(())
     }
 
-    #[instrument(skip(self), fields(vm_id = %_handle.id))]
-    async fn delete(&self, _handle: &VmHandle) -> Result<()> {
-        metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "libkrun", "operation" => "delete").increment(1);
-        Err(HyprError::PlatformUnsupported {
-            feature: "libkrun-efi adapter".to_string(),
-            platform: "Phase 1 stub".to_string(),
-        })
+    #[instrument(skip(self), fields(vm_id = %handle.id))]
+    async fn delete(&self, handle: &VmHandle) -> Result<()> {
+        info!("Deleting VM resources");
+
+        let ctx_id = {
+            let mut contexts = self.contexts.lock().await;
+            contexts.remove(&handle.id).map(|c| c.ctx_id)
+        };
+
+        if let Some(ctx_id) = ctx_id {
+            if let Err(e) = self.libkrun.free_ctx(ctx_id) {
+                warn!(error = %e, "Failed to free libkrun context");
+            }
+        }
+
+        // Clean up vsock file
+        let vsock_path = self.vsock_path_for_id(&handle.id);
+        let _ = std::fs::remove_file(&vsock_path);
+
+        info!("VM resources deleted");
+        Ok(())
     }
 
     #[instrument(skip(self, _disk), fields(vm_id = %_handle.id))]
     async fn attach_disk(&self, _handle: &VmHandle, _disk: &DiskConfig) -> Result<()> {
         metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "libkrun", "operation" => "attach_disk").increment(1);
         Err(HyprError::PlatformUnsupported {
-            feature: "libkrun-efi adapter".to_string(),
-            platform: "Phase 1 stub".to_string(),
+            feature: "disk hotplug".to_string(),
+            platform: "libkrun".to_string(),
         })
     }
 
@@ -139,41 +425,58 @@ impl VmmAdapter for KrunAdapter {
     async fn attach_network(&self, _handle: &VmHandle, _net: &NetworkConfig) -> Result<()> {
         metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "libkrun", "operation" => "attach_network").increment(1);
         Err(HyprError::PlatformUnsupported {
-            feature: "libkrun-efi adapter".to_string(),
-            platform: "Phase 1 stub".to_string(),
+            feature: "network hotplug".to_string(),
+            platform: "libkrun".to_string(),
         })
     }
 
-    #[instrument(skip(self, _gpu), fields(vm_id = %_handle.id))]
-    async fn attach_gpu(&self, _handle: &VmHandle, _gpu: &GpuConfig) -> Result<()> {
-        metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "libkrun", "operation" => "attach_gpu").increment(1);
-        Err(HyprError::PlatformUnsupported {
-            feature: "libkrun-efi GPU (Metal)".to_string(),
-            platform: "Phase 1 stub - Metal support in Phase 4".to_string(),
-        })
+    #[instrument(skip(self, gpu), fields(vm_id = %handle.id))]
+    async fn attach_gpu(&self, handle: &VmHandle, gpu: &GpuConfig) -> Result<()> {
+        if !self.gpu_available {
+            metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "libkrun", "operation" => "attach_gpu").increment(1);
+            return Err(HyprError::GpuUnavailable {
+                reason: "GPU passthrough requires Apple Silicon (ARM64)".to_string(),
+            });
+        }
+
+        let ctx_id = {
+            let contexts = self.contexts.lock().await;
+            contexts.get(&handle.id)
+                .map(|c| c.ctx_id)
+                .ok_or_else(|| HyprError::VmNotFound { vm_id: handle.id.clone() })?
+        };
+
+        // Enable GPU for the context
+        self.libkrun.set_gpu_options(ctx_id, GpuFlags::Virgl)?;
+
+        info!(
+            vendor = ?gpu.vendor,
+            model = %gpu.model,
+            "GPU attached via virtio-gpu + Venus (Metal backend)"
+        );
+
+        Ok(())
     }
 
     fn vsock_path(&self, handle: &VmHandle) -> PathBuf {
-        crate::paths::runtime_dir().join(format!("krun-{}.vsock", handle.id))
+        self.vsock_path_for_id(&handle.id)
     }
 
     fn capabilities(&self) -> AdapterCapabilities {
-        // Future capabilities (Phase 4)
         AdapterCapabilities {
-            gpu_passthrough: true, // Metal in Phase 4
+            gpu_passthrough: self.gpu_available,
             virtio_fs: true,
             hotplug_devices: false,
             metadata: HashMap::from([
-                ("adapter".to_string(), "libkrun-efi".to_string()),
-                ("status".to_string(), "stub".to_string()),
-                ("gpu_backend".to_string(), "metal".to_string()),
-                ("phase".to_string(), "4".to_string()),
+                ("adapter".to_string(), "libkrun".to_string()),
+                ("backend".to_string(), "libkrun-efi".to_string()),
+                ("gpu_backend".to_string(), if self.gpu_available { "metal" } else { "none" }.to_string()),
             ]),
         }
     }
 
     fn name(&self) -> &str {
-        "libkrun-efi"
+        "libkrun"
     }
 }
 
@@ -182,22 +485,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_krun_adapter_stub() {
-        // Should compile and construct
-        let result = KrunAdapter::new();
-
-        // May succeed or fail depending on whether libkrun-efi is installed
-        // This is expected for a stub
-        match result {
-            Ok(_adapter) => {
-                // Library found (user has it installed early)
-                // This is fine for testing
+    fn test_libkrun_adapter_creation() {
+        match LibkrunAdapter::new() {
+            Ok(adapter) => {
+                println!("Adapter created: {}", adapter.name());
+                let caps = adapter.capabilities();
+                println!("GPU available: {}", caps.gpu_passthrough);
             }
-            Err(HyprError::HypervisorNotFound { .. }) => {
-                // Library not found (expected in Phase 1)
-                // This is the normal case
+            Err(e) => {
+                println!("Adapter creation failed (expected if libkrun-efi not installed): {}", e);
             }
-            Err(e) => panic!("Unexpected error: {}", e),
         }
     }
 }

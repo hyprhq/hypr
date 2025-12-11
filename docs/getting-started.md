@@ -66,8 +66,7 @@ sudo mv hypr hyprd /usr/local/bin/
 
 - macOS 14 (Sonoma) or later for full GPU support
 - Homebrew for dependency installation
-- Apple Silicon: `krunkit` (installed automatically via `brew tap slp/krunkit && brew install krunkit`)
-- Intel: `vfkit` (installed automatically via `brew install vfkit`)
+- `libkrun-efi` library: `brew tap slp/krunkit && brew install libkrun-efi`
 - `squashfs` for image building: `brew install squashfs`
 
 ## Starting the Daemon

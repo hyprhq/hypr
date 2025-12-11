@@ -261,7 +261,7 @@ impl VmBuilder {
             kernel_args: vec![
                 "init=/init".to_string(),
                 "mode=build".to_string(),
-                "console=hvc0".to_string(), // vfkit uses hvc0, not ttyS0
+                "console=hvc0".to_string(), // libkrun uses hvc0, not ttyS0
             ],
             initramfs_path: Some(initramfs),
             disks: vec![],
@@ -288,33 +288,69 @@ impl VmBuilder {
                 reason: format!("Failed to create logs directory: {}", e),
             })?;
         }
-        let log_file = std::fs::File::create(&log_path).map_err(|e| HyprError::BuildFailed {
-            reason: format!("Failed to create log file at {}: {}", log_path.display(), e),
-        })?;
 
-        // Spawn VM process with stdout/stderr redirected to log file
-        info!("Spawning builder VM: {} {:?}", cmd_spec.program, cmd_spec.args);
-        info!("VM output will be logged to: {}", log_path.display());
-        let child = tokio::process::Command::new(&cmd_spec.program)
-            .args(&cmd_spec.args)
-            .envs(cmd_spec.env)
-            .stdout(log_file.try_clone().unwrap())
-            .stderr(log_file)
-            .spawn()
-            .map_err(|e| {
-                error!("Failed to spawn builder VM: {}", e);
-                HyprError::BuildFailed { reason: format!("Failed to spawn builder VM: {}", e) }
+        // Handle different adapter types:
+        // - cloud-hypervisor (Linux): Spawn as external process
+        // - libkrun (macOS): Runs in-process, use create() + start()
+        if cmd_spec.program == "__libkrun__" {
+            // libkrun runs in-process - use create() + start()
+            info!("Starting builder VM with libkrun (in-process)");
+            info!("VM output will be logged to: {}", log_path.display());
+
+            let handle = self.adapter.create(&config).await.map_err(|e| {
+                error!("Failed to create builder VM: {}", e);
+                HyprError::BuildFailed { reason: format!("Failed to create builder VM: {}", e) }
             })?;
 
-        let pid = child.id().ok_or_else(|| HyprError::BuildFailed {
-            reason: "Failed to get VM process PID".to_string(),
-        })?;
+            self.adapter.start(&handle).await.map_err(|e| {
+                error!("Failed to start builder VM: {}", e);
+                HyprError::BuildFailed { reason: format!("Failed to start builder VM: {}", e) }
+            })?;
 
-        let handle = VmHandle { id: vm_id.clone(), pid: Some(pid), socket_path: None };
+            info!("Builder VM started (libkrun in-process)");
 
-        info!("Builder VM spawned: pid={}", pid);
+            // For libkrun, we don't have a child process to return
+            // Create a dummy child that represents the in-process VM
+            // The actual VM lifecycle is managed by the adapter
+            let dummy_child = tokio::process::Command::new("sleep")
+                .arg("infinity")
+                .spawn()
+                .map_err(|e| {
+                    error!("Failed to create placeholder process: {}", e);
+                    HyprError::BuildFailed { reason: format!("Failed to create placeholder: {}", e) }
+                })?;
 
-        Ok((handle, child))
+            Ok((handle, dummy_child))
+        } else {
+            // External process (cloud-hypervisor)
+            let log_file = std::fs::File::create(&log_path).map_err(|e| HyprError::BuildFailed {
+                reason: format!("Failed to create log file at {}: {}", log_path.display(), e),
+            })?;
+
+            // Spawn VM process with stdout/stderr redirected to log file
+            info!("Spawning builder VM: {} {:?}", cmd_spec.program, cmd_spec.args);
+            info!("VM output will be logged to: {}", log_path.display());
+            let child = tokio::process::Command::new(&cmd_spec.program)
+                .args(&cmd_spec.args)
+                .envs(cmd_spec.env)
+                .stdout(log_file.try_clone().unwrap())
+                .stderr(log_file)
+                .spawn()
+                .map_err(|e| {
+                    error!("Failed to spawn builder VM: {}", e);
+                    HyprError::BuildFailed { reason: format!("Failed to spawn builder VM: {}", e) }
+                })?;
+
+            let pid = child.id().ok_or_else(|| HyprError::BuildFailed {
+                reason: "Failed to get VM process PID".to_string(),
+            })?;
+
+            let handle = VmHandle { id: vm_id.clone(), pid: Some(pid), socket_path: None };
+
+            info!("Builder VM spawned: pid={}", pid);
+
+            Ok((handle, child))
+        }
     }
 
     /// Terminate a builder VM.
@@ -518,7 +554,7 @@ mod tests {
     fn try_create_adapter() -> Option<Box<dyn crate::adapters::VmmAdapter>> {
         #[cfg(target_os = "macos")]
         {
-            crate::adapters::hvf::HvfAdapter::new()
+            crate::adapters::krun::LibkrunAdapter::new()
                 .ok()
                 .map(|a| Box::new(a) as Box<dyn crate::adapters::VmmAdapter>)
         }

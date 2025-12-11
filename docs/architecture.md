@@ -26,7 +26,7 @@ Technical overview of HYPR's internal architecture.
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────────┐   │
 │  │  Builder     │  │  Registry    │  │       VMM Adapter            │   │
 │  │ (Dockerfile) │  │ (OCI pull)   │  │  ┌────────┐ ┌────────┐       │   │
-│  └──────────────┘  └──────────────┘  │  │  CHV   │ │krunkit │ ...   │   │
+│  └──────────────┘  └──────────────┘  │  │  CHV   │ │libkrun │       │   │
 │                                       │  └────────┘ └────────┘       │   │
 │                                       └──────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -97,7 +97,7 @@ Handles all networking for VMs.
 - DNS server for `.hypr` domain resolution
 
 **macOS:**
-- Uses vmnet framework (via krunkit/vfkit)
+- Uses vmnet framework (via libkrun)
 - IP allocation via DHCP (192.168.64.0/24)
 - Port forwarding via userspace proxy
 
@@ -108,13 +108,13 @@ Abstract interface for hypervisor operations. Platform-specific implementations:
 | Adapter | Platform | Hypervisor |
 |---------|----------|------------|
 | `CloudHypervisorAdapter` | Linux | cloud-hypervisor |
-| `HvfAdapter` | macOS ARM64 | krunkit |
-| `HvfAdapter` | macOS Intel | vfkit |
+| `LibkrunAdapter` | macOS ARM64 | libkrun-efi |
+| `LibkrunAdapter` | macOS Intel | libkrun-efi |
 
 **Key files:**
 - `hypr-core/src/adapters/mod.rs` - Trait definition
 - `hypr-core/src/adapters/cloudhypervisor.rs` - Linux adapter
-- `hypr-core/src/adapters/hvf.rs` - macOS adapter
+- `hypr-core/src/adapters/krun.rs` - macOS adapter (libkrun FFI)
 
 **Trait interface:**
 ```rust

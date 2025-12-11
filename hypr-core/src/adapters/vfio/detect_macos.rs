@@ -1,7 +1,7 @@
 //! GPU detection for macOS systems.
 //!
 //! On macOS, GPU passthrough works differently:
-//! - Apple Silicon (ARM64): Metal GPU via krunkit/libkrun-efi
+//! - Apple Silicon (ARM64): Metal GPU via libkrun (virtio-gpu + Venus)
 //! - Intel Macs: No GPU passthrough support
 
 use crate::error::{HyprError, Result};
@@ -36,7 +36,7 @@ pub fn detect_gpus() -> Result<Vec<DetectedGpu>> {
 
     #[cfg(not(target_arch = "aarch64"))]
     {
-        // No GPU support on Intel Macs with krunkit
+        // No GPU support on Intel Macs with libkrun
         debug!("GPU detection: Intel Mac detected, no GPU passthrough available");
         Ok(vec![])
     }

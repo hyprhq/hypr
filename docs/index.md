@@ -38,8 +38,8 @@ Each VM runs:
 |----------|--------------|------------|-------------|
 | Linux | x86_64 | cloud-hypervisor | VFIO |
 | Linux | ARM64 | cloud-hypervisor | VFIO |
-| macOS | Apple Silicon | krunkit | Metal |
-| macOS | Intel | vfkit | None |
+| macOS | Apple Silicon | libkrun | Metal |
+| macOS | Intel | libkrun | None |
 
 ## Quick Example
 

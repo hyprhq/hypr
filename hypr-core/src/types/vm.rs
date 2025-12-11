@@ -224,7 +224,7 @@ pub enum GpuVendor {
 /// Adapters build this, vm_builder spawns it.
 #[derive(Debug, Clone)]
 pub struct CommandSpec {
-    /// Program to execute (e.g., "vfkit", "cloud-hypervisor")
+    /// Program to execute (e.g., "cloud-hypervisor") or marker (e.g., "__libkrun__")
     pub program: String,
 
     /// Command-line arguments

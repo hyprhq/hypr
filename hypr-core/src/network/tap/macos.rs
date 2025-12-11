@@ -1,7 +1,7 @@
 //! macOS vmnet interface management.
 //!
 //! On macOS, network interfaces are managed through vmnet framework.
-//! The actual vmnet interface creation is handled by the hypervisor (vfkit),
+//! The actual vmnet interface creation is handled by the hypervisor (libkrun),
 //! so this implementation is primarily a pass-through.
 
 #![cfg(target_os = "macos")]
@@ -25,7 +25,7 @@ impl TapManager for MacOSTapManager {
     async fn create_tap(&self, config: &TapConfig) -> Result<TapDevice> {
         info!("Creating macOS vmnet interface: {}", config.name);
 
-        // On macOS, vmnet interfaces are created by vfkit when the VM starts.
+        // On macOS, vmnet interfaces are created by libkrun when the VM starts.
         // We don't manage them directly through system calls.
         // This is a placeholder that returns a valid TapDevice handle.
 

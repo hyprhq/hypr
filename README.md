@@ -40,8 +40,7 @@ This installs:
 
 **macOS:**
 - macOS 14+ (Sonoma) for Apple Silicon GPU support
-- Apple Silicon: `krunkit` (installed via Homebrew)
-- Intel: `vfkit` (installed via Homebrew)
+- `libkrun-efi` library (installed via `brew tap slp/krunkit && brew install libkrun-efi`)
 - `squashfs` from Homebrew
 
 ## Quick Start
@@ -133,7 +132,7 @@ GPU passthrough is not available on Intel Macs.
 ├─────────────────────────────────────────────────────────────┤
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
 │  │ StateManager│  │ NetworkMgr  │  │   VmmAdapter        │  │
-│  │  (SQLite)   │  │ (bridge,DNS)│  │ (CHV/krunkit/vfkit) │  │
+│  │  (SQLite)   │  │ (bridge,DNS)│  │ (CHV/libkrun)       │  │
 │  └─────────────┘  └─────────────┘  └─────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
                           │
@@ -151,8 +150,8 @@ GPU passthrough is not available on Intel Macs.
 | Platform       | Hypervisor        | GPU Support |
 |----------------|-------------------|-------------|
 | Linux          | cloud-hypervisor  | VFIO        |
-| macOS ARM64    | krunkit           | Metal       |
-| macOS Intel    | vfkit             | None        |
+| macOS ARM64    | libkrun           | Metal       |
+| macOS Intel    | libkrun           | None        |
 
 ## Configuration
 

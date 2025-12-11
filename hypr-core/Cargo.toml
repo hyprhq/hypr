@@ -78,6 +78,10 @@ libbpf-sys = "1.4"
 # Mount syscalls for overlayfs
 nix = { version = "0.29", features = ["net", "mount"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# libkrun-efi dynamic loading for macOS VM support
+libloading = "0.8"
+
 [dependencies.tempfile]
 version = "3.10"
 
@@ -85,7 +89,5 @@ version = "3.10"
 mockall = "0.13"
 
 [features]
-# libkrun-efi support (macOS Metal GPU, Phase 4)
-krun = []
 # eBPF networking support (Linux only)
 ebpf = []

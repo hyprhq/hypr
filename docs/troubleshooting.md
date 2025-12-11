@@ -105,15 +105,15 @@ Error: Failed to start VM: hypervisor error
    sudo apt install qemu-kvm  # Debian/Ubuntu
    ```
 
-3. **Hypervisor not found (macOS):**
+3. **Hypervisor library not found (macOS):**
+   Check if libkrun-efi is installed:
    ```sh
-   which krunkit   # ARM64
-   which vfkit     # Intel
+   ls /opt/homebrew/opt/libkrun-efi/lib/libkrun-efi.dylib  # ARM64
+   ls /usr/local/opt/libkrun-efi/lib/libkrun-efi.dylib     # Intel
    ```
    Install if missing:
    ```sh
-   brew tap slp/krunkit && brew install krunkit  # ARM64
-   brew install vfkit                            # Intel
+   brew tap slp/krunkit && brew install libkrun-efi
    ```
 
 ### VM Boot Timeout
@@ -288,7 +288,7 @@ Error: Build failed: instruction failed
 1. **vmnet service running:**
    Check System Preferences > Sharing > Internet Sharing.
 
-2. **krunkit/vfkit permissions:**
+2. **libkrun permissions:**
    May need to allow in Security & Privacy settings.
 
 ### DNS Not Resolving
@@ -371,11 +371,11 @@ Error: GPU not bound to vfio-pci driver
 1. **macOS version:**
    Requires macOS 14 (Sonoma) or later.
 
-2. **krunkit version:**
+2. **libkrun-efi version:**
    ```sh
-   krunkit --version
+   brew info libkrun-efi
    ```
-   Update: `brew upgrade krunkit`
+   Update: `brew upgrade libkrun-efi`
 
 ## Disk Space Issues
 
