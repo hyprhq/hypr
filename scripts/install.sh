@@ -115,43 +115,9 @@ install_linux_deps() {
         fmt_warn "Could not detect package manager. Ensure 'virtiofsd' is installed."
     fi
 
-    if ! command -v cloud-hypervisor >/dev/null 2>&1; then
-        fmt_info "cloud-hypervisor will be auto-fetched on first run"
-    fi
     fmt_success "Dependencies checked"
 }
 
-install_macos_deps() {
-    fmt_header "macOS Dependencies"
-
-    if ! command -v brew >/dev/null 2>&1; then
-        fmt_error "Homebrew is required. Install at https://brew.sh"
-    fi
-
-    if [ "$ARCH" = "arm64" ]; then
-        fmt_info "Apple Silicon detected (Metal/Venus enabled)"
-        
-        # Check tap quietly
-        if ! brew tap | grep -q "slp/krunkit"; then
-            fmt_info "Tapping slp/krunkit..."
-            brew tap slp/krunkit >/dev/null 2>&1
-        fi
-
-        if ! command -v krunkit >/dev/null 2>&1; then
-            fmt_info "Installing krunkit..."
-            brew install krunkit >/dev/null 2>&1
-        else
-            fmt_success "krunkit present"
-        fi
-    else
-        fmt_info "Intel Mac detected (No GPU Passthrough)"
-        if ! command -v vfkit >/dev/null 2>&1; then
-            fmt_info "Installing vfkit..."
-            brew install vfkit >/dev/null 2>&1
-        else
-            fmt_success "vfkit present"
-        fi
-    fi
 }
 
 setup_systemd() {
@@ -343,8 +309,7 @@ main() {
             setup_systemd
             ;;
         darwin)
-            install_macos_deps
-            setup_launchdaemon
+            setup_launcnhdaemon
             ;;
     esac
 

@@ -161,19 +161,31 @@ pub fn ebpf_dir() -> PathBuf {
 /// Resolution order:
 /// 1. `HYPR_RUNTIME_DIR` environment variable (for testing/custom installs)
 /// 2. `/run/hypr` (Linux standard)
-/// 3. `/tmp/hypr` (macOS fallback, no /run)
+/// 3. `$TMPDIR/hypr` (macOS - uses per-user temp dir to avoid permission issues)
 pub fn runtime_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("HYPR_RUNTIME_DIR") {
         return PathBuf::from(dir);
     }
 
-    // Linux uses /run, macOS uses /tmp
+    // Linux uses /run, macOS uses $TMPDIR (per-user temp)
     #[cfg(target_os = "linux")]
     {
         PathBuf::from("/run/hypr")
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        // Use TMPDIR on macOS to avoid /tmp permission issues
+        // TMPDIR is typically /var/folders/xx/xxx.../T/ which is per-user
+        if let Ok(tmpdir) = std::env::var("TMPDIR") {
+            PathBuf::from(tmpdir).join("hypr")
+        } else {
+            // Fallback to /tmp/hypr if TMPDIR not set (rare)
+            PathBuf::from("/tmp/hypr")
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         PathBuf::from("/tmp/hypr")
     }

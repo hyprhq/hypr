@@ -30,54 +30,56 @@ static KESTREL_INITRAMFS: &[u8] =
 static KESTREL_INITRAMFS: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/embedded/initramfs-linux-arm64.cpio"));
 
-/// HVF adapter using krunkit (ARM64) or vfkit (x86_64).
+/// HVF adapter using vfkit (direct kernel boot) or krunkit (EFI boot with GPU).
 ///
-/// # Architecture Selection
+/// # Backend Selection
 ///
-/// - **Apple Silicon (ARM64)**: Uses krunkit/libkrun-efi
+/// - **vfkit**: Used for direct kernel boot (builder VMs, runtime VMs)
+///   - Supports --kernel, --initrd, --kernel-cmdline
+///   - Works on both Intel and Apple Silicon
+///   - Rosetta x86_64 emulation support on ARM64
+///
+/// - **krunkit**: Used for EFI boot with GPU support (future)
 ///   - GPU passthrough via virtio-gpu + Venus + Metal
-///   - Rosetta x86_64 emulation support
-///   - Requires macOS 14+ (Sonoma)
+///   - Requires bootable disk image (no direct kernel boot)
+///   - Requires Apple Silicon + macOS 14+
 ///
-/// - **Intel (x86_64)**: Uses vfkit
-///   - No GPU passthrough support
-///   - Rosetta support (for ARM64 guests)
+/// Currently all VMs use vfkit for direct kernel boot with kestrel initramfs.
+/// krunkit will be used when GPU passthrough is needed with bootable images.
 pub struct HvfAdapter {
-    /// Path to hypervisor binary (krunkit or vfkit)
-    binary_path: PathBuf,
+    /// Path to vfkit binary (for direct kernel boot)
+    vfkit_path: PathBuf,
+    /// Path to krunkit binary (for EFI boot with GPU) - optional
+    krunkit_path: Option<PathBuf>,
     /// Default kernel path
     kernel_path: PathBuf,
-    /// Name of the hypervisor binary (for logging)
-    binary_name: &'static str,
-    /// Whether this adapter supports GPU passthrough
-    gpu_capable: bool,
 }
 
 impl HvfAdapter {
     /// Create a new HVF adapter.
     ///
-    /// Selects the hypervisor binary based on architecture:
-    /// - ARM64: krunkit (GPU support)
-    /// - x86_64: vfkit (no GPU)
+    /// vfkit is required for direct kernel boot (all current VMs).
+    /// krunkit is optional, for future GPU support with EFI boot.
     pub fn new() -> Result<Self> {
-        // Architecture-based binary selection ("hard gate")
+        // vfkit is required - works on both Intel and ARM64
+        let vfkit_path = Self::find_binary("vfkit")?;
+
+        // krunkit is optional - only for ARM64 with GPU
         #[cfg(target_arch = "aarch64")]
-        let (binary_name, gpu_capable) = ("krunkit", true);
+        let krunkit_path = Self::find_binary("krunkit").ok();
 
         #[cfg(not(target_arch = "aarch64"))]
-        let (binary_name, gpu_capable) = ("vfkit", false);
+        let krunkit_path: Option<PathBuf> = None;
 
-        let binary_path = Self::find_binary(binary_name)?;
         let kernel_path = crate::paths::kernel_path();
 
         info!(
-            binary = binary_name,
-            path = %binary_path.display(),
-            gpu_capable = gpu_capable,
+            vfkit = %vfkit_path.display(),
+            krunkit = ?krunkit_path.as_ref().map(|p| p.display().to_string()),
             "HVF adapter initialized"
         );
 
-        Ok(Self { binary_path, kernel_path, binary_name, gpu_capable })
+        Ok(Self { vfkit_path, krunkit_path, kernel_path })
     }
 
     /// Write embedded initramfs to a temporary file and return its path.
@@ -257,9 +259,9 @@ impl HvfAdapter {
         Ok(log_dir.join(format!("{}.log", vm_id)))
     }
 
-    /// Build vfkit command-line arguments.
+    /// Build vfkit command-line arguments for direct kernel boot.
     #[instrument(skip(self))]
-    fn build_args(&self, config: &VmConfig) -> Result<Vec<String>> {
+    fn build_vfkit_args(&self, config: &VmConfig) -> Result<Vec<String>> {
         let mut args = Vec::new();
 
         // CPUs
@@ -403,27 +405,33 @@ impl HvfAdapter {
         args.push(format!("virtio-vsock,port=1024,socketURL={}", vsock_path.display()));
         debug!("vsock enabled at {}", vsock_path.display());
 
-        debug!(binary = self.binary_name, args = ?args, "Built hypervisor args");
+        debug!(binary = "vfkit", args = ?args, "Built vfkit args");
         Ok(args)
     }
 
     /// Check if GPU is requested and handle appropriately.
     ///
-    /// - ARM64 (krunkit): GPU is supported via virtio-gpu + Venus
-    /// - x86_64 (vfkit): GPU not supported, warn user
+    /// GPU passthrough requires krunkit with EFI boot (not yet implemented).
+    /// For now, warn and continue with CPU-only VM.
     fn check_gpu_support(&self, config: &VmConfig) -> Result<()> {
         if config.gpu.is_some() {
-            if self.gpu_capable {
-                info!("GPU requested - will be enabled via virtio-gpu + Venus (Metal backend)");
+            if self.krunkit_path.is_some() {
+                // GPU with krunkit requires EFI boot, which we don't support yet
+                warn!(
+                    "GPU requested but direct kernel boot (vfkit) does not support GPU passthrough.\n\
+                    \n\
+                    GPU passthrough requires krunkit with EFI boot from a bootable disk image.\n\
+                    This feature is not yet implemented.\n\
+                    \n\
+                    Continuing with CPU-only VM..."
+                );
             } else {
                 warn!(
-                    "GPU requested but {} does not support GPU passthrough.\n\
+                    "GPU requested but vfkit does not support GPU passthrough.\n\
                     \n\
                     GPU passthrough requires Apple Silicon with krunkit.\n\
-                    Intel Macs do not support GPU passthrough.\n\
                     \n\
-                    Continuing with CPU-only VM...",
-                    self.binary_name
+                    Continuing with CPU-only VM..."
                 );
             }
         }
@@ -448,11 +456,11 @@ impl VmmAdapter for HvfAdapter {
         // Check for GPU and warn
         self.check_gpu_support(config)?;
 
-        // Build arguments
-        let args = self.build_args(config)?;
+        // Build vfkit arguments (direct kernel boot)
+        let args = self.build_vfkit_args(config)?;
 
         Ok(CommandSpec {
-            program: self.binary_path.to_string_lossy().to_string(),
+            program: self.vfkit_path.to_string_lossy().to_string(),
             args,
             env: vec![],
         })
@@ -465,8 +473,8 @@ impl VmmAdapter for HvfAdapter {
         // Check for GPU and warn
         self.check_gpu_support(config)?;
 
-        // Build arguments
-        let args = self.build_args(config)?;
+        // Build vfkit arguments (direct kernel boot)
+        let args = self.build_vfkit_args(config)?;
 
         // Create log file for VM output
         let log_path = Self::get_vm_log_path(&config.id)?;
@@ -480,7 +488,7 @@ impl VmmAdapter for HvfAdapter {
 
         // Spawn vfkit process with stdout/stderr redirected to log file
         let start = Instant::now();
-        let child = Command::new(&self.binary_path)
+        let child = Command::new(&self.vfkit_path)
             .args(&args)
             .stdout(std::process::Stdio::from(log_file))
             .stderr(std::process::Stdio::from(log_file_err))
@@ -613,25 +621,14 @@ impl VmmAdapter for HvfAdapter {
 
     #[instrument(skip(self, gpu), fields(vm_id = %_handle.id))]
     async fn attach_gpu(&self, _handle: &VmHandle, gpu: &GpuConfig) -> Result<()> {
-        if self.gpu_capable {
-            // krunkit enables GPU automatically via virtio-gpu + Venus
-            // The guest will see /dev/dri/renderD128
-            info!(
-                vendor = ?gpu.vendor,
-                model = %gpu.model,
-                "GPU attached via krunkit/libkrun-efi (virtio-gpu + Venus)"
-            );
-            Ok(())
-        } else {
-            metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "hvf", "operation" => "attach_gpu").increment(1);
-            Err(HyprError::GpuUnavailable {
-                reason: format!(
-                    "{} does not support GPU passthrough. \
-                     GPU requires Apple Silicon with krunkit.",
-                    self.binary_name
-                ),
-            })
-        }
+        // GPU passthrough requires krunkit with EFI boot, which is not yet implemented
+        // For now, always return an error
+        let _ = gpu; // silence unused warning
+        metrics::counter!("hypr_adapter_unsupported_total", "adapter" => "hvf", "operation" => "attach_gpu").increment(1);
+        Err(HyprError::GpuUnavailable {
+            reason: "GPU passthrough requires krunkit with EFI boot, which is not yet implemented. \
+                     Currently using vfkit for direct kernel boot.".to_string(),
+        })
     }
 
     fn vsock_path(&self, handle: &VmHandle) -> PathBuf {
@@ -641,28 +638,23 @@ impl VmmAdapter for HvfAdapter {
     fn capabilities(&self) -> AdapterCapabilities {
         let mut metadata = HashMap::from([
             ("adapter".to_string(), "hvf".to_string()),
-            ("backend".to_string(), self.binary_name.to_string()),
+            ("backend".to_string(), "vfkit".to_string()),
         ]);
 
-        // Add GPU backend info for krunkit
-        if self.gpu_capable {
-            metadata.insert("gpu_backend".to_string(), "metal".to_string());
+        // Note: GPU passthrough would require krunkit with EFI boot
+        if self.krunkit_path.is_some() {
+            metadata.insert("krunkit_available".to_string(), "true".to_string());
         }
 
         AdapterCapabilities {
-            gpu_passthrough: self.gpu_capable,
-            virtio_fs: true, // Both krunkit and vfkit support virtio-fs
+            gpu_passthrough: false, // Not yet implemented - requires krunkit + EFI boot
+            virtio_fs: true,
             hotplug_devices: false,
             metadata,
         }
     }
 
     fn name(&self) -> &str {
-        // Return a descriptive name including the backend
-        if self.gpu_capable {
-            "hvf-krunkit"
-        } else {
-            "hvf-vfkit"
-        }
+        "hvf-vfkit"
     }
 }
