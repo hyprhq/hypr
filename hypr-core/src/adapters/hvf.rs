@@ -429,6 +429,11 @@ impl HvfAdapter {
         }
         Ok(())
     }
+
+    /// Check if a process is still running.
+    fn is_process_running(pid: u32) -> bool {
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
 }
 
 impl Default for HvfAdapter {
@@ -519,15 +524,35 @@ impl VmmAdapter for HvfAdapter {
 
     #[instrument(skip(self), fields(vm_id = %handle.id))]
     async fn stop(&self, handle: &VmHandle, timeout: Duration) -> Result<()> {
-        info!("Stopping VM");
+        info!("Stopping VM gracefully");
 
-        // Wait for timeout, then kill
-        tokio::time::sleep(timeout).await;
+        let pid = match handle.pid {
+            Some(pid) => pid,
+            None => {
+                warn!("No PID for VM, nothing to stop");
+                return Ok(());
+            }
+        };
 
-        // Fallback to kill
+        // Send SIGTERM for graceful shutdown (guest receives ACPI power button)
+        let _ = Command::new("kill").arg("-15").arg(pid.to_string()).output().await;
+        info!("Sent SIGTERM to VM process");
+
+        // Wait for process to exit gracefully
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if !Self::is_process_running(pid) {
+                info!(duration_ms = start.elapsed().as_millis(), "VM stopped gracefully");
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // Timeout - fall back to SIGKILL
+        warn!("Graceful shutdown timed out after {:?}, forcing kill", timeout);
         self.kill(handle).await?;
 
-        info!("VM stopped");
+        info!("VM stopped (forced)");
         Ok(())
     }
 

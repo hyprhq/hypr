@@ -321,7 +321,9 @@ impl VmBuilder {
     #[instrument(skip(self, handle))]
     async fn terminate_vm(&self, handle: &VmHandle) -> Result<()> {
         debug!("Terminating builder VM");
-        self.adapter.kill(handle).await?;
+        // Use graceful shutdown with short timeout - build VMs are ephemeral
+        // but we still want to give virtio-fs a chance to flush writes
+        self.adapter.stop(handle, std::time::Duration::from_secs(5)).await?;
         self.adapter.delete(handle).await?;
         Ok(())
     }

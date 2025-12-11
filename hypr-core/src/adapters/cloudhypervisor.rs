@@ -1,11 +1,11 @@
 //! cloud-hypervisor adapter for Linux.
 //!
 //! Provides VM lifecycle management using cloud-hypervisor:
-//! - Create: Spawn CH process with API socket
-//! - Start: Send boot command via API
-//! - Stop: Send shutdown command
-//! - Kill: SIGKILL the CH process
-//! - Delete: Clean up resources
+//! - Create: Spawn CH process with API socket (auto-boots immediately)
+//! - Start: No-op (VM boots on create)
+//! - Stop: Send graceful shutdown via API, wait for exit, fallback to SIGKILL
+//! - Kill: SIGKILL the CH process immediately
+//! - Delete: Clean up resources (virtiofsd, TAP devices, VFIO)
 
 use crate::adapters::{AdapterCapabilities, CommandSpec, VmmAdapter};
 use crate::error::{HyprError, Result};
@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::fs;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
 use tokio::process::Command;
 use tracing::{debug, error, info, instrument, span, warn, Level};
 
@@ -252,7 +254,7 @@ impl CloudHypervisorAdapter {
             // Wait for socket to be created (virtiofsd creates it on startup)
             let start = Instant::now();
             while !socket_path.exists() {
-                if start.elapsed() > Duration::from_secs(5) {
+                if start.elapsed() > Duration::from_secs(15) {
                     // Kill the daemon
                     let _ = child.kill().await;
                     return Err(HyprError::Internal(format!(
@@ -507,6 +509,55 @@ impl CloudHypervisorAdapter {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
+
+    /// Send an HTTP request to the cloud-hypervisor API socket.
+    ///
+    /// cloud-hypervisor exposes a REST API over Unix socket for VM control.
+    async fn send_api_request(
+        socket_path: &Path,
+        method: &str,
+        endpoint: &str,
+    ) -> Result<(u16, String)> {
+        let mut stream = UnixStream::connect(socket_path)
+            .await
+            .map_err(|e| HyprError::Internal(format!("Failed to connect to API socket: {}", e)))?;
+
+        // Build HTTP request
+        let request = format!(
+            "{} {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            method, endpoint
+        );
+
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .map_err(|e| HyprError::Internal(format!("Failed to write to API socket: {}", e)))?;
+
+        // Read response
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .map_err(|e| HyprError::Internal(format!("Failed to read from API socket: {}", e)))?;
+
+        let response_str = String::from_utf8_lossy(&response);
+
+        // Parse HTTP status code
+        let status_code = response_str
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|code| code.parse::<u16>().ok())
+            .unwrap_or(0);
+
+        Ok((status_code, response_str.to_string()))
+    }
+
+    /// Check if a process is still running.
+    fn is_process_running(pid: u32) -> bool {
+        // Use kill with signal 0 to check if process exists
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
 }
 
 impl Default for CloudHypervisorAdapter {
@@ -656,9 +707,9 @@ impl VmmAdapter for CloudHypervisorAdapter {
             reason: "Failed to get process ID".to_string(),
         })?;
 
-        // Wait for API socket
+        // Wait for API socket (30s timeout to allow for large rootfs loading)
         let api_socket = self.api_socket_path(&config.id);
-        self.wait_for_api_socket(&api_socket, Duration::from_secs(5)).await?;
+        self.wait_for_api_socket(&api_socket, Duration::from_secs(30)).await?;
 
         // Record metrics
         let histogram =
@@ -676,28 +727,63 @@ impl VmmAdapter for CloudHypervisorAdapter {
 
     #[instrument(skip(self), fields(vm_id = %handle.id))]
     async fn start(&self, handle: &VmHandle) -> Result<()> {
-        info!("Starting VM");
-
-        // For now, cloud-hypervisor boots immediately when created
-        // In production, we'd send "POST /api/v1/vm.boot" to API socket
-        // Simplified for Phase 1
-
+        // cloud-hypervisor is configured to auto-boot when created.
+        // This is intentional - we want VMs to start immediately after create().
+        // If we needed pause/resume, we'd use --api-socket without kernel args
+        // and send "PUT /api/v1/vm.boot" here.
         info!("VM started (auto-boot mode)");
         Ok(())
     }
 
     #[instrument(skip(self), fields(vm_id = %handle.id))]
     async fn stop(&self, handle: &VmHandle, timeout: Duration) -> Result<()> {
-        info!("Stopping VM");
+        info!("Stopping VM gracefully");
 
-        // Send shutdown signal via API
-        // For Phase 1: simplified to process kill after timeout
-        tokio::time::sleep(timeout).await;
+        let pid = match handle.pid {
+            Some(pid) => pid,
+            None => {
+                warn!("No PID for VM, nothing to stop");
+                return Ok(());
+            }
+        };
 
-        // Fallback to kill if still running
+        // Send graceful shutdown via cloud-hypervisor API
+        if let Some(socket_path) = &handle.socket_path {
+            let socket = PathBuf::from(socket_path);
+            if socket.exists() {
+                match Self::send_api_request(&socket, "PUT", "/api/v1/vm.shutdown").await {
+                    Ok((status, _)) if status == 200 || status == 204 => {
+                        info!("Shutdown request sent successfully");
+                    }
+                    Ok((status, body)) => {
+                        warn!(
+                            "Shutdown request returned status {}: {}",
+                            status,
+                            body.lines().next().unwrap_or("")
+                        );
+                    }
+                    Err(e) => {
+                        warn!("Failed to send shutdown request: {}", e);
+                    }
+                }
+            }
+        }
+
+        // Wait for process to exit gracefully
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if !Self::is_process_running(pid) {
+                info!(duration_ms = start.elapsed().as_millis(), "VM stopped gracefully");
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // Timeout - fall back to SIGKILL
+        warn!("Graceful shutdown timed out after {:?}, forcing kill", timeout);
         self.kill(handle).await?;
 
-        info!("VM stopped");
+        info!("VM stopped (forced)");
         Ok(())
     }
 

@@ -76,11 +76,11 @@ networks:
     for (name, service) in &compose2.services {
         println!("Service: {}", name);
         println!("  Image: {}", service.image);
-        if !service.depends_on.is_empty() {
-            println!("  Depends on: {:?}", service.depends_on);
+        if !service.depends_on.to_list().is_empty() {
+            println!("  Depends on: {:?}", service.depends_on.to_list());
         }
-        if !service.networks.is_empty() {
-            println!("  Networks: {:?}", service.networks);
+        if !service.networks.to_list().is_empty() {
+            println!("  Networks: {:?}", service.networks.to_list());
         }
         if let Some(deploy) = &service.deploy {
             if let Some(resources) = &deploy.resources {

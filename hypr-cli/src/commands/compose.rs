@@ -3,6 +3,7 @@
 use crate::client::HyprClient;
 use anyhow::{Context, Result};
 use colored::Colorize;
+use hypr_core::compose::ComposeParser;
 use hypr_core::Stack;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::io::{self, Write};
@@ -17,6 +18,34 @@ pub async fn up(
     _force_recreate: bool,
     _build: bool,
 ) -> Result<()> {
+    // Parse compose file locally to show what we're deploying
+    let compose =
+        ComposeParser::parse_file(compose_file).context("Failed to parse compose file")?;
+
+    let service_count = compose.services.len();
+    let service_names: Vec<&str> = compose.services.keys().map(|s| s.as_str()).collect();
+
+    println!(
+        "{} Deploying {} service(s): {}",
+        "→".cyan().bold(),
+        service_count,
+        service_names.join(", ").dimmed()
+    );
+    println!();
+
+    // Show each service and its image
+    for (name, service) in &compose.services {
+        let image = if !service.image.is_empty() {
+            &service.image
+        } else if service.build.is_some() {
+            "(build)"
+        } else {
+            "(unknown)"
+        };
+        println!("  {} {} {}", "•".dimmed(), name.bold(), image.dimmed());
+    }
+    println!();
+
     let mut client = HyprClient::connect().await?;
 
     // Show deployment progress
@@ -27,7 +56,7 @@ pub async fn up(
             .unwrap()
             .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
     );
-    spinner.set_message(format!("Deploying stack from {}...", compose_file));
+    spinner.set_message("Pulling images and starting VMs (this may take a while)...".to_string());
     spinner.enable_steady_tick(Duration::from_millis(100));
 
     let stack = client
