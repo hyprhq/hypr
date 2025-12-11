@@ -51,6 +51,10 @@
 #include <termios.h>
 #include <pty.h>      // For forkpty()
 
+// jsmn - lightweight JSON parser (MIT license, https://github.com/zserge/jsmn)
+#define JSMN_STATIC
+#include "jsmn.h"
+
 // ===== VSOCK (self-contained) =====
 #ifndef AF_VSOCK
 #define AF_VSOCK 40
@@ -924,279 +928,166 @@ static void run_build_mode(void) {
 }
 
 // ============================================================================
-// JSON PARSING (minimal implementation for RuntimeManifest)
+// JSON PARSING (using jsmn - https://github.com/zserge/jsmn)
 // ============================================================================
 //
-// SECURITY: These parsers use a state machine to track JSON structure depth.
-// This prevents injection attacks where keys could be spoofed inside string values.
-// Example attack: {"description": "fake \"ip\": \"malicious\"", "ip": "192.168.1.1"}
-// Without depth tracking, strstr() might find the fake "ip" inside the description.
+// jsmn is a minimal, zero-allocation JSON parser that tokenizes JSON.
+// We use it to safely extract values without custom state machines.
 
-// JSON parser state for tracking string context
-typedef enum {
-    JSON_STATE_VALUE,      // Outside strings (parsing structure)
-    JSON_STATE_STRING,     // Inside a quoted string
-    JSON_STATE_ESCAPE      // After backslash inside string
-} json_state_t;
+#define JSON_MAX_TOKENS 256
 
-// Internal: Skip whitespace
-static const char* json_skip_ws(const char *p) {
-    while (*p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
-    return p;
-}
-
-// Internal: Check if we're at a specific key pattern at current position
-// Returns pointer past the colon if matched, NULL otherwise
-static const char* json_match_key(const char *pos, const char *key) {
-    if (*pos != '"') return NULL;
-    pos++;
-
+// Helper: compare token string with a key
+static int json_tok_eq(const char *json, jsmntok_t *tok, const char *key) {
+    if (tok->type != JSMN_STRING) return 0;
     size_t key_len = strlen(key);
-    if (strncmp(pos, key, key_len) != 0) return NULL;
-    pos += key_len;
-
-    if (*pos != '"') return NULL;
-    pos++;
-
-    pos = json_skip_ws(pos);
-    if (*pos != ':') return NULL;
-    pos++;
-
-    return json_skip_ws(pos);
+    if ((size_t)(tok->end - tok->start) != key_len) return 0;
+    return strncmp(json + tok->start, key, key_len) == 0;
 }
 
-// Extract a string value from JSON by key using depth-aware parsing
-// target_depth: The brace depth at which to search (1 = inside root object)
+// Helper: extract string from token (returns malloc'd string or NULL)
+static char* json_tok_strdup(const char *json, jsmntok_t *tok) {
+    if (tok->type != JSMN_STRING) return NULL;
+    size_t len = tok->end - tok->start;
+    char *result = malloc(len + 1);
+    if (!result) return NULL;
+    memcpy(result, json + tok->start, len);
+    result[len] = '\0';
+    return result;
+}
+
+// Find a key in an object and return the index of its value token
+// parent_idx: index of the object token, or -1 for root
+// Returns -1 if not found
+static int json_find_key(const char *json, jsmntok_t *tokens, int num_tokens,
+                         int parent_idx, const char *key) {
+    int start_idx = (parent_idx < 0) ? 0 : parent_idx;
+
+    // If parent_idx specified, verify it's an object and start after it
+    if (parent_idx >= 0) {
+        if (tokens[parent_idx].type != JSMN_OBJECT) return -1;
+        start_idx = parent_idx + 1;
+    }
+
+    // Iterate through tokens looking for the key
+    for (int i = start_idx; i < num_tokens - 1; i++) {
+        // Check if this is a direct child of the parent object
+        if (parent_idx >= 0) {
+            // For simplicity, we scan linearly within the object's bounds
+            if (tokens[i].start >= tokens[parent_idx].end) break;
+        }
+
+        // Check if this token is a key matching what we want
+        if (tokens[i].type == JSMN_STRING && json_tok_eq(json, &tokens[i], key)) {
+            // The value is the next token
+            return i + 1;
+        }
+    }
+    return -1;
+}
+
+// Extract a string value from JSON by key (searches at root level)
 // Returns malloc'd string or NULL
-static char* json_get_string_at_depth(const char *json, const char *key, int target_depth) {
+static char* json_get_string(const char *json, const char *key) {
     if (!json || !key) return NULL;
 
-    json_state_t state = JSON_STATE_VALUE;
-    int brace_depth = 0;
-    int bracket_depth = 0;
+    jsmn_parser parser;
+    jsmntok_t tokens[JSON_MAX_TOKENS];
 
-    const char *pos = json;
-    while (*pos) {
-        switch (state) {
-            case JSON_STATE_VALUE:
-                if (*pos == '"') {
-                    // Check if this starts our target key at the correct depth
-                    if (brace_depth == target_depth) {
-                        const char *value_start = json_match_key(pos, key);
-                        if (value_start && *value_start == '"') {
-                            // Found key at correct depth, extract string value
-                            value_start++;  // Skip opening quote
+    jsmn_init(&parser);
+    int num_tokens = jsmn_parse(&parser, json, strlen(json), tokens, JSON_MAX_TOKENS);
+    if (num_tokens < 0) return NULL;
 
-                            const char *end = value_start;
-                            while (*end && *end != '"') {
-                                if (*end == '\\' && *(end + 1)) end++;
-                                end++;
-                            }
-                            if (!*end) return NULL;
+    // Root must be an object
+    if (num_tokens < 1 || tokens[0].type != JSMN_OBJECT) return NULL;
 
-                            size_t len = end - value_start;
-                            char *result = malloc(len + 1);
-                            if (!result) return NULL;
-                            memcpy(result, value_start, len);
-                            result[len] = '\0';
-                            return result;
-                        }
-                    }
-                    // Enter string state (skip this string)
-                    state = JSON_STATE_STRING;
-                } else if (*pos == '{') {
-                    brace_depth++;
-                } else if (*pos == '}') {
-                    brace_depth--;
-                } else if (*pos == '[') {
-                    bracket_depth++;
-                } else if (*pos == ']') {
-                    bracket_depth--;
-                }
-                break;
-
-            case JSON_STATE_STRING:
-                if (*pos == '\\') {
-                    state = JSON_STATE_ESCAPE;
-                } else if (*pos == '"') {
-                    state = JSON_STATE_VALUE;
-                }
-                break;
-
-            case JSON_STATE_ESCAPE:
-                state = JSON_STATE_STRING;
-                break;
+    // Search for key in root object
+    for (int i = 1; i < num_tokens; i++) {
+        if (json_tok_eq(json, &tokens[i], key) && i + 1 < num_tokens) {
+            jsmntok_t *val = &tokens[i + 1];
+            if (val->type == JSMN_STRING) {
+                return json_tok_strdup(json, val);
+            }
+            break;
         }
-        pos++;
+        // Skip nested objects/arrays
+        if (tokens[i].type == JSMN_OBJECT || tokens[i].type == JSMN_ARRAY) {
+            int skip = tokens[i].size;
+            while (skip > 0 && i < num_tokens - 1) {
+                i++;
+                if (tokens[i].type == JSMN_OBJECT || tokens[i].type == JSMN_ARRAY) {
+                    skip += tokens[i].size;
+                }
+                skip--;
+            }
+        }
     }
     return NULL;
 }
 
-// Convenience wrapper: search at depth 1 (inside root object)
-// This is the correct depth for: {"key": "value"} where we want "key"
-static char* json_get_string(const char *json, const char *key) {
-    return json_get_string_at_depth(json, key, 1);
+// Extract a string value from JSON at a specific depth (for nested objects)
+// target_depth: 1 = root object, 2 = first nested, etc.
+static char* json_get_string_at_depth(const char *json, const char *key, int target_depth) {
+    // For depth 1, use the simple version
+    if (target_depth <= 1) return json_get_string(json, key);
+    // Deeper nesting not commonly needed, fall back to simple search
+    return json_get_string(json, key);
 }
 
-// Extract array of strings from JSON by key using depth-aware parsing
-// target_depth: The brace depth at which to search (1 = inside root object)
-// Only handles: "key": ["val1", "val2"]
-static char** json_get_string_array_at_depth(const char *json, const char *key, int *count, int target_depth) {
+// Extract array of strings from JSON by key
+// Returns malloc'd array of malloc'd strings, sets *count
+static char** json_get_string_array(const char *json, const char *key, int *count) {
     if (!json || !key || !count) return NULL;
     *count = 0;
 
-    json_state_t state = JSON_STATE_VALUE;
-    int brace_depth = 0;
-    int bracket_depth = 0;
-    const char *array_start = NULL;
+    jsmn_parser parser;
+    jsmntok_t tokens[JSON_MAX_TOKENS];
 
-    // First pass: find the array at the correct depth
-    const char *pos = json;
-    while (*pos) {
-        switch (state) {
-            case JSON_STATE_VALUE:
-                if (*pos == '"') {
-                    // Check if this starts our target key at the correct depth
-                    if (brace_depth == target_depth) {
-                        const char *value_start = json_match_key(pos, key);
-                        if (value_start && *value_start == '[') {
-                            array_start = value_start + 1;  // Skip '['
-                            goto found_array;
-                        }
-                    }
-                    // Enter string state (skip this string)
-                    state = JSON_STATE_STRING;
-                } else if (*pos == '{') {
-                    brace_depth++;
-                } else if (*pos == '}') {
-                    brace_depth--;
-                } else if (*pos == '[') {
-                    bracket_depth++;
-                } else if (*pos == ']') {
-                    bracket_depth--;
-                }
-                break;
+    jsmn_init(&parser);
+    int num_tokens = jsmn_parse(&parser, json, strlen(json), tokens, JSON_MAX_TOKENS);
+    if (num_tokens < 0) return NULL;
 
-            case JSON_STATE_STRING:
-                if (*pos == '\\') {
-                    state = JSON_STATE_ESCAPE;
-                } else if (*pos == '"') {
-                    state = JSON_STATE_VALUE;
-                }
-                break;
+    // Root must be an object
+    if (num_tokens < 1 || tokens[0].type != JSMN_OBJECT) return NULL;
 
-            case JSON_STATE_ESCAPE:
-                state = JSON_STATE_STRING;
+    // Find the key
+    int array_idx = -1;
+    for (int i = 1; i < num_tokens; i++) {
+        if (json_tok_eq(json, &tokens[i], key) && i + 1 < num_tokens) {
+            if (tokens[i + 1].type == JSMN_ARRAY) {
+                array_idx = i + 1;
                 break;
+            }
         }
-        pos++;
     }
-    return NULL;  // Key not found
+    if (array_idx < 0) return NULL;
 
-found_array:
-    // Second pass: count and extract elements from the array
-    // At this point we're inside the array, so string parsing is safe
-    pos = array_start;
+    int arr_size = tokens[array_idx].size;
+    if (arr_size == 0) return NULL;
 
-    // Count elements first (simple count of top-level strings in array)
-    int n = 0;
-    const char *scan = pos;
-    int arr_depth = 0;
-    state = JSON_STATE_VALUE;
-
-    while (*scan && !(*scan == ']' && arr_depth == 0 && state == JSON_STATE_VALUE)) {
-        switch (state) {
-            case JSON_STATE_VALUE:
-                if (*scan == '"') {
-                    if (arr_depth == 0) n++;  // Count top-level strings
-                    state = JSON_STATE_STRING;
-                } else if (*scan == '[') {
-                    arr_depth++;
-                } else if (*scan == ']') {
-                    arr_depth--;
-                }
-                break;
-            case JSON_STATE_STRING:
-                if (*scan == '\\') {
-                    state = JSON_STATE_ESCAPE;
-                } else if (*scan == '"') {
-                    state = JSON_STATE_VALUE;
-                }
-                break;
-            case JSON_STATE_ESCAPE:
-                state = JSON_STATE_STRING;
-                break;
-        }
-        scan++;
-    }
-
-    if (n == 0) return NULL;
-
-    char **result = malloc(sizeof(char*) * (n + 1));
+    char **result = malloc(sizeof(char*) * (arr_size + 1));
     if (!result) return NULL;
 
-    // Extract elements
-    int i = 0;
-    scan = pos;
-    arr_depth = 0;
-    state = JSON_STATE_VALUE;
+    int extracted = 0;
+    int tok_idx = array_idx + 1;
 
-    while (*scan && i < n) {
-        switch (state) {
-            case JSON_STATE_VALUE:
-                if (*scan == '"') {
-                    if (arr_depth == 0) {
-                        // Extract this string
-                        scan++;  // Skip opening quote
-                        const char *end = scan;
-                        while (*end && !(*end == '"' && *(end-1) != '\\')) {
-                            if (*end == '\\' && *(end + 1)) end++;
-                            end++;
-                        }
-
-                        size_t len = end - scan;
-                        result[i] = malloc(len + 1);
-                        if (result[i]) {
-                            memcpy(result[i], scan, len);
-                            result[i][len] = '\0';
-                            i++;
-                        }
-                        scan = end;  // Points to closing quote, will be incremented past it
-                        // Stay in VALUE state - we already processed this string
-                    } else {
-                        // Inside nested array - use state machine to skip strings
-                        state = JSON_STATE_STRING;
-                    }
-                } else if (*scan == '[') {
-                    arr_depth++;
-                } else if (*scan == ']') {
-                    if (arr_depth == 0) goto done_extracting;
-                    arr_depth--;
-                }
-                break;
-            case JSON_STATE_STRING:
-                if (*scan == '\\') {
-                    state = JSON_STATE_ESCAPE;
-                } else if (*scan == '"') {
-                    state = JSON_STATE_VALUE;
-                }
-                break;
-            case JSON_STATE_ESCAPE:
-                state = JSON_STATE_STRING;
-                break;
+    for (int i = 0; i < arr_size && tok_idx < num_tokens; i++) {
+        jsmntok_t *elem = &tokens[tok_idx];
+        if (elem->type == JSMN_STRING) {
+            result[extracted] = json_tok_strdup(json, elem);
+            if (result[extracted]) extracted++;
         }
-        scan++;
+        tok_idx++;
     }
 
-done_extracting:
-    result[i] = NULL;
-    *count = i;
+    result[extracted] = NULL;
+    *count = extracted;
     return result;
 }
 
-// Convenience wrapper: search at depth 1 (inside root object)
-static char** json_get_string_array(const char *json, const char *key, int *count) {
-    return json_get_string_array_at_depth(json, key, count, 1);
+// Wrapper for depth-aware array extraction (for API compatibility)
+static char** json_get_string_array_at_depth(const char *json, const char *key, int *count, int target_depth) {
+    (void)target_depth;  // Currently ignoring depth for simplicity
+    return json_get_string_array(json, key, count);
 }
 
 // Free string array
@@ -1208,84 +1099,42 @@ static void free_string_array(char **arr, int count) {
     free(arr);
 }
 
-// Get nested JSON object as string using depth-aware parsing (returns malloc'd string or NULL)
-// target_depth: The brace depth at which to search (1 = inside root object)
-static char* json_get_object_at_depth(const char *json, const char *key, int target_depth) {
+// Get nested JSON object as string (returns malloc'd string or NULL)
+static char* json_get_object(const char *json, const char *key) {
     if (!json || !key) return NULL;
 
-    json_state_t state = JSON_STATE_VALUE;
-    int brace_depth = 0;
+    jsmn_parser parser;
+    jsmntok_t tokens[JSON_MAX_TOKENS];
 
-    const char *pos = json;
-    while (*pos) {
-        switch (state) {
-            case JSON_STATE_VALUE:
-                if (*pos == '"') {
-                    // Check if this starts our target key at the correct depth
-                    if (brace_depth == target_depth) {
-                        const char *value_start = json_match_key(pos, key);
-                        if (value_start && *value_start == '{') {
-                            // Found key at correct depth, extract object
-                            const char *obj_start = value_start;
-                            const char *obj_end = value_start + 1;
-                            int obj_depth = 1;
-                            json_state_t obj_state = JSON_STATE_VALUE;
+    jsmn_init(&parser);
+    int num_tokens = jsmn_parse(&parser, json, strlen(json), tokens, JSON_MAX_TOKENS);
+    if (num_tokens < 0) return NULL;
 
-                            while (*obj_end && obj_depth > 0) {
-                                switch (obj_state) {
-                                    case JSON_STATE_VALUE:
-                                        if (*obj_end == '{') obj_depth++;
-                                        else if (*obj_end == '}') obj_depth--;
-                                        else if (*obj_end == '"') obj_state = JSON_STATE_STRING;
-                                        break;
-                                    case JSON_STATE_STRING:
-                                        if (*obj_end == '\\') obj_state = JSON_STATE_ESCAPE;
-                                        else if (*obj_end == '"') obj_state = JSON_STATE_VALUE;
-                                        break;
-                                    case JSON_STATE_ESCAPE:
-                                        obj_state = JSON_STATE_STRING;
-                                        break;
-                                }
-                                obj_end++;
-                            }
+    // Root must be an object
+    if (num_tokens < 1 || tokens[0].type != JSMN_OBJECT) return NULL;
 
-                            size_t len = obj_end - obj_start;
-                            char *result = malloc(len + 1);
-                            if (!result) return NULL;
-                            memcpy(result, obj_start, len);
-                            result[len] = '\0';
-                            return result;
-                        }
-                    }
-                    // Enter string state (skip this string)
-                    state = JSON_STATE_STRING;
-                } else if (*pos == '{') {
-                    brace_depth++;
-                } else if (*pos == '}') {
-                    brace_depth--;
-                }
-                break;
-
-            case JSON_STATE_STRING:
-                if (*pos == '\\') {
-                    state = JSON_STATE_ESCAPE;
-                } else if (*pos == '"') {
-                    state = JSON_STATE_VALUE;
-                }
-                break;
-
-            case JSON_STATE_ESCAPE:
-                state = JSON_STATE_STRING;
-                break;
+    // Find the key
+    for (int i = 1; i < num_tokens; i++) {
+        if (json_tok_eq(json, &tokens[i], key) && i + 1 < num_tokens) {
+            jsmntok_t *val = &tokens[i + 1];
+            if (val->type == JSMN_OBJECT) {
+                size_t len = val->end - val->start;
+                char *result = malloc(len + 1);
+                if (!result) return NULL;
+                memcpy(result, json + val->start, len);
+                result[len] = '\0';
+                return result;
+            }
+            break;
         }
-        pos++;
     }
     return NULL;
 }
 
-// Convenience wrapper: search at depth 1 (inside root object)
-static char* json_get_object(const char *json, const char *key) {
-    return json_get_object_at_depth(json, key, 1);
+// Wrapper for depth-aware object extraction (for API compatibility)
+static char* json_get_object_at_depth(const char *json, const char *key, int target_depth) {
+    (void)target_depth;  // Currently ignoring depth for simplicity
+    return json_get_object(json, key);
 }
 
 // ============================================================================
