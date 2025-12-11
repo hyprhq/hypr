@@ -248,9 +248,8 @@ impl Command {
         match self {
             Command::Shell(s) => {
                 // Simple shell-like parsing (doesn't handle quotes perfectly, but good enough)
-                shell_words::split(s).unwrap_or_else(|_| {
-                    s.split_whitespace().map(|s| s.to_string()).collect()
-                })
+                shell_words::split(s)
+                    .unwrap_or_else(|_| s.split_whitespace().map(|s| s.to_string()).collect())
             }
             Command::Exec(v) => v.clone(),
         }

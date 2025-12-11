@@ -64,7 +64,8 @@ impl ComposeConverter {
 
         // Convert services to VM configs, using built images where available
         // Pass compose_dir for automatic .env loading
-        let services = Self::convert_services(&compose.services, &built_images, Some(&compose_dir))?;
+        let services =
+            Self::convert_services(&compose.services, &built_images, Some(&compose_dir))?;
 
         // Convert volumes
         let volumes = Self::convert_volumes(&compose.volumes, &compose.services);
@@ -468,7 +469,8 @@ impl ComposeConverter {
         let mut configs = Vec::new();
 
         for (name, service) in services {
-            let vm_config = Self::service_to_vm_config(name, service, built_images.get(name), compose_dir)?;
+            let vm_config =
+                Self::service_to_vm_config(name, service, built_images.get(name), compose_dir)?;
 
             // Build entrypoint: entrypoint takes precedence, command is appended as args
             let entrypoint = if let Some(ep) = &service.entrypoint {

@@ -148,11 +148,7 @@ mod tests {
         let mut services = HashMap::new();
         services.insert(
             "web".to_string(),
-            Service {
-                image: "".to_string(),
-                build: None,
-                ..Default::default()
-            },
+            Service { image: "".to_string(), build: None, ..Default::default() },
         );
         assert!(ComposeParser::validate_services(&services).is_err());
     }
@@ -162,10 +158,7 @@ mod tests {
         let mut services = HashMap::new();
         services.insert(
             "web".to_string(),
-            Service {
-                image: "nginx:latest".to_string(),
-                ..Default::default()
-            },
+            Service { image: "nginx:latest".to_string(), ..Default::default() },
         );
         assert!(ComposeParser::validate_services(&services).is_ok());
     }
@@ -175,10 +168,7 @@ mod tests {
         let mut services = HashMap::new();
         services.insert(
             "web".to_string(),
-            Service {
-                build: Some(BuildSpec::Path("./app".to_string())),
-                ..Default::default()
-            },
+            Service { build: Some(BuildSpec::Path("./app".to_string())), ..Default::default() },
         );
         assert!(ComposeParser::validate_services(&services).is_ok());
     }
