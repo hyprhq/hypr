@@ -2,7 +2,7 @@
 //!
 //! HYPR supports multiple hypervisors via the `VmmAdapter` trait:
 //! - Linux: cloud-hypervisor (primary)
-//! - macOS: libkrun (native, with GPU support)
+//! - macOS: Virtualization.framework (native, with GPU support)
 //! - Windows: WSL2 wrapper (future)
 
 use crate::error::Result;
@@ -95,10 +95,7 @@ pub struct AdapterCapabilities {
 pub mod cloudhypervisor;
 
 #[cfg(target_os = "macos")]
-mod libkrun_ffi;
-
-#[cfg(target_os = "macos")]
-pub mod krun;
+pub mod virtualization;
 
 // VFIO module (GPU passthrough)
 // Available on all platforms, but VFIO operations only work on Linux
@@ -109,7 +106,7 @@ pub mod vfio;
 pub use cloudhypervisor::CloudHypervisorAdapter;
 
 #[cfg(target_os = "macos")]
-pub use krun::LibkrunAdapter;
+pub use virtualization::VirtualizationAdapter;
 
 mod factory;
 pub use factory::AdapterFactory;

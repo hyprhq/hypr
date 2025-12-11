@@ -1667,7 +1667,7 @@ impl LinuxVmBuilder {
 impl MacOsVmBuilder {
     /// Create a new macOS VM-based builder.
     pub fn new() -> BuildResult<Self> {
-        use crate::adapters::LibkrunAdapter;
+        use crate::adapters::VirtualizationAdapter;
 
         let cache_dir = crate::paths::cache_dir();
         let work_dir = cache_dir.join(format!("build-{}", uuid::Uuid::new_v4()));
@@ -1681,9 +1681,9 @@ impl MacOsVmBuilder {
         // Placeholder: builder_rootfs will be replaced by on-the-fly initramfs
         let builder_rootfs = crate::paths::runtime_dir().join("builder-initramfs.cpio");
 
-        // Create VMM adapter for macOS (libkrun)
-        let adapter = LibkrunAdapter::new().map_err(|e| {
-            BuildError::ContextError(format!("Failed to create libkrun adapter: {}", e))
+        // Create VMM adapter for macOS (Virtualization.framework)
+        let adapter = VirtualizationAdapter::new().map_err(|e| {
+            BuildError::ContextError(format!("Failed to create Virtualization.framework adapter: {}", e))
         })?;
 
         let vm_builder = crate::builder::VmBuilder::new(

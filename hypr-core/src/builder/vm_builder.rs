@@ -291,10 +291,10 @@ impl VmBuilder {
 
         // Handle different adapter types:
         // - cloud-hypervisor (Linux): Spawn as external process
-        // - libkrun (macOS): Runs in-process, use create() + start()
-        if cmd_spec.program == "__libkrun__" {
-            // libkrun runs in-process - use create() + start()
-            info!("Starting builder VM with libkrun (in-process)");
+        // - Virtualization.framework (macOS): Runs in-process, use create() + start()
+        if cmd_spec.program == "__libkrun__" || cmd_spec.program == "__virtualization__" {
+            // Virtualization.framework runs in-process - use create() + start()
+            info!("Starting builder VM with Virtualization.framework (in-process)");
             info!("VM output will be logged to: {}", log_path.display());
 
             let handle = self.adapter.create(&config).await.map_err(|e| {
@@ -307,13 +307,16 @@ impl VmBuilder {
                 HyprError::BuildFailed { reason: format!("Failed to start builder VM: {}", e) }
             })?;
 
-            info!("Builder VM started (libkrun in-process)");
+            info!("Builder VM started (Virtualization.framework in-process)");
 
-            // For libkrun, we don't have a child process to return
+            // For Virtualization.framework, we don't have a child process to return
             // Create a dummy child that represents the in-process VM
             // The actual VM lifecycle is managed by the adapter
-            let dummy_child =
-                tokio::process::Command::new("sleep").arg("infinity").spawn().map_err(|e| {
+            // Note: macOS sleep doesn't support "infinity", use large value instead
+            let dummy_child = tokio::process::Command::new("sleep")
+                .arg("86400") // 24 hours - builds should never take this long
+                .spawn()
+                .map_err(|e| {
                     error!("Failed to create placeholder process: {}", e);
                     HyprError::BuildFailed {
                         reason: format!("Failed to create placeholder: {}", e),
@@ -555,7 +558,7 @@ mod tests {
     fn try_create_adapter() -> Option<Box<dyn crate::adapters::VmmAdapter>> {
         #[cfg(target_os = "macos")]
         {
-            crate::adapters::krun::LibkrunAdapter::new()
+            crate::adapters::virtualization::VirtualizationAdapter::new()
                 .ok()
                 .map(|a| Box::new(a) as Box<dyn crate::adapters::VmmAdapter>)
         }

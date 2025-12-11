@@ -66,8 +66,8 @@ sudo mv hypr hyprd /usr/local/bin/
 
 - macOS 14 (Sonoma) or later for full GPU support
 - Homebrew for dependency installation
-- `libkrun-efi` library: `brew tap slp/krunkit && brew install libkrun-efi`
 - `squashfs` for image building: `brew install squashfs`
+- No additional libraries required - HYPR uses Apple's Virtualization.framework directly
 
 ## Starting the Daemon
 

@@ -105,15 +105,14 @@ Error: Failed to start VM: hypervisor error
    sudo apt install qemu-kvm  # Debian/Ubuntu
    ```
 
-3. **Hypervisor library not found (macOS):**
-   Check if libkrun-efi is installed:
+3. **Virtualization.framework not available (macOS):**
+   HYPR uses Apple's built-in Virtualization.framework. Ensure:
+   - macOS 13 (Ventura) or later is installed
+   - Running on supported hardware (Intel or Apple Silicon)
+
+   Check framework availability:
    ```sh
-   ls /opt/homebrew/opt/libkrun-efi/lib/libkrun-efi.dylib  # ARM64
-   ls /usr/local/opt/libkrun-efi/lib/libkrun-efi.dylib     # Intel
-   ```
-   Install if missing:
-   ```sh
-   brew tap slp/krunkit && brew install libkrun-efi
+   ls /System/Library/Frameworks/Virtualization.framework
    ```
 
 ### VM Boot Timeout
@@ -286,10 +285,11 @@ Error: Build failed: instruction failed
 **macOS checks:**
 
 1. **vmnet service running:**
-   Check System Preferences > Sharing > Internet Sharing.
+   Check System Settings > Sharing > Internet Sharing.
 
-2. **libkrun permissions:**
-   May need to allow in Security & Privacy settings.
+2. **Virtualization.framework permissions:**
+   The daemon must have virtualization entitlements. If using a custom build,
+   ensure proper code signing with the `com.apple.security.virtualization` entitlement.
 
 ### DNS Not Resolving
 
@@ -369,13 +369,14 @@ Error: GPU not bound to vfio-pci driver
 **Checks:**
 
 1. **macOS version:**
-   Requires macOS 14 (Sonoma) or later.
+   Requires macOS 14 (Sonoma) or later for GPU virtualization support.
 
-2. **libkrun-efi version:**
-   ```sh
-   brew info libkrun-efi
-   ```
-   Update: `brew upgrade libkrun-efi`
+2. **Apple Silicon:**
+   Metal GPU passthrough via Virtualization.framework requires Apple Silicon (M1/M2/M3).
+   Intel Macs do not support GPU virtualization.
+
+3. **GPU device configuration:**
+   Ensure the VM was created with GPU support enabled. GPU cannot be hotplugged.
 
 ## Disk Space Issues
 

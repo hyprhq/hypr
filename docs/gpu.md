@@ -94,11 +94,11 @@ Some enterprise GPUs (A100, H100) support SR-IOV for sharing a GPU across multip
 
 ## macOS: Metal GPU
 
-On Apple Silicon Macs, HYPR uses Metal GPU virtualization via the Venus Vulkan driver.
+On Apple Silicon Macs, HYPR uses Metal GPU virtualization via Apple's Virtualization.framework.
 
 ### How It Works
 
-1. libkrun creates a VM with virtio-gpu device
+1. Virtualization.framework creates a VM with virtio-gpu device
 2. Guest uses Venus driver (Vulkan over virtio-gpu)
 3. Host translates Vulkan to Metal
 4. GPU operations run on Apple GPU
@@ -163,14 +163,12 @@ sudo rmmod nvidia_drm nvidia_modeset nvidia
 
 ### macOS: Metal Not Working
 
-**Check libkrun-efi version:**
-```sh
-brew info libkrun-efi
-```
-Requires libkrun-efi with Metal support.
-
 **Verify macOS version:**
-Metal GPU requires macOS 14 (Sonoma) or later.
+Metal GPU requires macOS 14 (Sonoma) or later for full GPU virtualization support.
+
+**Apple Silicon required:**
+Metal GPU passthrough is only available on Apple Silicon Macs (M1/M2/M3).
+Intel Macs do not support GPU virtualization.
 
 **Check VM configuration:**
 GPU must be enabled at VM creation. Cannot be hot-added.

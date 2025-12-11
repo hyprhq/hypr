@@ -79,8 +79,12 @@ libbpf-sys = "1.4"
 nix = { version = "0.29", features = ["net", "mount"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# libkrun-efi dynamic loading for macOS VM support
-libloading = "0.8"
+# Apple Virtualization.framework bindings for native macOS VM support
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSData", "NSString", "NSURL", "NSError", "NSFileHandle", "NSArray"] }
+objc2-virtualization = "0.3"
+block2 = "0.6"
+dispatch2 = "0.2"
 
 [dependencies.tempfile]
 version = "3.10"

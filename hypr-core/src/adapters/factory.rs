@@ -12,7 +12,7 @@ use tracing::{info, instrument};
 #[derive(Debug, Clone, Default)]
 pub struct AdapterConfig {
     /// Override automatic platform detection.
-    /// Values: "cloudhypervisor" (Linux), "libkrun" (macOS)
+    /// Values: "cloudhypervisor" (Linux), "virtualization" (macOS)
     pub adapter_override: Option<String>,
 
     /// Required capabilities for the adapter.
@@ -22,7 +22,7 @@ pub struct AdapterConfig {
 /// Factory for creating VMM adapters.
 ///
 /// The factory handles:
-/// - Platform auto-detection (Linux → CloudHypervisor, macOS → libkrun)
+/// - Platform auto-detection (Linux → CloudHypervisor, macOS → Virtualization.framework)
 /// - Configuration overrides
 /// - Capability validation
 /// - Helpful error messages when adapters are unavailable
@@ -34,13 +34,13 @@ impl AdapterFactory {
     /// # Platform Selection
     ///
     /// - **Linux**: CloudHypervisorAdapter
-    /// - **macOS**: LibkrunAdapter (native, with GPU support on Apple Silicon)
+    /// - **macOS**: VirtualizationAdapter (native Virtualization.framework, with GPU support on Apple Silicon)
     ///
     /// # Configuration Override
     ///
     /// Use `config.adapter_override` to specify a particular adapter:
     /// - `"cloudhypervisor"` → CloudHypervisorAdapter (Linux only)
-    /// - `"libkrun"` → LibkrunAdapter (macOS only)
+    /// - `"virtualization"` → VirtualizationAdapter (macOS only)
     ///
     /// # Capability Checking
     ///
@@ -73,8 +73,8 @@ impl AdapterFactory {
 
         #[cfg(target_os = "macos")]
         {
-            info!("Platform: macOS, selecting libkrun adapter");
-            Self::create_libkrun(&config)
+            info!("Platform: macOS, selecting Virtualization.framework adapter");
+            Self::create_virtualization(&config)
         }
 
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -91,10 +91,10 @@ impl AdapterFactory {
     fn create_by_name(name: &str, config: &AdapterConfig) -> Result<Arc<dyn VmmAdapter>> {
         match name {
             "cloudhypervisor" => Self::create_cloudhypervisor(config),
-            "libkrun" | "krun" => Self::create_libkrun(config),
+            "virtualization" | "libkrun" | "krun" => Self::create_virtualization(config),
             _ => Err(HyprError::InvalidConfig {
                 reason: format!(
-                    "Unknown adapter '{}'. Valid options: cloudhypervisor, libkrun",
+                    "Unknown adapter '{}'. Valid options: cloudhypervisor, virtualization",
                     name
                 ),
             }),
@@ -128,19 +128,19 @@ impl AdapterFactory {
         })
     }
 
-    /// Create libkrun adapter (macOS only).
+    /// Create Virtualization.framework adapter (macOS only).
     #[cfg(target_os = "macos")]
     #[instrument(skip(config))]
-    fn create_libkrun(config: &AdapterConfig) -> Result<Arc<dyn VmmAdapter>> {
-        use crate::adapters::LibkrunAdapter;
+    fn create_virtualization(config: &AdapterConfig) -> Result<Arc<dyn VmmAdapter>> {
+        use crate::adapters::VirtualizationAdapter;
 
-        let adapter = LibkrunAdapter::new()?;
+        let adapter = VirtualizationAdapter::new()?;
         Self::validate_capabilities(&adapter, config)?;
 
         info!(
             adapter = adapter.name(),
             capabilities = ?adapter.capabilities(),
-            "Created libkrun adapter"
+            "Created Virtualization.framework adapter"
         );
 
         Ok(Arc::new(adapter))
@@ -148,9 +148,9 @@ impl AdapterFactory {
 
     #[cfg(not(target_os = "macos"))]
     #[instrument(skip(_config))]
-    fn create_libkrun(_config: &AdapterConfig) -> Result<Arc<dyn VmmAdapter>> {
+    fn create_virtualization(_config: &AdapterConfig) -> Result<Arc<dyn VmmAdapter>> {
         Err(HyprError::PlatformUnsupported {
-            feature: "libkrun".to_string(),
+            feature: "Virtualization.framework".to_string(),
             platform: std::env::consts::OS.to_string(),
         })
     }
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn test_factory_creates_platform_adapter() {
-        // This should succeed on Linux (CloudHypervisor) or macOS (libkrun)
+        // This should succeed on Linux (CloudHypervisor) or macOS (Virtualization.framework)
         // but may fail if the hypervisor binary/library is not installed
         match AdapterFactory::create(None) {
             Ok(adapter) => {
@@ -204,7 +204,7 @@ mod tests {
                 assert_eq!(adapter.name(), "cloud-hypervisor");
 
                 #[cfg(target_os = "macos")]
-                assert_eq!(adapter.name(), "libkrun");
+                assert_eq!(adapter.name(), "virtualization");
             }
             Err(HyprError::HypervisorNotFound { .. }) => {
                 // This is acceptable in test environments without hypervisors
@@ -239,9 +239,9 @@ mod tests {
     fn test_config_override_wrong_platform() {
         #[cfg(target_os = "linux")]
         {
-            // Try to use libkrun on Linux
+            // Try to use Virtualization.framework on Linux
             let config = AdapterConfig {
-                adapter_override: Some("libkrun".to_string()),
+                adapter_override: Some("virtualization".to_string()),
                 required_capabilities: None,
             };
 
@@ -249,7 +249,7 @@ mod tests {
             assert!(result.is_err());
             match result {
                 Err(HyprError::PlatformUnsupported { feature, .. }) => {
-                    assert_eq!(feature, "libkrun");
+                    assert_eq!(feature, "Virtualization.framework");
                 }
                 _ => panic!("Expected PlatformUnsupported error"),
             }
@@ -284,12 +284,12 @@ mod tests {
 
         let result = AdapterFactory::create(Some(config));
 
-        // libkrun supports GPU on Apple Silicon, CloudHypervisor supports VFIO on Linux
+        // Virtualization.framework supports GPU on Apple Silicon, CloudHypervisor supports VFIO on Linux
         #[cfg(target_os = "macos")]
         {
             match result {
                 Ok(adapter) => {
-                    // libkrun on Apple Silicon supports GPU
+                    // Virtualization.framework on Apple Silicon supports GPU
                     assert!(adapter.capabilities().gpu_passthrough);
                 }
                 Err(HyprError::InsufficientResources { reason }) => {
@@ -297,7 +297,7 @@ mod tests {
                     assert!(reason.contains("GPU passthrough"));
                 }
                 Err(HyprError::HypervisorNotFound { .. }) => {
-                    // Acceptable if libkrun not installed
+                    // Acceptable if Virtualization.framework not available
                 }
                 Err(HyprError::IoError { .. }) => {
                     // Acceptable in CI without root
