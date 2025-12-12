@@ -95,9 +95,11 @@ impl NetworkManager {
         // Create service registry with database pool
         let service_registry = Arc::new(ServiceRegistry::new(state.pool().clone()).await?);
 
-        // DNS bind address (not started yet, will be started in Phase 2A.2)
+        // DNS bind address
+        // - Linux: bind to bridge IP (10.88.0.1) since the bridge always exists
+        // - macOS: bind to localhost since vmnet IP (192.168.64.1) only exists when VMs are running
         #[cfg(target_os = "macos")]
-        let dns_bind_addr = Some(IpAddr::V4(Ipv4Addr::new(192, 168, 64, 1)));
+        let dns_bind_addr = Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
 
         #[cfg(target_os = "linux")]
         let dns_bind_addr = Some(IpAddr::V4(Ipv4Addr::new(10, 88, 0, 1)));
