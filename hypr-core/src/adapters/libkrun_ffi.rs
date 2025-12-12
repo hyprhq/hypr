@@ -171,11 +171,7 @@ impl Libkrun {
         // Safety: We're loading a known library with a stable C ABI
         let library = unsafe {
             Library::new(&library_path).map_err(|e| HyprError::HypervisorNotFound {
-                hypervisor: format!(
-                    "libkrun: failed to load {}: {}",
-                    library_path.display(),
-                    e
-                ),
+                hypervisor: format!("libkrun: failed to load {}: {}", library_path.display(), e),
             })?
         };
 
@@ -544,8 +540,10 @@ impl Libkrun {
         debug!(
             ctx_id,
             tap_name,
-            mac = format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]),
+            mac = format!(
+                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+            ),
             features,
             flags,
             "Adding TAP network device"

@@ -162,7 +162,6 @@ impl LibkrunAdapter {
         parts.join(" ")
     }
 
-
     /// Generate a random locally-administered MAC address.
     ///
     /// Uses the 52:54:00 prefix (QEMU/KVM convention) with random suffix.
@@ -199,8 +198,8 @@ impl LibkrunAdapter {
 
         // Find socket_vmnet binary
         let binary_paths = [
-            "/opt/homebrew/opt/socket_vmnet/bin/socket_vmnet",  // Homebrew ARM
-            "/usr/local/opt/socket_vmnet/bin/socket_vmnet",     // Homebrew Intel
+            "/opt/homebrew/opt/socket_vmnet/bin/socket_vmnet", // Homebrew ARM
+            "/usr/local/opt/socket_vmnet/bin/socket_vmnet",    // Homebrew Intel
             "/opt/homebrew/bin/socket_vmnet",
             "/usr/local/bin/socket_vmnet",
         ];
@@ -211,7 +210,8 @@ impl LibkrunAdapter {
             Some(b) => *b,
             None => {
                 return Err(HyprError::NetworkSetupFailed {
-                    reason: "socket_vmnet not installed. Install with: brew install socket_vmnet".to_string(),
+                    reason: "socket_vmnet not installed. Install with: brew install socket_vmnet"
+                        .to_string(),
                 });
             }
         };
@@ -241,11 +241,12 @@ impl LibkrunAdapter {
                     reason: "socket_vmnet started but socket not available".to_string(),
                 })
             }
-            Err(e) => {
-                Err(HyprError::NetworkSetupFailed {
-                    reason: format!("Failed to start socket_vmnet: {}. Make sure hyprd runs as root.", e),
-                })
-            }
+            Err(e) => Err(HyprError::NetworkSetupFailed {
+                reason: format!(
+                    "Failed to start socket_vmnet: {}. Make sure hyprd runs as root.",
+                    e
+                ),
+            }),
         }
     }
 
@@ -321,8 +322,10 @@ impl LibkrunAdapter {
                 0, // flags
             )?;
             debug!(
-                mac = format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]),
+                mac = format!(
+                    "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+                ),
                 "Network enabled via socket_vmnet"
             );
         }

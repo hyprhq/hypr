@@ -32,8 +32,7 @@ impl ComposeConverter {
         let networks = Self::convert_networks(&name, &compose.networks);
 
         // Convert services to VM configs (no compose_dir in sync version)
-        let services =
-            Self::convert_services(&compose.services, &HashMap::new(), None, &networks)?;
+        let services = Self::convert_services(&compose.services, &HashMap::new(), None, &networks)?;
 
         // Convert volumes
         let volumes = Self::convert_volumes(&compose.volumes, &compose.services);
@@ -66,8 +65,12 @@ impl ComposeConverter {
 
         // Convert services to VM configs, using built images where available
         // Pass compose_dir for automatic .env loading
-        let services =
-            Self::convert_services(&compose.services, &built_images, Some(&compose_dir), &networks)?;
+        let services = Self::convert_services(
+            &compose.services,
+            &built_images,
+            Some(&compose_dir),
+            &networks,
+        )?;
 
         // Convert volumes
         let volumes = Self::convert_volumes(&compose.volumes, &compose.services);

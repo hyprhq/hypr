@@ -339,11 +339,8 @@ async fn cleanup_orphaned_virtiofsd(
 
     // Get running VM IDs
     let vms = state.list_vms().await?;
-    let running_vm_ids: std::collections::HashSet<String> = vms
-        .iter()
-        .filter(|vm| vm.status == VmStatus::Running)
-        .map(|vm| vm.id.clone())
-        .collect();
+    let running_vm_ids: std::collections::HashSet<String> =
+        vms.iter().filter(|vm| vm.status == VmStatus::Running).map(|vm| vm.id.clone()).collect();
 
     // Find virtiofsd processes using pgrep
     let output = Command::new("pgrep").args(["-f", "virtiofsd"]).output();

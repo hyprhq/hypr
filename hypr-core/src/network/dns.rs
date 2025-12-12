@@ -66,11 +66,7 @@ impl DnsServer {
             "Creating DNS server"
         );
 
-        Self {
-            bind_addr: SocketAddr::new(bind_ip, port),
-            registry,
-            upstream,
-        }
+        Self { bind_addr: SocketAddr::new(bind_ip, port), registry, upstream }
     }
 
     /// Start the DNS server.
@@ -80,12 +76,10 @@ impl DnsServer {
     pub async fn start(self) -> Result<()> {
         info!("Starting DNS server on {}", self.bind_addr);
 
-        let socket = UdpSocket::bind(self.bind_addr)
-            .await
-            .map_err(|e| HyprError::IoError {
-                path: std::path::PathBuf::from(format!("{}", self.bind_addr)),
-                source: e,
-            })?;
+        let socket = UdpSocket::bind(self.bind_addr).await.map_err(|e| HyprError::IoError {
+            path: std::path::PathBuf::from(format!("{}", self.bind_addr)),
+            source: e,
+        })?;
 
         info!("DNS server listening on {}", self.bind_addr);
 
@@ -201,31 +195,24 @@ impl DnsServer {
     #[instrument(skip(query))]
     async fn forward_to_upstream(query: &[u8], upstream_ip: IpAddr) -> Result<Vec<u8>> {
         let upstream_addr = SocketAddr::new(upstream_ip, 53);
-        let socket = UdpSocket::bind("0.0.0.0:0")
-            .await
-            .map_err(|e| HyprError::NetworkSetupFailed {
-                reason: format!("Failed to bind UDP socket: {}", e),
-            })?;
+        let socket = UdpSocket::bind("0.0.0.0:0").await.map_err(|e| {
+            HyprError::NetworkSetupFailed { reason: format!("Failed to bind UDP socket: {}", e) }
+        })?;
 
-        socket
-            .send_to(query, upstream_addr)
-            .await
-            .map_err(|e| HyprError::NetworkSetupFailed {
-                reason: format!("Failed to send to upstream: {}", e),
-            })?;
+        socket.send_to(query, upstream_addr).await.map_err(|e| HyprError::NetworkSetupFailed {
+            reason: format!("Failed to send to upstream: {}", e),
+        })?;
 
         let mut buf = vec![0u8; 512];
-        let (len, _) = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            socket.recv_from(&mut buf),
-        )
-        .await
-        .map_err(|_| HyprError::NetworkSetupFailed {
-            reason: "Upstream DNS timeout".to_string(),
-        })?
-        .map_err(|e| HyprError::NetworkSetupFailed {
-            reason: format!("Failed to receive from upstream: {}", e),
-        })?;
+        let (len, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), socket.recv_from(&mut buf))
+                .await
+                .map_err(|_| HyprError::NetworkSetupFailed {
+                    reason: "Upstream DNS timeout".to_string(),
+                })?
+                .map_err(|e| HyprError::NetworkSetupFailed {
+                    reason: format!("Failed to receive from upstream: {}", e),
+                })?;
 
         Ok(buf[..len].to_vec())
     }
@@ -351,10 +338,7 @@ impl DnsPacket {
             questions.push(DnsQuestion { name, qtype, qclass });
         }
 
-        Ok(DnsPacket {
-            transaction_id,
-            questions,
-        })
+        Ok(DnsPacket { transaction_id, questions })
     }
 
     /// Parse a DNS name from the packet.

@@ -186,7 +186,18 @@ impl BridgeManager for LinuxBridgeManager {
 
         // Check if MASQUERADE rule exists
         let output = Command::new("iptables")
-            .args(["-t", "nat", "-C", "POSTROUTING", "-s", network_cidr, "-o", &default_iface, "-j", "MASQUERADE"])
+            .args([
+                "-t",
+                "nat",
+                "-C",
+                "POSTROUTING",
+                "-s",
+                network_cidr,
+                "-o",
+                &default_iface,
+                "-j",
+                "MASQUERADE",
+            ])
             .output()
             .await
             .map_err(|e| HyprError::NetworkSetupFailed {
@@ -197,7 +208,18 @@ impl BridgeManager for LinuxBridgeManager {
         if !output.status.success() {
             // Add the MASQUERADE rule
             let output = Command::new("iptables")
-                .args(["-t", "nat", "-A", "POSTROUTING", "-s", network_cidr, "-o", &default_iface, "-j", "MASQUERADE"])
+                .args([
+                    "-t",
+                    "nat",
+                    "-A",
+                    "POSTROUTING",
+                    "-s",
+                    network_cidr,
+                    "-o",
+                    &default_iface,
+                    "-j",
+                    "MASQUERADE",
+                ])
                 .output()
                 .await
                 .map_err(|e| HyprError::NetworkSetupFailed {

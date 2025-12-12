@@ -315,31 +315,20 @@ impl HyprClient {
             gateway: gateway.map(String::from),
         });
         let response = self.client.create_network(request).await?;
-        response
-            .into_inner()
-            .network
-            .ok_or_else(|| anyhow::anyhow!("No network returned"))
+        response.into_inner().network.ok_or_else(|| anyhow::anyhow!("No network returned"))
     }
 
     /// Delete a network
     pub async fn delete_network(&mut self, name: &str, force: bool) -> Result<bool> {
-        let request = tonic::Request::new(DeleteNetworkRequest {
-            name: name.to_string(),
-            force,
-        });
+        let request = tonic::Request::new(DeleteNetworkRequest { name: name.to_string(), force });
         let response = self.client.delete_network(request).await?;
         Ok(response.into_inner().success)
     }
 
     /// Get network details
     pub async fn get_network(&mut self, name: &str) -> Result<Network> {
-        let request = tonic::Request::new(GetNetworkRequest {
-            name: name.to_string(),
-        });
+        let request = tonic::Request::new(GetNetworkRequest { name: name.to_string() });
         let response = self.client.get_network(request).await?;
-        response
-            .into_inner()
-            .network
-            .ok_or_else(|| anyhow::anyhow!("Network not found"))
+        response.into_inner().network.ok_or_else(|| anyhow::anyhow!("Network not found"))
     }
 }

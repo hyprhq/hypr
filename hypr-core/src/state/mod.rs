@@ -535,17 +535,17 @@ impl StateManager {
 
     fn row_to_network(&self, row: sqlx::sqlite::SqliteRow) -> Result<Network> {
         use std::str::FromStr;
-        
+
         let created_at_secs: i64 = row.get("created_at");
         let created_at =
             SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(created_at_secs as u64);
 
         let driver_str: String = row.get("driver");
-        let driver = NetworkDriver::from_str(&driver_str)
-            .map_err(HyprError::DatabaseError)?;
+        let driver = NetworkDriver::from_str(&driver_str).map_err(HyprError::DatabaseError)?;
 
         let gateway_str: String = row.get("gateway");
-        let gateway: std::net::Ipv4Addr = gateway_str.parse()
+        let gateway: std::net::Ipv4Addr = gateway_str
+            .parse()
             .map_err(|e: std::net::AddrParseError| HyprError::DatabaseError(e.to_string()))?;
 
         Ok(Network {

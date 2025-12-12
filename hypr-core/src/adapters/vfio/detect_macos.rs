@@ -4,9 +4,9 @@
 //! - Apple Silicon (ARM64): Metal GPU via libkrun (virtio-gpu + Venus)
 //! - Intel Macs: No GPU passthrough support
 
-use crate::error::Result;
 #[cfg(target_arch = "aarch64")]
 use crate::error::HyprError;
+use crate::error::Result;
 use crate::types::vm::GpuVendor;
 #[cfg(target_arch = "aarch64")]
 use std::process::Command;

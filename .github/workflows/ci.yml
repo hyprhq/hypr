@@ -28,7 +28,9 @@ jobs:
       - name: Install system dependencies
         run: |
           if [ "$RUNNER_OS" == "macOS" ]; then
-            brew install protobuf libffi
+            brew install protobuf libffi lld xz
+            # Set up pkg-config for keg-only libffi
+            echo "PKG_CONFIG_PATH=/opt/homebrew/opt/libffi/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
           elif [ "$RUNNER_OS" == "Linux" ]; then
             sudo apt-get update
             sudo apt-get install -y protobuf-compiler libelf-dev zlib1g-dev clang libbpf-dev libssl-dev pkg-config
@@ -42,7 +44,7 @@ jobs:
         id: libkrun-cache
         with:
           path: hypr-core/embedded/libkrun.dylib
-          key: ${{ runner.os }}-${{ runner.arch }}-libkrun-v1
+          key: ${{ runner.os }}-${{ runner.arch }}-libkrun-gpu-v2
 
       - name: Build libkrun (macOS)
         if: runner.os == 'macOS' && steps.libkrun-cache.outputs.cache-hit != 'true'
@@ -52,7 +54,7 @@ jobs:
           cd /tmp/libkrun
 
           # Build with block device, networking, and GPU support
-          make BLK=1 NET=1 GPU=1
+          make GPU=1 BLK=1 NET=1
 
           # Copy the dylib to embedded directory
           mkdir -p $GITHUB_WORKSPACE/hypr-core/embedded

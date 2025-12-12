@@ -140,10 +140,7 @@ pub async fn ls() -> Result<()> {
                 format!("{}_{}", stack_name, vol_name)
             };
 
-            rows.push(VolumeRow {
-                driver: "local".to_string(),
-                name: display_name,
-            });
+            rows.push(VolumeRow { driver: "local".to_string(), name: display_name });
         }
     }
 

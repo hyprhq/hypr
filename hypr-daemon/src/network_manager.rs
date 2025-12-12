@@ -198,10 +198,8 @@ impl NetworkManager {
             let registry = self.service_registry.clone();
 
             // Upstream DNS servers for non-.hypr queries
-            let upstream = vec![
-                IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
-                IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
-            ];
+            let upstream =
+                vec![IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))];
 
             tokio::spawn(async move {
                 let dns_server = DnsServer::new(bind_ip, 53, registry, upstream);

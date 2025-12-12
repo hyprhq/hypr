@@ -87,7 +87,12 @@ impl VmBuilder {
         kernel_path: PathBuf,
         work_dir: PathBuf,
     ) -> Self {
-        Self { adapter: Arc::from(adapter), kernel_path, _work_dir: work_dir, initramfs_cache: None }
+        Self {
+            adapter: Arc::from(adapter),
+            kernel_path,
+            _work_dir: work_dir,
+            initramfs_cache: None,
+        }
     }
 
     /// Get or create the initramfs for builder VMs.

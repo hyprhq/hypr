@@ -721,8 +721,8 @@ impl HyprService for HyprServiceImpl {
         let req = request.into_inner();
 
         // Check if network with this name already exists
-        let existing = self.state.list_networks().await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let existing =
+            self.state.list_networks().await.map_err(|e| Status::internal(e.to_string()))?;
 
         if existing.iter().any(|n| n.name == req.name) {
             return Err(Status::already_exists(format!("Network {} already exists", req.name)));
@@ -748,8 +748,8 @@ impl HyprService for HyprServiceImpl {
             format!("10.{}.0.1", 88 + network_num)
         });
 
-        let gateway: std::net::Ipv4Addr = gateway_str.parse()
-            .map_err(|_| Status::invalid_argument("Invalid gateway IP"))?;
+        let gateway: std::net::Ipv4Addr =
+            gateway_str.parse().map_err(|_| Status::invalid_argument("Invalid gateway IP"))?;
 
         let bridge_name = format!("vbr{}", network_num);
 
@@ -764,8 +764,7 @@ impl HyprService for HyprServiceImpl {
         };
 
         // Store in database
-        self.state.insert_network(&network).await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        self.state.insert_network(&network).await.map_err(|e| Status::internal(e.to_string()))?;
 
         // TODO: Actually create the bridge interface (Linux only)
         // For now, this just stores the network metadata
@@ -777,15 +776,14 @@ impl HyprService for HyprServiceImpl {
             cidr,
             gateway: gateway_str,
             bridge_name,
-            created_at: network.created_at
+            created_at: network
+                .created_at
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as i64,
         };
 
-        Ok(Response::new(CreateNetworkResponse {
-            network: Some(proto_network),
-        }))
+        Ok(Response::new(CreateNetworkResponse { network: Some(proto_network) }))
     }
 
     #[instrument(skip(self), fields(name = %request.get_ref().name))]
@@ -803,29 +801,33 @@ impl HyprService for HyprServiceImpl {
         }
 
         // Find network by name
-        let networks = self.state.list_networks().await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let networks =
+            self.state.list_networks().await.map_err(|e| Status::internal(e.to_string()))?;
 
-        let network = networks.iter().find(|n| n.name == req.name)
+        let network = networks
+            .iter()
+            .find(|n| n.name == req.name)
             .ok_or_else(|| Status::not_found(format!("Network {} not found", req.name)))?;
 
         // Check if network is in use (unless force)
         if !req.force {
-            let vms = self.state.list_vms().await
-                .map_err(|e| Status::internal(e.to_string()))?;
+            let vms = self.state.list_vms().await.map_err(|e| Status::internal(e.to_string()))?;
 
             // Check if any VM is using this network
             // For now, all VMs use the default network, so this check is placeholder
             let in_use = vms.iter().any(|vm| vm.config.network.network == req.name);
             if in_use {
-                return Err(Status::failed_precondition(
-                    format!("Network {} is in use. Use force=true to delete anyway", req.name)
-                ));
+                return Err(Status::failed_precondition(format!(
+                    "Network {} is in use. Use force=true to delete anyway",
+                    req.name
+                )));
             }
         }
 
         // Delete from database
-        self.state.delete_network(&network.id).await
+        self.state
+            .delete_network(&network.id)
+            .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
         // TODO: Actually delete the bridge interface (Linux only)
@@ -840,37 +842,46 @@ impl HyprService for HyprServiceImpl {
     ) -> std::result::Result<Response<ListNetworksResponse>, Status> {
         info!("gRPC: ListNetworks");
 
-        let networks = self.state.list_networks().await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let networks =
+            self.state.list_networks().await.map_err(|e| Status::internal(e.to_string()))?;
 
         // Always include the default network (even if not in DB)
-        let mut proto_networks: Vec<proto::Network> = networks.into_iter().map(|n| {
-            proto::Network {
+        let mut proto_networks: Vec<proto::Network> = networks
+            .into_iter()
+            .map(|n| proto::Network {
                 id: n.id,
                 name: n.name,
                 driver: n.driver.to_string(),
                 cidr: n.cidr,
                 gateway: n.gateway.to_string(),
                 bridge_name: n.bridge_name,
-                created_at: n.created_at
+                created_at: n
+                    .created_at
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs() as i64,
-            }
-        }).collect();
+            })
+            .collect();
 
         // Add default network if not present
         if !proto_networks.iter().any(|n| n.name == "bridge" || n.name == "default") {
             let defaults = hypr_core::network::defaults::defaults();
-            proto_networks.insert(0, proto::Network {
-                id: "default".to_string(),
-                name: "bridge".to_string(),
-                driver: "bridge".to_string(),
-                cidr: hypr_core::network::defaults::cidr().to_string(),
-                gateway: defaults.gateway.to_string(),
-                bridge_name: if cfg!(target_os = "linux") { "vbr0".to_string() } else { "vmnet".to_string() },
-                created_at: 0, // System default
-            });
+            proto_networks.insert(
+                0,
+                proto::Network {
+                    id: "default".to_string(),
+                    name: "bridge".to_string(),
+                    driver: "bridge".to_string(),
+                    cidr: hypr_core::network::defaults::cidr().to_string(),
+                    gateway: defaults.gateway.to_string(),
+                    bridge_name: if cfg!(target_os = "linux") {
+                        "vbr0".to_string()
+                    } else {
+                        "vmnet".to_string()
+                    },
+                    created_at: 0, // System default
+                },
+            );
         }
 
         Ok(Response::new(ListNetworksResponse { networks: proto_networks }))
@@ -895,17 +906,23 @@ impl HyprService for HyprServiceImpl {
                     driver: "bridge".to_string(),
                     cidr: hypr_core::network::defaults::cidr().to_string(),
                     gateway: defaults.gateway.to_string(),
-                    bridge_name: if cfg!(target_os = "linux") { "vbr0".to_string() } else { "vmnet".to_string() },
+                    bridge_name: if cfg!(target_os = "linux") {
+                        "vbr0".to_string()
+                    } else {
+                        "vmnet".to_string()
+                    },
                     created_at: 0,
                 }),
             }));
         }
 
         // Look up custom network
-        let networks = self.state.list_networks().await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let networks =
+            self.state.list_networks().await.map_err(|e| Status::internal(e.to_string()))?;
 
-        let network = networks.into_iter().find(|n| n.name == req.name)
+        let network = networks
+            .into_iter()
+            .find(|n| n.name == req.name)
             .ok_or_else(|| Status::not_found(format!("Network {} not found", req.name)))?;
 
         Ok(Response::new(GetNetworkResponse {
@@ -916,7 +933,8 @@ impl HyprService for HyprServiceImpl {
                 cidr: network.cidr,
                 gateway: network.gateway.to_string(),
                 bridge_name: network.bridge_name,
-                created_at: network.created_at
+                created_at: network
+                    .created_at
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs() as i64,
@@ -1002,7 +1020,9 @@ impl HyprService for HyprServiceImpl {
                 Some(Ok(req)) => match req.message {
                     Some(exec_request::Message::Start(start)) => start,
                     _ => {
-                        let _ = tx.send(Err(Status::invalid_argument("First message must be ExecStart"))).await;
+                        let _ = tx
+                            .send(Err(Status::invalid_argument("First message must be ExecStart")))
+                            .await;
                         return;
                     }
                 },
@@ -1021,19 +1041,18 @@ impl HyprService for HyprServiceImpl {
                 }
             };
 
-            let vsock_path = adapter.vsock_path(&VmHandle {
-                id: vm.id.clone(),
-                pid: vm.pid,
-                socket_path: None,
-            });
+            let vsock_path =
+                adapter.vsock_path(&VmHandle { id: vm.id.clone(), pid: vm.pid, socket_path: None });
 
             // Send started confirmation
             let session_id = uuid::Uuid::new_v4().to_string();
-            let _ = tx.send(Ok(ExecResponse {
-                message: Some(exec_response::Message::Started(ExecStarted {
-                    session_id: session_id.clone(),
-                })),
-            })).await;
+            let _ = tx
+                .send(Ok(ExecResponse {
+                    message: Some(exec_response::Message::Started(ExecStarted {
+                        session_id: session_id.clone(),
+                    })),
+                }))
+                .await;
 
             // Connect to vsock and relay I/O
             // TODO: Implement actual vsock connection using kestrel exec protocol
@@ -1050,9 +1069,13 @@ impl HyprService for HyprServiceImpl {
                             match tokio::io::AsyncReadExt::read(&mut reader, &mut buf).await {
                                 Ok(0) => break, // EOF
                                 Ok(n) => {
-                                    let _ = tx_clone.send(Ok(ExecResponse {
-                                        message: Some(exec_response::Message::Stdout(buf[..n].to_vec())),
-                                    })).await;
+                                    let _ = tx_clone
+                                        .send(Ok(ExecResponse {
+                                            message: Some(exec_response::Message::Stdout(
+                                                buf[..n].to_vec(),
+                                            )),
+                                        }))
+                                        .await;
                                 }
                                 Err(_) => break,
                             }
@@ -1063,7 +1086,10 @@ impl HyprService for HyprServiceImpl {
                     while let Some(Ok(req)) = in_stream.next().await {
                         match req.message {
                             Some(exec_request::Message::Input(input)) => {
-                                if tokio::io::AsyncWriteExt::write_all(&mut writer, &input.data).await.is_err() {
+                                if tokio::io::AsyncWriteExt::write_all(&mut writer, &input.data)
+                                    .await
+                                    .is_err()
+                                {
                                     break;
                                 }
                             }
@@ -1082,14 +1108,16 @@ impl HyprService for HyprServiceImpl {
                     reader_task.abort();
                 }
                 Err(e) => {
-                    let _ = tx.send(Err(Status::internal(format!("Failed to connect to VM: {}", e)))).await;
+                    let _ = tx
+                        .send(Err(Status::internal(format!("Failed to connect to VM: {}", e))))
+                        .await;
                 }
             }
 
             // Send exit code
-            let _ = tx.send(Ok(ExecResponse {
-                message: Some(exec_response::Message::ExitCode(0)),
-            })).await;
+            let _ = tx
+                .send(Ok(ExecResponse { message: Some(exec_response::Message::ExitCode(0)) }))
+                .await;
         });
 
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -1107,18 +1135,16 @@ impl HyprService for HyprServiceImpl {
         let req = request.into_inner();
 
         // Get the image
-        let images = self.state.list_images().await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let images = self.state.list_images().await.map_err(|e| Status::internal(e.to_string()))?;
 
-        let _image = images.into_iter()
+        let _image = images
+            .into_iter()
             .find(|i| i.id == req.image_id)
             .ok_or_else(|| Status::not_found("Image not found"))?;
 
         // TODO: Parse actual layer history from OCI manifest
         // For now, return empty history
-        Ok(Response::new(GetImageHistoryResponse {
-            layers: vec![],
-        }))
+        Ok(Response::new(GetImageHistoryResponse { layers: vec![] }))
     }
 
     // =========================================================================
@@ -1140,24 +1166,28 @@ impl HyprService for HyprServiceImpl {
 
         tokio::spawn(async move {
             // Send initial progress
-            let _ = tx.send(Ok(PullEvent {
-                event: Some(pull_event::Event::Progress(PullProgress {
-                    layer_id: String::new(),
-                    status: "pulling".to_string(),
-                    current: 0,
-                    total: 0,
-                })),
-            })).await;
+            let _ = tx
+                .send(Ok(PullEvent {
+                    event: Some(pull_event::Event::Progress(PullProgress {
+                        layer_id: String::new(),
+                        status: "pulling".to_string(),
+                        current: 0,
+                        total: 0,
+                    })),
+                }))
+                .await;
 
             // Create puller and pull image
             let mut puller = match ImagePuller::new() {
                 Ok(p) => p,
                 Err(e) => {
-                    let _ = tx.send(Ok(PullEvent {
-                        event: Some(pull_event::Event::Error(PullError {
-                            message: e.to_string(),
-                        })),
-                    })).await;
+                    let _ = tx
+                        .send(Ok(PullEvent {
+                            event: Some(pull_event::Event::Error(PullError {
+                                message: e.to_string(),
+                            })),
+                        }))
+                        .await;
                     return;
                 }
             };
@@ -1166,27 +1196,33 @@ impl HyprService for HyprServiceImpl {
                 Ok(image) => {
                     // Save to state
                     if let Err(e) = state.insert_image(&image).await {
-                        let _ = tx.send(Ok(PullEvent {
-                            event: Some(pull_event::Event::Error(PullError {
-                                message: format!("Failed to save image: {}", e),
-                            })),
-                        })).await;
+                        let _ = tx
+                            .send(Ok(PullEvent {
+                                event: Some(pull_event::Event::Error(PullError {
+                                    message: format!("Failed to save image: {}", e),
+                                })),
+                            }))
+                            .await;
                         return;
                     }
 
                     // Send complete
-                    let _ = tx.send(Ok(PullEvent {
-                        event: Some(pull_event::Event::Complete(PullComplete {
-                            image: Some(image.into()),
-                        })),
-                    })).await;
+                    let _ = tx
+                        .send(Ok(PullEvent {
+                            event: Some(pull_event::Event::Complete(PullComplete {
+                                image: Some(image.into()),
+                            })),
+                        }))
+                        .await;
                 }
                 Err(e) => {
-                    let _ = tx.send(Ok(PullEvent {
-                        event: Some(pull_event::Event::Error(PullError {
-                            message: e.to_string(),
-                        })),
-                    })).await;
+                    let _ = tx
+                        .send(Ok(PullEvent {
+                            event: Some(pull_event::Event::Error(PullError {
+                                message: e.to_string(),
+                            })),
+                        }))
+                        .await;
                 }
             }
         });
@@ -1210,7 +1246,8 @@ impl HyprService for HyprServiceImpl {
         let (tx, rx) = tokio::sync::mpsc::channel(32);
 
         let context_path = PathBuf::from(&req.context_path);
-        let dockerfile = if req.dockerfile.is_empty() { "Dockerfile".to_string() } else { req.dockerfile };
+        let dockerfile =
+            if req.dockerfile.is_empty() { "Dockerfile".to_string() } else { req.dockerfile };
         let tag = req.tag;
         let _build_args = req.build_args;
         let _target = req.target;
@@ -1223,23 +1260,30 @@ impl HyprService for HyprServiceImpl {
         tokio::spawn(async move {
             // Validate context exists
             if !context_path.exists() {
-                let _ = tx.send(Ok(BuildEvent {
-                    event: Some(build_event::Event::Error(BuildError {
-                        step_number: 0,
-                        message: format!("Context path does not exist: {}", context_path.display()),
-                    })),
-                })).await;
+                let _ = tx
+                    .send(Ok(BuildEvent {
+                        event: Some(build_event::Event::Error(BuildError {
+                            step_number: 0,
+                            message: format!(
+                                "Context path does not exist: {}",
+                                context_path.display()
+                            ),
+                        })),
+                    }))
+                    .await;
                 return;
             }
 
             let dockerfile_path = context_path.join(&dockerfile);
             if !dockerfile_path.exists() {
-                let _ = tx.send(Ok(BuildEvent {
-                    event: Some(build_event::Event::Error(BuildError {
-                        step_number: 0,
-                        message: format!("Dockerfile not found: {}", dockerfile_path.display()),
-                    })),
-                })).await;
+                let _ = tx
+                    .send(Ok(BuildEvent {
+                        event: Some(build_event::Event::Error(BuildError {
+                            step_number: 0,
+                            message: format!("Dockerfile not found: {}", dockerfile_path.display()),
+                        })),
+                    }))
+                    .await;
                 return;
             }
 
@@ -1274,13 +1318,17 @@ impl HyprService for HyprServiceImpl {
         let req = request.into_inner();
 
         // Get stack
-        let stack = self.state.get_stack(&req.stack_name).await
+        let stack = self
+            .state
+            .get_stack(&req.stack_name)
+            .await
             .map_err(|e| Status::not_found(e.to_string()))?;
 
         // Find service in stack
-        let service = stack.services.iter()
-            .find(|s| s.name == req.service_name)
-            .ok_or_else(|| Status::not_found(format!("Service {} not found in stack", req.service_name)))?;
+        let service =
+            stack.services.iter().find(|s| s.name == req.service_name).ok_or_else(|| {
+                Status::not_found(format!("Service {} not found in stack", req.service_name))
+            })?;
 
         // Stream logs from the service's VM
         let log_path = hypr_core::paths::logs_dir().join(format!("{}.log", service.vm_id));
@@ -1317,7 +1365,8 @@ impl HyprService for HyprServiceImpl {
         let volumes_dir = hypr_core::paths::data_dir().join("volumes");
         let volume_path = volumes_dir.join(&volume_id);
 
-        tokio::fs::create_dir_all(&volume_path).await
+        tokio::fs::create_dir_all(&volume_path)
+            .await
             .map_err(|e| Status::internal(format!("Failed to create volume: {}", e)))?;
 
         // Create volume record
@@ -1330,8 +1379,7 @@ impl HyprService for HyprServiceImpl {
             created_at: SystemTime::now(),
         };
 
-        self.state.insert_volume(&volume).await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        self.state.insert_volume(&volume).await.map_err(|e| Status::internal(e.to_string()))?;
 
         Ok(Response::new(CreateVolumeResponse {
             volume: Some(proto::Volume {
@@ -1357,18 +1405,18 @@ impl HyprService for HyprServiceImpl {
         let req = request.into_inner();
 
         // Get volume
-        let volume = self.state.get_volume(&req.name).await
-            .map_err(|e| Status::not_found(e.to_string()))?;
+        let volume =
+            self.state.get_volume(&req.name).await.map_err(|e| Status::not_found(e.to_string()))?;
 
         // Delete from filesystem
         if volume.path.exists() {
-            tokio::fs::remove_dir_all(&volume.path).await
+            tokio::fs::remove_dir_all(&volume.path)
+                .await
                 .map_err(|e| Status::internal(format!("Failed to delete volume: {}", e)))?;
         }
 
         // Delete from state
-        self.state.delete_volume(&req.name).await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        self.state.delete_volume(&req.name).await.map_err(|e| Status::internal(e.to_string()))?;
 
         Ok(Response::new(DeleteVolumeResponse { success: true }))
     }
@@ -1377,24 +1425,23 @@ impl HyprService for HyprServiceImpl {
         &self,
         _request: Request<ListVolumesRequest>,
     ) -> std::result::Result<Response<ListVolumesResponse>, Status> {
-        let volumes = self.state.list_volumes().await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let volumes =
+            self.state.list_volumes().await.map_err(|e| Status::internal(e.to_string()))?;
 
-        let proto_volumes: Vec<proto::Volume> = volumes.into_iter().map(|v| {
-            proto::Volume {
+        let proto_volumes: Vec<proto::Volume> = volumes
+            .into_iter()
+            .map(|v| proto::Volume {
                 id: v.id,
                 name: v.name,
                 driver: "local".to_string(),
                 path: v.path.to_string_lossy().to_string(),
                 size_bytes: v.size_bytes,
-                created_at: v.created_at
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64,
+                created_at: v.created_at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+                    as i64,
                 used_by: vec![],
                 labels: HashMap::new(),
-            }
-        }).collect();
+            })
+            .collect();
 
         Ok(Response::new(ListVolumesResponse { volumes: proto_volumes }))
     }
@@ -1405,8 +1452,8 @@ impl HyprService for HyprServiceImpl {
     ) -> std::result::Result<Response<GetVolumeResponse>, Status> {
         let req = request.into_inner();
 
-        let volume = self.state.get_volume(&req.name).await
-            .map_err(|e| Status::not_found(e.to_string()))?;
+        let volume =
+            self.state.get_volume(&req.name).await.map_err(|e| Status::not_found(e.to_string()))?;
 
         Ok(Response::new(GetVolumeResponse {
             volume: Some(proto::Volume {
@@ -1415,7 +1462,8 @@ impl HyprService for HyprServiceImpl {
                 driver: "local".to_string(),
                 path: volume.path.to_string_lossy().to_string(),
                 size_bytes: volume.size_bytes,
-                created_at: volume.created_at
+                created_at: volume
+                    .created_at
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs() as i64,
@@ -1429,8 +1477,8 @@ impl HyprService for HyprServiceImpl {
         &self,
         _request: Request<PruneVolumesRequest>,
     ) -> std::result::Result<Response<PruneVolumesResponse>, Status> {
-        let volumes = self.state.list_volumes().await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let volumes =
+            self.state.list_volumes().await.map_err(|e| Status::internal(e.to_string()))?;
 
         let deleted = Vec::new();
         let reclaimed: u64 = 0;
@@ -1456,26 +1504,25 @@ impl HyprService for HyprServiceImpl {
         _request: Request<GetSystemStatsRequest>,
     ) -> std::result::Result<Response<GetSystemStatsResponse>, Status> {
         // Get counts
-        let vms = self.state.list_vms().await
-            .map_err(|e| Status::internal(e.to_string()))?;
-        let images = self.state.list_images().await
-            .map_err(|e| Status::internal(e.to_string()))?;
-        let stacks = self.state.list_stacks().await
-            .map_err(|e| Status::internal(e.to_string()))?;
-        let networks = self.state.list_networks().await
-            .map_err(|e| Status::internal(e.to_string()))?;
-        let volumes = self.state.list_volumes().await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let vms = self.state.list_vms().await.map_err(|e| Status::internal(e.to_string()))?;
+        let images = self.state.list_images().await.map_err(|e| Status::internal(e.to_string()))?;
+        let stacks = self.state.list_stacks().await.map_err(|e| Status::internal(e.to_string()))?;
+        let networks =
+            self.state.list_networks().await.map_err(|e| Status::internal(e.to_string()))?;
+        let volumes =
+            self.state.list_volumes().await.map_err(|e| Status::internal(e.to_string()))?;
 
         let running_vms = vms.iter().filter(|v| v.status == VmStatus::Running).count() as u32;
         let stopped_vms = vms.iter().filter(|v| v.status == VmStatus::Stopped).count() as u32;
 
         // Calculate resource allocation
-        let total_cpus: u32 = vms.iter()
+        let total_cpus: u32 = vms
+            .iter()
             .filter(|v| v.status == VmStatus::Running)
             .map(|v| v.config.resources.cpus)
             .sum();
-        let total_memory: u64 = vms.iter()
+        let total_memory: u64 = vms
+            .iter()
             .filter(|v| v.status == VmStatus::Running)
             .map(|v| v.config.resources.memory_mb as u64)
             .sum();
@@ -1540,9 +1587,7 @@ impl HyprService for HyprServiceImpl {
 
         // TODO: Persist settings to config file
         // For now, just return the settings back
-        Ok(Response::new(UpdateSettingsResponse {
-            settings: req.settings,
-        }))
+        Ok(Response::new(UpdateSettingsResponse { settings: req.settings }))
     }
 
     // =========================================================================

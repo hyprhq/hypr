@@ -38,12 +38,7 @@ pub struct BridgeConfig {
 impl Default for BridgeConfig {
     fn default() -> Self {
         let net = defaults::defaults();
-        Self {
-            name: "vbr0".to_string(),
-            ip: net.gateway,
-            netmask: net.netmask,
-            mtu: 1500,
-        }
+        Self { name: "vbr0".to_string(), ip: net.gateway, netmask: net.netmask, mtu: 1500 }
     }
 }
 
