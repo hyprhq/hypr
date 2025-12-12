@@ -147,8 +147,73 @@ Force remove a running VM:
 hypr rm -f <vm-id>
 ```
 
+## Executing Commands
+
+Run a command in a running VM:
+```sh
+hypr exec <vm-id> -- ls -la /
+```
+
+Open an interactive shell:
+```sh
+hypr exec <vm-id> -it
+```
+
+## Viewing Logs
+
+View all logs:
+```sh
+hypr logs <vm-id>
+```
+
+Follow logs in real-time:
+```sh
+hypr logs <vm-id> -f
+```
+
+## Building Images
+
+Build from a Dockerfile:
+```sh
+hypr build -t myapp:latest .
+```
+
+See [Building Images](building-images.md) for details.
+
+## Deploying Stacks
+
+Deploy a multi-service application from a compose file:
+```sh
+hypr compose up
+```
+
+See [Compose Stacks](compose.md) for details.
+
+## Managing Volumes
+
+Create persistent storage:
+```sh
+hypr volume create mydata
+hypr volume ls
+```
+
+See [Volumes](volumes.md) for details.
+
+## Managing Networks
+
+Create custom networks:
+```sh
+hypr network create mynet
+hypr network ls
+```
+
+See [Networking](networking.md) for details.
+
 ## Next Steps
 
 - [CLI Reference](cli-reference.md) - All available commands
 - [Building Images](building-images.md) - Build images from Dockerfiles
 - [Compose Stacks](compose.md) - Deploy multi-service applications
+- [Networking](networking.md) - Network configuration
+- [Volumes](volumes.md) - Persistent storage
+- [GPU Passthrough](gpu.md) - GPU acceleration

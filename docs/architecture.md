@@ -5,41 +5,41 @@ Technical overview of HYPR's internal architecture.
 ## System Overview
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                              User                                       │
-└─────────────────────────────────┬───────────────────────────────────────┘
-                                  │
-┌─────────────────────────────────▼───────────────────────────────────────┐
-│                            hypr CLI                                     │
-│                      (gRPC client, TUI)                                 │
-└─────────────────────────────────┬───────────────────────────────────────┘
-                                  │ gRPC (Unix socket)
-┌─────────────────────────────────▼───────────────────────────────────────┐
-│                             hyprd                                       │
-│                    (Daemon - runs as root)                              │
-├─────────────────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌─────────────┐  │
-│  │  API Server  │  │   State      │  │  Network     │  │  Orchestr.  │  │
-│  │   (gRPC)     │  │  (SQLite)    │  │  Manager     │  │  (Stacks)   │  │
-│  └──────────────┘  └──────────────┘  └──────────────┘  └─────────────┘  │
-│                                                                         │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────────┐   │
-│  │  Builder     │  │  Registry    │  │       VMM Adapter            │   │
-│  │ (Dockerfile) │  │ (OCI pull)   │  │  ┌────────┐ ┌────────┐       │   │
-│  └──────────────┘  └──────────────┘  │  │  CHV   │ │libkrun │       │   │
-│                                       │  └────────┘ └────────┘       │   │
-│                                       └──────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────┘
-                                  │
-┌─────────────────────────────────▼───────────────────────────────────────┐
-│                           microVMs                                      │
-│  ┌────────────────────────────────────────────────────────────────┐     │
-│  │  Linux Kernel (6.12)                                           │     │
-│  │  Kestrel (PID 1) - guest agent                                 │     │
-│  │  SquashFS rootfs + overlayfs                                   │     │
-│  │  virtio-net, virtio-blk, virtio-vsock                          │     │
-│  └────────────────────────────────────────────────────────────────┘     │
-└─────────────────────────────────────────────────────────────────────────┘
++-------------------------------------------------------------------------+
+|                              User                                        |
++------------------------------------+------------------------------------+
+                                     |
++------------------------------------v------------------------------------+
+|                            hypr CLI                                      |
+|                      (gRPC client, TUI)                                  |
++------------------------------------+------------------------------------+
+                                     | gRPC (Unix socket)
++------------------------------------v------------------------------------+
+|                             hyprd                                        |
+|                    (Daemon - runs as root)                               |
++-------------------------------------------------------------------------+
+|  +--------------+  +--------------+  +--------------+  +-------------+  |
+|  |  API Server  |  |   State      |  |  Network     |  |  Orchestr.  |  |
+|  |   (gRPC)     |  |  (SQLite)    |  |  Manager     |  |  (Stacks)   |  |
+|  +--------------+  +--------------+  +--------------+  +-------------+  |
+|                                                                          |
+|  +--------------+  +--------------+  +------------------------------+   |
+|  |  Builder     |  |  Registry    |  |       VMM Adapter            |   |
+|  | (Dockerfile) |  | (OCI pull)   |  |  +--------+  +--------+      |   |
+|  +--------------+  +--------------+  |  |  CHV   |  |libkrun |      |   |
+|                                       |  +--------+  +--------+      |   |
+|                                       +------------------------------+   |
++------------------------------------+------------------------------------+
+                                     |
++------------------------------------v------------------------------------+
+|                           microVMs                                       |
+|  +-------------------------------------------------------------------+  |
+|  |  Linux Kernel (6.12)                                              |  |
+|  |  Kestrel (PID 1) - guest agent                                    |  |
+|  |  SquashFS rootfs + overlayfs                                      |  |
+|  |  virtio-net, virtio-blk, virtio-vsock, virtio-fs                  |  |
+|  +-------------------------------------------------------------------+  |
++-------------------------------------------------------------------------+
 ```
 
 ## Components
@@ -65,17 +65,19 @@ The background service that manages all VM operations. Runs as root for hardware
 - `hypr-daemon/src/api/server.rs` - gRPC service implementation
 - `hypr-daemon/src/network_manager.rs` - Network setup and management
 - `hypr-daemon/src/orchestrator/` - Stack orchestration
+- `hypr-daemon/src/reconcile.rs` - State reconciliation
 
 **Responsibilities:**
 - VM lifecycle management (create, start, stop, delete)
 - Network setup (bridge, TAP devices, port forwarding)
 - Image management (storage, lookup)
+- Volume management
 - State persistence (SQLite)
 - Graceful shutdown and cleanup
 
 ### State Manager
 
-Persistent storage using SQLite. Stores VM state, images, stacks, and configuration.
+Persistent storage using SQLite. Stores VM state, images, stacks, networks, volumes, and configuration.
 
 **Location:** `/var/lib/hypr/hypr.db`
 
@@ -83,16 +85,18 @@ Persistent storage using SQLite. Stores VM state, images, stacks, and configurat
 - `vms` - VM records with config, status, timestamps
 - `images` - Image metadata and paths
 - `stacks` - Compose stack definitions
+- `networks` - Custom network configurations
+- `volumes` - Named volume metadata
 - Migrations handled automatically on startup
 
 ### Network Manager
 
-Handles all networking for VMs.
+Handles all networking for VMs. See [Networking](networking.md) for user documentation.
 
 **Linux:**
-- Creates bridge device `vbr0`
+- Creates bridge device `vbr0` (default) plus custom bridges
 - Allocates TAP devices per VM
-- IP allocation via built-in IPAM (10.88.0.0/16)
+- IP allocation via built-in IPAM (10.88.0.0/16 default)
 - Port forwarding via eBPF or userspace proxy
 - DNS server for `.hypr` domain resolution
 
@@ -100,6 +104,14 @@ Handles all networking for VMs.
 - Uses vmnet framework (via libkrun)
 - IP allocation via DHCP (192.168.64.0/24)
 - Port forwarding via userspace proxy
+- DNS server for name resolution
+
+**Key files:**
+- `hypr-core/src/network/mod.rs` - Network module
+- `hypr-core/src/network/bridge/` - Bridge management
+- `hypr-core/src/network/dns.rs` - DNS server
+- `hypr-core/src/network/ipam.rs` - IP address management
+- `hypr-core/src/network/defaults.rs` - Platform-specific defaults
 
 ### VMM Adapter
 
@@ -114,7 +126,8 @@ Abstract interface for hypervisor operations. Platform-specific implementations:
 **Key files:**
 - `hypr-core/src/adapters/mod.rs` - Trait definition
 - `hypr-core/src/adapters/cloudhypervisor.rs` - Linux adapter
-- `hypr-core/src/adapters/krun.rs` - macOS adapter (libkrun FFI)
+- `hypr-core/src/adapters/krun.rs` - macOS adapter
+- `hypr-core/src/adapters/libkrun_ffi.rs` - libkrun FFI bindings
 
 **Trait interface:**
 ```rust
@@ -205,6 +218,45 @@ Minimal C program that runs as PID 1 inside VMs. Compiled statically (~500KB).
 5. Kestrel spawns command, relays I/O
 6. Exit code returned to CLI
 
+### Deploying a Stack
+
+1. User: `hypr compose up`
+2. CLI reads compose file, calls `DeployStack` RPC
+3. Daemon parses compose file via converter
+4. Creates networks defined in compose
+5. Creates volumes defined in compose
+6. Pulls/builds required images
+7. Creates VMs in dependency order
+8. Returns stack status
+
+## gRPC API
+
+The daemon exposes a gRPC API with 34+ endpoints:
+
+**VM Operations:**
+- `CreateVM`, `StartVM`, `StopVM`, `DeleteVM`
+- `ListVms`, `GetVM`, `RunVM` (streaming)
+- `StreamVMMetrics`, `StreamLogs`, `Exec`
+
+**Image Operations:**
+- `ListImages`, `GetImage`, `DeleteImage`
+- `GetImageHistory`, `PullImage` (streaming), `BuildImage` (streaming)
+
+**Stack Operations:**
+- `DeployStack` (streaming), `DestroyStack`
+- `ListStacks`, `GetStack`, `StreamStackServiceLogs`
+
+**Network Operations:**
+- `CreateNetwork`, `DeleteNetwork`, `ListNetworks`, `GetNetwork`
+
+**Volume Operations:**
+- `CreateVolume`, `DeleteVolume`, `ListVolumes`, `GetVolume`, `PruneVolumes`
+
+**System Operations:**
+- `GetSystemStats`, `Health`
+- `GetSettings`, `UpdateSettings`
+- `SubscribeEvents` (streaming)
+
 ## Ports and Sockets
 
 HYPR uses ports in the 41000-41999 range:
@@ -215,7 +267,7 @@ HYPR uses ports in the 41000-41999 range:
 | 41001 | REST gateway |
 | 41002 | Prometheus metrics |
 | 41003 | DNS server |
-| 41010 | Build proxy |
+| 41010 | Build HTTP proxy |
 | 41011 | Build agent vsock |
 
 ## File Layout
@@ -227,6 +279,11 @@ HYPR uses ports in the 41000-41999 range:
 │   └── nginx_latest/
 │       ├── rootfs.squashfs
 │       └── manifest.json
+├── volumes/             # Named volumes
+│   ├── local/           # Standalone volumes
+│   │   └── mydata/
+│   └── mystack/         # Stack volumes
+│       └── pgdata/
 ├── logs/                # VM logs
 │   └── <vm-id>.log
 └── cache/               # Build cache
@@ -272,3 +329,15 @@ HYPR_OTLP_ENABLED=1 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 hyprd
 - Each VM has its own kernel, memory, network
 - Build VMs have no network access (filesystem IPC only)
 - Boot VGA protection prevents display GPU unbind
+- Volumes use host filesystem permissions
+
+## Platform Differences
+
+| Feature | Linux | macOS |
+|---------|-------|-------|
+| Hypervisor | cloud-hypervisor | libkrun |
+| Network | Bridge + TAP | vmnet |
+| Default CIDR | 10.88.0.0/16 | 192.168.64.0/24 |
+| Max VMs | ~65,000 | ~250 |
+| GPU | VFIO passthrough | Metal (ARM64) |
+| Filesystem sharing | virtiofs | virtio-fs |

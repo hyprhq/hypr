@@ -15,6 +15,8 @@ hypr run nginx
 - **OCI-Compatible**: Pull images from Docker Hub, GHCR, and any OCI registry
 - **Dockerfile Builds**: Build images using standard Dockerfile syntax
 - **Compose Support**: Deploy multi-service stacks with docker-compose.yml files
+- **Volume Management**: Persistent named volumes and bind mounts
+- **Custom Networks**: Create isolated networks with custom CIDR ranges
 - **GPU Passthrough**: NVIDIA/AMD via VFIO (Linux), Metal via Venus (macOS ARM64)
 - **Sub-Second Boot**: VMs boot in under 500ms on warm cache
 - **Exec Support**: Execute commands in running VMs like `docker exec`
@@ -103,6 +105,57 @@ hypr compose ps              # List stacks
 hypr compose down <stack>    # Destroy stack
 ```
 
+## Volumes
+
+Create and manage persistent volumes:
+```sh
+hypr volume create mydata         # Create volume
+hypr volume ls                    # List volumes
+hypr volume inspect mydata        # Show details
+hypr volume rm mydata             # Remove volume
+hypr volume prune                 # Remove unused volumes
+```
+
+Use volumes in compose:
+```yaml
+services:
+  db:
+    image: postgres:16
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
+```
+
+## Networks
+
+Create isolated networks for service communication:
+```sh
+hypr network create mynet                      # Create network
+hypr network create mynet --subnet 10.89.0.0/16  # Custom CIDR
+hypr network ls                                # List networks
+hypr network inspect mynet                     # Show details
+hypr network rm mynet                          # Remove network
+hypr network prune                             # Remove unused networks
+```
+
+Use networks in compose:
+```yaml
+services:
+  web:
+    networks:
+      - frontend
+  api:
+    networks:
+      - frontend
+      - backend
+
+networks:
+  frontend:
+  backend:
+```
+
 ## GPU Passthrough
 
 **Linux (VFIO):**
@@ -121,28 +174,28 @@ GPU passthrough is not available on Intel Macs.
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                         hypr CLI                            │
-│                   (gRPC client, user interface)             │
-└─────────────────────────┬───────────────────────────────────┘
-                          │ gRPC
-┌─────────────────────────▼───────────────────────────────────┐
-│                         hyprd                               │
-│         (daemon: VM lifecycle, networking, state)           │
-├─────────────────────────────────────────────────────────────┤
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
-│  │ StateManager│  │ NetworkMgr  │  │   VmmAdapter        │  │
-│  │  (SQLite)   │  │ (bridge,DNS)│  │ (CHV/libkrun)       │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-                          │
-┌─────────────────────────▼───────────────────────────────────┐
-│                       microVM                               │
-│  ┌─────────────────────────────────────────────────────┐    │
-│  │  Linux Kernel + Kestrel (PID 1 guest agent)         │    │
-│  │  SquashFS rootfs + overlayfs (copy-on-write)        │    │
-│  └─────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────┘
++-----------------------------------------------------------------+
+|                         hypr CLI                                |
+|                   (gRPC client, user interface)                 |
++---------------------------------+-------------------------------+
+                                  | gRPC (Unix socket)
++---------------------------------v-------------------------------+
+|                         hyprd                                   |
+|         (daemon: VM lifecycle, networking, state)               |
++-----------------------------------------------------------------+
+|  +-------------+  +-------------+  +-----------------------+    |
+|  | StateManager|  | NetworkMgr  |  |   VmmAdapter          |    |
+|  |  (SQLite)   |  | (bridge,DNS)|  | (CHV/libkrun)         |    |
+|  +-------------+  +-------------+  +-----------------------+    |
++---------------------------------+-------------------------------+
+                                  |
++---------------------------------v-------------------------------+
+|                       microVM                                   |
+|  +-----------------------------------------------------------+  |
+|  |  Linux Kernel + Kestrel (PID 1 guest agent)               |  |
+|  |  SquashFS rootfs + overlayfs (copy-on-write)              |  |
+|  +-----------------------------------------------------------+  |
++-----------------------------------------------------------------+
 ```
 
 ### Hypervisor Adapters
@@ -171,6 +224,7 @@ GPU passthrough is not available on Intel Macs.
 |------|-------------|
 | `/var/lib/hypr/hypr.db` | SQLite database |
 | `/var/lib/hypr/images/` | Built and pulled images |
+| `/var/lib/hypr/volumes/` | Named volumes |
 | `/var/lib/hypr/logs/` | VM logs |
 | `/var/lib/hypr/cache/` | Build cache |
 
@@ -196,11 +250,23 @@ Clean up unused resources:
 ```sh
 hypr system prune          # Remove dangling images and cache
 hypr system prune --all    # Also remove stopped VMs
+hypr system prune --volumes  # Also remove unused volumes
 ```
 
 ## Documentation
 
-Full documentation is available in the [docs/](docs/) directory.
+Full documentation is available in the [docs/](docs/) directory:
+
+- [Getting Started](docs/getting-started.md) - Installation and first VM
+- [CLI Reference](docs/cli-reference.md) - Complete command documentation
+- [Building Images](docs/building-images.md) - Dockerfile support
+- [Compose Stacks](docs/compose.md) - Multi-service deployments
+- [Networking](docs/networking.md) - Network configuration
+- [Volumes](docs/volumes.md) - Persistent storage
+- [GPU Passthrough](docs/gpu.md) - GPU acceleration
+- [Architecture](docs/architecture.md) - System internals
+- [Configuration](docs/configuration.md) - Environment and paths
+- [Troubleshooting](docs/troubleshooting.md) - Common issues
 
 ## License
 

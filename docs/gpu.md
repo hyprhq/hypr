@@ -191,3 +191,39 @@ hypr exec myvm -- rocm-smi
 ```sh
 hypr exec myvm -- python -c "import torch; print(torch.backends.mps.is_available())"
 ```
+
+## Compose with GPU
+
+Define GPU access in compose files:
+
+```yaml
+services:
+  ml-worker:
+    image: pytorch/pytorch:latest
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+```
+
+On Linux, specify the GPU:
+```sh
+# Deploy with GPU passthrough
+hypr compose up
+```
+
+On macOS Apple Silicon, GPU access is automatic when Metal is enabled:
+```sh
+hypr compose up
+```
+
+## Best Practices
+
+1. **Use pre-built GPU images** with drivers included
+2. **Test GPU access** before deploying workloads
+3. **Monitor GPU memory** to avoid OOM errors
+4. **Restore drivers** after VM shutdown (automatic)
+5. **Isolate IOMMU groups** for reliable passthrough

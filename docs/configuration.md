@@ -67,8 +67,9 @@ export HYPR_DATA_DIR=/opt/hypr/data
 
 | Path | Description |
 |------|-------------|
-| `hypr.db` | SQLite database (VMs, images, stacks) |
+| `hypr.db` | SQLite database (VMs, images, stacks, networks, volumes) |
 | `images/` | Built and pulled images |
+| `volumes/` | Named volumes |
 | `logs/` | VM log files |
 | `cache/` | Build cache layers |
 | `vmlinux` | Linux kernel binary |
@@ -153,6 +154,25 @@ services:
 | CIDR | `192.168.64.0/24` |
 | Gateway | `192.168.64.1` |
 | DNS | `192.168.64.1` |
+
+### Custom Networks
+
+Create networks with custom subnets:
+```sh
+hypr network create mynet --subnet 10.89.0.0/16 --gateway 10.89.0.1
+```
+
+## Volume Configuration
+
+### Default Storage
+
+Volumes are stored in `/var/lib/hypr/volumes/`:
+- Standalone volumes: `/var/lib/hypr/volumes/local/<name>`
+- Stack volumes: `/var/lib/hypr/volumes/<stack>/<name>`
+
+### Volume Driver
+
+Currently only the `local` driver is supported, which stores data on the host filesystem.
 
 ## Kernel Configuration
 
@@ -256,7 +276,7 @@ tail -f /var/log/hypr/hyprd.log
 
 ## DNS Resolution
 
-HYPR runs a DNS server for `.hypr` domain resolution.
+HYPR runs a DNS server for `.hypr` domain resolution on port 41003.
 
 **Linux setup (systemd-resolved):**
 ```sh
@@ -276,4 +296,27 @@ cat /etc/resolver/hypr
 # Access VM by name
 curl http://myvm.hypr/
 ping myvm.hypr
+```
+
+## Database Configuration
+
+HYPR uses SQLite for state persistence.
+
+**Location:** `/var/lib/hypr/hypr.db`
+
+**Tables:**
+- `vms` - VM records
+- `images` - Image metadata
+- `stacks` - Compose stacks
+- `networks` - Network definitions
+- `volumes` - Volume metadata
+
+**Migrations:** Applied automatically on daemon startup
+
+**Backup:**
+```sh
+# Stop daemon first
+sudo systemctl stop hyprd
+cp /var/lib/hypr/hypr.db /backup/hypr.db.bak
+sudo systemctl start hyprd
 ```

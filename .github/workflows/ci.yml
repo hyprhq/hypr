@@ -28,13 +28,38 @@ jobs:
       - name: Install system dependencies
         run: |
           if [ "$RUNNER_OS" == "macOS" ]; then
-            brew install protobuf
+            brew install protobuf libffi
           elif [ "$RUNNER_OS" == "Linux" ]; then
             sudo apt-get update
             sudo apt-get install -y protobuf-compiler libelf-dev zlib1g-dev clang libbpf-dev libssl-dev pkg-config
             # Try to install bpftool for eBPF compilation (optional, will use placeholders if unavailable)
             sudo apt-get install -y linux-tools-common linux-tools-generic bpftool 2>/dev/null || true
           fi
+
+      - name: Cache libkrun build (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/cache@v3
+        id: libkrun-cache
+        with:
+          path: hypr-core/embedded/libkrun.dylib
+          key: ${{ runner.os }}-${{ runner.arch }}-libkrun-v1
+
+      - name: Build libkrun (macOS)
+        if: runner.os == 'macOS' && steps.libkrun-cache.outputs.cache-hit != 'true'
+        run: |
+          # Clone libkrun
+          git clone --depth 1 https://github.com/containers/libkrun.git /tmp/libkrun
+          cd /tmp/libkrun
+
+          # Build with block device, networking, and GPU support
+          make BLK=1 NET=1 GPU=1
+
+          # Copy the dylib to embedded directory
+          mkdir -p $GITHUB_WORKSPACE/hypr-core/embedded
+          cp target/release/libkrun.dylib $GITHUB_WORKSPACE/hypr-core/embedded/
+
+          echo "libkrun.dylib built and copied to embedded/"
+          ls -la $GITHUB_WORKSPACE/hypr-core/embedded/
 
       - name: Install zig
         run: |

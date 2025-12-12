@@ -307,6 +307,104 @@ hypr exec <vm-id> -- nslookup google.com
 hypr exec <vm-id> -- sh -c 'echo "nameserver 8.8.8.8" > /etc/resolv.conf'
 ```
 
+### VMs Cannot Communicate
+
+**Symptom:** VMs on same network cannot ping each other.
+
+**Checks:**
+
+1. **Same network:**
+   Ensure both VMs are on the same network (default or custom).
+
+2. **IP addresses:**
+   ```sh
+   hypr ps  # Shows IP column
+   ```
+
+3. **Test connectivity:**
+   ```sh
+   hypr exec vm1 -- ping <vm2-ip>
+   ```
+
+### Custom Network Not Working
+
+**Symptom:** VMs on custom network cannot communicate.
+
+**Checks:**
+
+1. **Network exists:**
+   ```sh
+   hypr network ls
+   ```
+
+2. **Network configuration:**
+   ```sh
+   hypr network inspect mynet
+   ```
+
+3. **VMs attached:**
+   Check compose file has correct `networks:` section.
+
+## Volume Issues
+
+### Volume Not Found
+
+**Symptom:**
+```
+Error: Volume 'mydata' not found
+```
+
+**Checks:**
+
+1. **List volumes:**
+   ```sh
+   hypr volume ls
+   ```
+
+2. **Check name:**
+   Stack volumes are prefixed: `<stack>_<volume>`
+
+3. **Check path:**
+   ```sh
+   ls /var/lib/hypr/volumes/
+   ```
+
+### Volume In Use
+
+**Symptom:**
+```
+Error: Volume 'mydata' is in use by: myvm
+```
+
+**Solution:**
+
+1. **Stop the VM:**
+   ```sh
+   hypr stop myvm
+   hypr volume rm mydata
+   ```
+
+2. **Or force remove:**
+   ```sh
+   hypr volume rm mydata --force
+   ```
+
+### Permission Denied on Volume
+
+**Symptom:** VM cannot read/write to volume.
+
+**Checks:**
+
+1. **Host permissions:**
+   ```sh
+   ls -la /var/lib/hypr/volumes/local/mydata
+   ```
+
+2. **Change permissions:**
+   ```sh
+   sudo chmod -R 777 /var/lib/hypr/volumes/local/mydata
+   ```
+
 ## GPU Issues
 
 ### GPU Not Detected (Linux)
@@ -377,6 +475,57 @@ Error: GPU not bound to vfio-pci driver
    ```
    Update: `brew upgrade libkrun-efi`
 
+## Compose Issues
+
+### Stack Deploy Failed
+
+**Symptom:**
+```
+Error: Failed to deploy stack
+```
+
+**Checks:**
+
+1. **Compose file syntax:**
+   ```sh
+   # Validate with Docker (if available)
+   docker compose config
+   ```
+
+2. **Image availability:**
+   ```sh
+   hypr pull <image>
+   ```
+
+3. **Port conflicts:**
+   Check if ports are already in use.
+
+### Service Dependency Timeout
+
+**Symptom:** Service waits forever for dependency.
+
+**Solution:**
+
+Check if dependent service actually starts:
+```sh
+hypr compose ps mystack
+hypr logs <service-vm-id>
+```
+
+### Volumes Not Created
+
+**Symptom:** Volume mount fails in compose.
+
+**Checks:**
+
+1. **Volume defined:**
+   Ensure volume is in top-level `volumes:` section.
+
+2. **Check volume:**
+   ```sh
+   hypr volume ls
+   ```
+
 ## Disk Space Issues
 
 ### No Space Left
@@ -398,11 +547,15 @@ Error: No space left on device
    hypr system prune --all
    ```
 
-3. **Remove specific images:**
+3. **Prune volumes:**
+   ```sh
+   hypr volume prune
+   ```
+
+4. **Remove specific images:**
    ```sh
    hypr images
-   # Note image ID
-   # Delete via API or manually remove from /var/lib/hypr/images/
+   hypr rmi <image>
    ```
 
 ## Debug Mode
@@ -416,10 +569,24 @@ RUST_LOG=debug hyprd
 # Component-specific
 RUST_LOG=hypr_core::adapters=trace hyprd
 RUST_LOG=hypr_daemon::network_manager=debug hyprd
+RUST_LOG=hypr_core::network=debug hyprd
 ```
 
 ## Getting Help
 
 1. Check logs: `journalctl -u hyprd -f` (Linux) or `tail -f /var/log/hypr/hyprd.log` (macOS)
 2. Enable debug logging: `RUST_LOG=debug`
-3. Report issues: https://github.com/hyprhq/hypr/issues
+3. Check system resources: `hypr system df`
+4. Report issues: https://github.com/hyprhq/hypr/issues
+
+## Common Error Messages
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `Failed to connect to daemon` | Daemon not running | Start daemon with systemctl/launchctl |
+| `Image not found` | Image doesn't exist | Check image name and registry |
+| `VM health check timeout` | VM failed to boot | Check logs, increase resources |
+| `Port already in use` | Port conflict | Use different port or stop conflicting service |
+| `Volume in use` | Volume attached to running VM | Stop VM or use --force |
+| `Network in use` | VMs attached to network | Remove VMs first or use --force |
+| `No space left` | Disk full | Run `hypr system prune --all --volumes` |

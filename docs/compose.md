@@ -1,6 +1,6 @@
 # Compose Stacks
 
-HYPR supports Docker Compose files for deploying multi-service applications.
+HYPR supports Docker Compose files for deploying multi-service applications as coordinated VM stacks.
 
 ## Deploying a Stack
 
@@ -169,7 +169,7 @@ Env files use `KEY=VALUE` format, one per line. Comments (`#`) and empty lines a
 
 ### volumes
 
-Mount volumes.
+Mount volumes into the VM. See [Volumes](volumes.md) for details.
 
 ```yaml
 services:
@@ -177,9 +177,11 @@ services:
     volumes:
       - ./html:/usr/share/nginx/html    # Bind mount
       - data:/var/lib/data              # Named volume
+      - cache:/tmp/cache:ro             # Read-only volume
 
 volumes:
   data:
+  cache:
 ```
 
 ### depends_on
@@ -204,7 +206,7 @@ Services start in dependency order. The web service waits for db and cache to be
 
 ### networks
 
-Connect to networks.
+Connect to networks. See [Networking](networking.md) for details.
 
 ```yaml
 services:
@@ -224,6 +226,13 @@ services:
 networks:
   frontend:
   backend:
+```
+
+Services on the same network can communicate by service name:
+```sh
+# From the api service
+curl http://web:80     # Connects to web service
+curl http://db:5432    # Connects to db service
 ```
 
 ### command
@@ -309,6 +318,95 @@ services:
           memory: 512M
 ```
 
+## Networks
+
+### Default Network
+
+By default, all services in a stack share a default network and can communicate by service name.
+
+### Custom Networks
+
+Define isolated networks:
+
+```yaml
+services:
+  proxy:
+    image: nginx:latest
+    networks:
+      - public
+    ports:
+      - "80:80"
+
+  api:
+    image: myapi:latest
+    networks:
+      - public
+      - internal
+
+  db:
+    image: postgres:16
+    networks:
+      - internal
+
+networks:
+  public:
+  internal:
+```
+
+In this example:
+- `proxy` can reach `api` but not `db`
+- `api` can reach both `proxy` and `db`
+- `db` can only reach `api`
+
+### Network Configuration
+
+```yaml
+networks:
+  custom:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.90.0.0/16
+          gateway: 10.90.0.1
+```
+
+## Volumes
+
+### Named Volumes
+
+```yaml
+services:
+  db:
+    image: postgres:16
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
+```
+
+The volume is created as `<stack-name>_pgdata` and persists after `compose down`.
+
+### Bind Mounts
+
+```yaml
+services:
+  app:
+    volumes:
+      - ./src:/app/src           # Relative path
+      - /data/config:/config     # Absolute path
+```
+
+### Volume Options
+
+```yaml
+volumes:
+  data:
+    driver: local
+    labels:
+      backup: "true"
+```
+
 ## Complete Example
 
 ```yaml
@@ -376,16 +474,39 @@ Deploy:
 hypr compose up -d
 ```
 
-## Build Before Deploy
+## Command Options
 
-Build images before deploying:
+### hypr compose up
+
+| Option | Description |
+|--------|-------------|
+| `-f, --file <path>` | Compose file path |
+| `-n, --name <name>` | Stack name (defaults to directory name) |
+| `-d, --detach` | Run in background |
+| `--force-recreate` | Recreate even if exists |
+| `--build` | Build images before deploying |
+
+### hypr compose down
+
+| Option | Description |
+|--------|-------------|
+| `-f, --force` | Force destroy without confirmation |
+
+### hypr compose ps
+
+List all stacks or show details of specific stack.
+
 ```sh
-hypr compose up --build
+hypr compose ps           # List all stacks
+hypr compose ps mystack   # Show stack details
 ```
 
-Force recreate all services:
+### hypr compose logs
+
+Show logs for a service.
+
 ```sh
-hypr compose up --force-recreate
+hypr compose logs api
 ```
 
 ## Stack Naming
@@ -394,4 +515,33 @@ By default, stacks are named after the directory containing the compose file. Ov
 
 ```sh
 hypr compose up --name myproject
+```
+
+The stack name is used to prefix:
+- VM names: `myproject-web`, `myproject-api`
+- Volume names: `myproject_pgdata`
+- Network names: `myproject_frontend`
+
+## Environment Variable Substitution
+
+Use variables in compose files:
+
+```yaml
+services:
+  web:
+    image: nginx:${NGINX_VERSION:-latest}
+    ports:
+      - "${HOST_PORT:-8080}:80"
+```
+
+Set in `.env`:
+```
+NGINX_VERSION=1.25
+HOST_PORT=9090
+```
+
+Or export:
+```sh
+export NGINX_VERSION=1.25
+hypr compose up
 ```

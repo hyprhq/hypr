@@ -306,3 +306,102 @@ COPY . .
 EXPOSE 8000
 CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0"]
 ```
+
+## Managing Images
+
+List local images:
+```sh
+hypr images
+```
+
+Remove an image:
+```sh
+hypr rmi myapp:latest
+```
+
+Force remove:
+```sh
+hypr rmi -f myapp:latest
+```
+
+Inspect image:
+```sh
+hypr image inspect myapp:latest
+```
+
+Remove unused images:
+```sh
+hypr image prune        # Dangling only
+hypr image prune --all  # All unused
+```
+
+## Compose Builds
+
+Build images as part of stack deployment:
+
+```yaml
+services:
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile.prod
+      args:
+        VERSION: "1.0"
+      target: production
+```
+
+Deploy with build:
+```sh
+hypr compose up --build
+```
+
+## Limitations
+
+### No Network During Build
+
+Build VMs have no network access for security. All dependencies must be:
+- Included in the base image
+- Added to the build context
+- Downloaded in a previous multi-stage build
+
+### Platform-Specific
+
+Images are built for the current platform (x86_64 or ARM64). Cross-platform builds are not supported.
+
+### Not BuildKit
+
+HYPR uses its own build implementation. Some advanced BuildKit features are not supported:
+- Secret mounts (`--mount=type=secret`)
+- SSH mounts (`--mount=type=ssh`)
+- Cache mounts (`--mount=type=cache`)
+- Git context URLs
+
+## Best Practices
+
+1. **Use multi-stage builds** to minimize image size
+2. **Order instructions** by change frequency (stable first)
+3. **Combine RUN commands** to reduce layers
+4. **Use `.dockerignore`** to exclude unnecessary files
+5. **Set USER** to avoid running as root
+6. **Define HEALTHCHECK** for container health monitoring
+7. **Use specific tags** instead of `latest` for reproducibility
+
+## Troubleshooting
+
+### Build Fails
+
+1. Check Dockerfile syntax
+2. View build output for error messages
+3. Verify base image is available
+4. Ensure context files exist
+
+### Out of Space
+
+```sh
+hypr system df
+hypr system prune
+```
+
+### Cache Not Working
+
+Cache is invalidated when instruction or context files change. Use `--no-cache` to force rebuild.
