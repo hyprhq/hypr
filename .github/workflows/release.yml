@@ -32,12 +32,6 @@ jobs:
             arch: arm64
             platform: linux
 
-          # macOS x86_64
-          - runner: macos-15-intel
-            target: x86_64-apple-darwin
-            arch: amd64
-            platform: darwin
-
           # macOS aarch64 (Apple Silicon)
           - runner: macos-latest
             target: aarch64-apple-darwin
@@ -62,19 +56,11 @@ jobs:
           # The package name varies by distro, try multiple
           sudo apt-get install -y bpftool 2>/dev/null || sudo apt-get install -y linux-tools-$(uname -r) 2>/dev/null || true
 
-      - name: Install system dependencies (macOS ARM64)
-        if: runner.os == 'macOS' && runner.arch == 'ARM64'
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
         run: |
           brew install protobuf zig libffi lld xz libepoxy slp/krun/virglrenderer
-          # Set up pkg-config for keg-only packages
           echo "PKG_CONFIG_PATH=/opt/homebrew/opt/libffi/lib/pkgconfig:/opt/homebrew/opt/libepoxy/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
-
-      - name: Install system dependencies (macOS x86_64)
-        if: runner.os == 'macOS' && runner.arch == 'X64'
-        run: |
-          brew install protobuf zig libffi lld xz
-          # Set up pkg-config for keg-only packages
-          echo "PKG_CONFIG_PATH=/usr/local/opt/libffi/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
 
       - name: Cache libkrun build (macOS)
         if: runner.os == 'macOS'
@@ -84,22 +70,12 @@ jobs:
           path: hypr-core/embedded/libkrun.dylib
           key: ${{ runner.os }}-${{ runner.arch }}-libkrun-v3
 
-      - name: Build libkrun (macOS ARM64 with GPU)
-        if: runner.os == 'macOS' && runner.arch == 'ARM64' && steps.libkrun-cache.outputs.cache-hit != 'true'
+      - name: Build libkrun (macOS)
+        if: runner.os == 'macOS' && steps.libkrun-cache.outputs.cache-hit != 'true'
         run: |
           git clone --depth 1 https://github.com/containers/libkrun.git /tmp/libkrun
           cd /tmp/libkrun
           make GPU=1 BLK=1 NET=1
-          mkdir -p $GITHUB_WORKSPACE/hypr-core/embedded
-          cp target/release/libkrun.dylib $GITHUB_WORKSPACE/hypr-core/embedded/
-          ls -la $GITHUB_WORKSPACE/hypr-core/embedded/
-
-      - name: Build libkrun (macOS x86_64 without GPU)
-        if: runner.os == 'macOS' && runner.arch == 'X64' && steps.libkrun-cache.outputs.cache-hit != 'true'
-        run: |
-          git clone --depth 1 https://github.com/containers/libkrun.git /tmp/libkrun
-          cd /tmp/libkrun
-          make BLK=1 NET=1
           mkdir -p $GITHUB_WORKSPACE/hypr-core/embedded
           cp target/release/libkrun.dylib $GITHUB_WORKSPACE/hypr-core/embedded/
           ls -la $GITHUB_WORKSPACE/hypr-core/embedded/
@@ -224,7 +200,7 @@ jobs:
           echo ""
           echo "Binary count:"
           ls -1 release/ | grep -v ".sha256" | wc -l
-          echo "Expected: 8 binaries (hypr + hyprd × 4 platforms)"
+          echo "Expected: 6 binaries (hypr + hyprd × 3 platforms)"
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
@@ -241,7 +217,7 @@ jobs:
 
             **HYPR CLI + Daemon (with embedded hypervisor + initramfs):**
             - Linux: `hypr-linux-amd64`, `hypr-linux-arm64`, `hyprd-linux-amd64`, `hyprd-linux-arm64`
-            - macOS: `hypr-darwin-amd64`, `hypr-darwin-arm64`, `hyprd-darwin-amd64`, `hyprd-darwin-arm64`
+            - macOS: `hypr-darwin-arm64`, `hyprd-darwin-arm64` (Apple Silicon only)
 
             **What's Embedded:**
             - ✅ Cloud Hypervisor (architecture-specific, ~3-4.5MB)
@@ -290,16 +266,12 @@ jobs:
             release/hypr-linux-amd64.sha256
             release/hypr-linux-arm64
             release/hypr-linux-arm64.sha256
-            release/hypr-darwin-amd64
-            release/hypr-darwin-amd64.sha256
             release/hypr-darwin-arm64
             release/hypr-darwin-arm64.sha256
             release/hyprd-linux-amd64
             release/hyprd-linux-amd64.sha256
             release/hyprd-linux-arm64
             release/hyprd-linux-arm64.sha256
-            release/hyprd-darwin-amd64
-            release/hyprd-darwin-amd64.sha256
             release/hyprd-darwin-arm64
             release/hyprd-darwin-arm64.sha256
         env:
