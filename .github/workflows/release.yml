@@ -62,12 +62,19 @@ jobs:
           # The package name varies by distro, try multiple
           sudo apt-get install -y bpftool 2>/dev/null || sudo apt-get install -y linux-tools-$(uname -r) 2>/dev/null || true
 
-      - name: Install system dependencies (macOS)
-        if: runner.os == 'macOS'
+      - name: Install system dependencies (macOS ARM64)
+        if: runner.os == 'macOS' && runner.arch == 'ARM64'
         run: |
           brew install protobuf zig libffi lld xz libepoxy slp/krun/virglrenderer
           # Set up pkg-config for keg-only packages
-          echo "PKG_CONFIG_PATH=/opt/homebrew/opt/libffi/lib/pkgconfig:/opt/homebrew/opt/libepoxy/lib/pkgconfig:/usr/local/opt/libffi/lib/pkgconfig:/usr/local/opt/libepoxy/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/opt/homebrew/opt/libffi/lib/pkgconfig:/opt/homebrew/opt/libepoxy/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+
+      - name: Install system dependencies (macOS x86_64)
+        if: runner.os == 'macOS' && runner.arch == 'X64'
+        run: |
+          brew install protobuf zig libffi lld xz
+          # Set up pkg-config for keg-only packages
+          echo "PKG_CONFIG_PATH=/usr/local/opt/libffi/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
 
       - name: Cache libkrun build (macOS)
         if: runner.os == 'macOS'
@@ -75,23 +82,26 @@ jobs:
         id: libkrun-cache
         with:
           path: hypr-core/embedded/libkrun.dylib
-          key: ${{ runner.os }}-${{ runner.arch }}-libkrun-gpu-v2
+          key: ${{ runner.os }}-${{ runner.arch }}-libkrun-v3
 
-      - name: Build libkrun (macOS)
-        if: runner.os == 'macOS' && steps.libkrun-cache.outputs.cache-hit != 'true'
+      - name: Build libkrun (macOS ARM64 with GPU)
+        if: runner.os == 'macOS' && runner.arch == 'ARM64' && steps.libkrun-cache.outputs.cache-hit != 'true'
         run: |
-          # Clone libkrun
           git clone --depth 1 https://github.com/containers/libkrun.git /tmp/libkrun
           cd /tmp/libkrun
-
-          # Build with block device, networking, and GPU support
           make GPU=1 BLK=1 NET=1
-
-          # Copy the dylib to embedded directory
           mkdir -p $GITHUB_WORKSPACE/hypr-core/embedded
           cp target/release/libkrun.dylib $GITHUB_WORKSPACE/hypr-core/embedded/
+          ls -la $GITHUB_WORKSPACE/hypr-core/embedded/
 
-          echo "libkrun.dylib built and copied to embedded/"
+      - name: Build libkrun (macOS x86_64 without GPU)
+        if: runner.os == 'macOS' && runner.arch == 'X64' && steps.libkrun-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 https://github.com/containers/libkrun.git /tmp/libkrun
+          cd /tmp/libkrun
+          make BLK=1 NET=1
+          mkdir -p $GITHUB_WORKSPACE/hypr-core/embedded
+          cp target/release/libkrun.dylib $GITHUB_WORKSPACE/hypr-core/embedded/
           ls -la $GITHUB_WORKSPACE/hypr-core/embedded/
 
       - name: Install Zig (Linux - for cross-compiling kestrel)
