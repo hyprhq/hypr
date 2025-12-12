@@ -111,6 +111,20 @@ type KrunAddNetUnixstream = unsafe extern "C" fn(
 type KrunSetSmbiosOemStrings =
     unsafe extern "C" fn(ctx_id: c_uint, oem_strings: *const *const c_char) -> c_int;
 
+// Console multiplexing types (for PTY/exec support)
+type KrunAddVirtioConsoleMultiport = unsafe extern "C" fn(ctx_id: c_uint) -> c_int;
+type KrunAddConsolePortTty = unsafe extern "C" fn(
+    ctx_id: c_uint,
+    port_name: *const c_char,
+    tty_path: *const c_char,
+) -> c_int;
+type KrunAddConsolePortInout = unsafe extern "C" fn(
+    ctx_id: c_uint,
+    port_name: *const c_char,
+    in_fd: c_int,
+    out_fd: c_int,
+) -> c_int;
+
 /// Safe wrapper around libkrun.
 ///
 /// Handles dynamic loading of the library and provides safe Rust methods
@@ -139,6 +153,10 @@ pub struct Libkrun {
     add_net_tap: KrunAddNetTap,
     add_net_unixstream: KrunAddNetUnixstream,
     set_smbios_oem_strings: KrunSetSmbiosOemStrings,
+    // Console multiplexing (for PTY/exec support)
+    add_virtio_console_multiport: Option<KrunAddVirtioConsoleMultiport>,
+    add_console_port_tty: Option<KrunAddConsolePortTty>,
+    add_console_port_inout: Option<KrunAddConsolePortInout>,
 }
 
 #[allow(dead_code)] // Some methods for future use
@@ -228,6 +246,14 @@ impl Libkrun {
                 .get(b"krun_set_smbios_oem_strings\0")
                 .map_err(|e| Self::symbol_error("krun_set_smbios_oem_strings", e))?;
 
+            // Console multiplexing symbols (optional - may not be present in older libkrun)
+            let add_virtio_console_multiport: Option<Symbol<KrunAddVirtioConsoleMultiport>> =
+                lib_clone.get(b"krun_add_virtio_console_multiport\0").ok();
+            let add_console_port_tty: Option<Symbol<KrunAddConsolePortTty>> =
+                lib_clone.get(b"krun_add_console_port_tty\0").ok();
+            let add_console_port_inout: Option<Symbol<KrunAddConsolePortInout>> =
+                lib_clone.get(b"krun_add_console_port_inout\0").ok();
+
             // Store original library to keep it alive, use cloned refs for symbols
             Ok(Self {
                 _library: library,
@@ -251,6 +277,10 @@ impl Libkrun {
                 add_net_tap: *add_net_tap,
                 add_net_unixstream: *add_net_unixstream,
                 set_smbios_oem_strings: *set_smbios_oem_strings,
+                // Console multiplexing (optional)
+                add_virtio_console_multiport: add_virtio_console_multiport.map(|s| *s),
+                add_console_port_tty: add_console_port_tty.map(|s| *s),
+                add_console_port_inout: add_console_port_inout.map(|s| *s),
             })
         }
     }
@@ -588,6 +618,86 @@ impl Libkrun {
         CString::new(path_str).map_err(|_| HyprError::InvalidConfig {
             reason: format!("Path contains null byte: {}", path.display()),
         })
+    }
+
+    // =========================================================================
+    // Console Multiplexing (for PTY/exec support)
+    // =========================================================================
+
+    /// Check if console multiplexing is available.
+    ///
+    /// Returns true if the libkrun version supports virtio console multiport.
+    pub fn has_console_multiplexing(&self) -> bool {
+        self.add_virtio_console_multiport.is_some()
+            && self.add_console_port_tty.is_some()
+            && self.add_console_port_inout.is_some()
+    }
+
+    /// Add a virtio console multiport device.
+    ///
+    /// This enables multiple console connections to a single VM, which is
+    /// essential for PTY support (exec, terminal sessions).
+    pub fn add_virtio_console_multiport(&self, ctx_id: u32) -> Result<()> {
+        let func = self.add_virtio_console_multiport.ok_or_else(|| HyprError::NotImplemented {
+            feature: "console multiplexing (requires libkrun 1.9+)".to_string(),
+        })?;
+
+        debug!(ctx_id, "Adding virtio console multiport device");
+        let ret = unsafe { func(ctx_id) };
+        Self::check_result(ret, "krun_add_virtio_console_multiport")
+    }
+
+    /// Add a TTY console port.
+    ///
+    /// Creates a console port connected to a host TTY device (e.g., tmux session).
+    pub fn add_console_port_tty(
+        &self,
+        ctx_id: u32,
+        port_name: &str,
+        tty_path: &Path,
+    ) -> Result<()> {
+        let func = self.add_console_port_tty.ok_or_else(|| HyprError::NotImplemented {
+            feature: "console port TTY (requires libkrun 1.9+)".to_string(),
+        })?;
+
+        let port_name_cstr = CString::new(port_name).map_err(|_| HyprError::InvalidConfig {
+            reason: "Port name contains null byte".to_string(),
+        })?;
+        let tty_path_cstr = Self::path_to_cstring(tty_path)?;
+
+        debug!(ctx_id, port_name, tty = %tty_path.display(), "Adding TTY console port");
+        let ret = unsafe { func(ctx_id, port_name_cstr.as_ptr(), tty_path_cstr.as_ptr()) };
+        Self::check_result(ret, "krun_add_console_port_tty")
+    }
+
+    /// Add a console port with input/output file descriptors.
+    ///
+    /// Creates a console port connected to separate input and output FDs,
+    /// typically FIFOs for bidirectional communication.
+    ///
+    /// # Arguments
+    /// * `ctx_id` - VM context ID
+    /// * `port_name` - Name for the console port (e.g., "exec0", "shell")
+    /// * `in_fd` - File descriptor for input to the guest
+    /// * `out_fd` - File descriptor for output from the guest
+    pub fn add_console_port_inout(
+        &self,
+        ctx_id: u32,
+        port_name: &str,
+        in_fd: i32,
+        out_fd: i32,
+    ) -> Result<()> {
+        let func = self.add_console_port_inout.ok_or_else(|| HyprError::NotImplemented {
+            feature: "console port inout (requires libkrun 1.9+)".to_string(),
+        })?;
+
+        let port_name_cstr = CString::new(port_name).map_err(|_| HyprError::InvalidConfig {
+            reason: "Port name contains null byte".to_string(),
+        })?;
+
+        debug!(ctx_id, port_name, in_fd, out_fd, "Adding inout console port");
+        let ret = unsafe { func(ctx_id, port_name_cstr.as_ptr(), in_fd, out_fd) };
+        Self::check_result(ret, "krun_add_console_port_inout")
     }
 }
 

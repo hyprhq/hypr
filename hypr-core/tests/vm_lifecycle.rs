@@ -116,6 +116,10 @@ impl VmmAdapter for MockAdapter {
     fn name(&self) -> &str {
         "mock"
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[tokio::test]

@@ -28,7 +28,7 @@
 
 use crate::error::{HyprError, Result};
 use crate::network::registry::ServiceRegistry;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tracing::{debug, error, info, instrument, warn};
@@ -89,6 +89,8 @@ impl DnsServer {
 
         info!("DNS server listening on {}", self.bind_addr);
 
+        // Wrap socket in Arc for sharing across tasks
+        let socket = Arc::new(socket);
         let mut buf = vec![0u8; 512]; // Standard DNS packet size
 
         loop {
@@ -122,7 +124,7 @@ impl DnsServer {
         client_addr: SocketAddr,
         registry: Arc<ServiceRegistry>,
         upstream: Vec<IpAddr>,
-        socket: UdpSocket,
+        socket: Arc<UdpSocket>,
     ) -> Result<()> {
         // Parse DNS query
         let query = match DnsPacket::parse(&query_bytes) {
@@ -151,29 +153,21 @@ impl DnsServer {
                 let service_name = name.trim_end_matches(".hypr");
 
                 // Look up in service registry
-                match registry.lookup(service_name).await {
-                    Ok(Some(service)) => {
-                        if let Some(ip) = service.ip {
-                            info!(
-                                name = %name,
-                                ip = %ip,
-                                "Resolved .hypr domain to VM IP"
-                            );
+                if let Some(service) = registry.lookup(service_name).await {
+                    info!(
+                        name = %name,
+                        ip = %service.ip,
+                        "Resolved .hypr domain to VM IP"
+                    );
 
-                            // Build DNS response
-                            let response = Self::build_response(&query, name, ip);
-                            if let Err(e) = socket.send_to(&response, client_addr).await {
-                                error!("Failed to send DNS response: {}", e);
-                            }
-                            return Ok(());
-                        }
+                    // Build DNS response
+                    let response = Self::build_response(&query, name, service.ip);
+                    if let Err(e) = socket.send_to(&response, client_addr).await {
+                        error!("Failed to send DNS response: {}", e);
                     }
-                    Ok(None) => {
-                        debug!(name = %name, "Service not found in registry");
-                    }
-                    Err(e) => {
-                        error!("Failed to lookup service: {}", e);
-                    }
+                    return Ok(());
+                } else {
+                    debug!(name = %name, "Service not found in registry");
                 }
 
                 // Service not found, send NXDOMAIN
@@ -209,12 +203,16 @@ impl DnsServer {
         let upstream_addr = SocketAddr::new(upstream_ip, 53);
         let socket = UdpSocket::bind("0.0.0.0:0")
             .await
-            .map_err(|e| HyprError::NetworkError(format!("Failed to bind UDP socket: {}", e)))?;
+            .map_err(|e| HyprError::NetworkSetupFailed {
+                reason: format!("Failed to bind UDP socket: {}", e),
+            })?;
 
         socket
             .send_to(query, upstream_addr)
             .await
-            .map_err(|e| HyprError::NetworkError(format!("Failed to send to upstream: {}", e)))?;
+            .map_err(|e| HyprError::NetworkSetupFailed {
+                reason: format!("Failed to send to upstream: {}", e),
+            })?;
 
         let mut buf = vec![0u8; 512];
         let (len, _) = tokio::time::timeout(
@@ -222,8 +220,12 @@ impl DnsServer {
             socket.recv_from(&mut buf),
         )
         .await
-        .map_err(|_| HyprError::NetworkError("Upstream DNS timeout".to_string()))?
-        .map_err(|e| HyprError::NetworkError(format!("Failed to receive from upstream: {}", e)))?;
+        .map_err(|_| HyprError::NetworkSetupFailed {
+            reason: "Upstream DNS timeout".to_string(),
+        })?
+        .map_err(|e| HyprError::NetworkSetupFailed {
+            reason: format!("Failed to receive from upstream: {}", e),
+        })?;
 
         Ok(buf[..len].to_vec())
     }

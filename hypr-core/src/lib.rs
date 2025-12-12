@@ -21,7 +21,10 @@ pub mod types;
 // Re-export commonly used items
 pub use compose::{ComposeFile, ComposeParser};
 pub use error::{HyprError, Result};
-pub use network::{create_bridge_manager, BridgeConfig, BridgeManager, IpAllocator};
+pub use network::{
+    create_bridge_manager, gateway, netmask, netmask_str, network_cidr, network_defaults,
+    BridgeConfig, BridgeManager, IpAllocator, NetworkDefaults,
+};
 pub use observability::{
     health::HealthChecker, init as init_observability, shutdown as shutdown_observability,
 };

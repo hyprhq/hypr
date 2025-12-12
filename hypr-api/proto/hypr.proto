@@ -20,22 +20,57 @@ service HyprService {
   // Combined run with streaming progress (image pull + create + start)
   rpc RunVM(RunVMRequest) returns (stream RunVMEvent);
 
+  // Real-time VM metrics streaming (CPU, memory, network, disk I/O)
+  rpc StreamVMMetrics(StreamVMMetricsRequest) returns (stream VMMetrics);
+
   // Logging
   rpc StreamLogs(StreamLogsRequest) returns (stream LogEntry);
+
+  // Interactive exec with PTY support (bidirectional streaming)
+  rpc Exec(stream ExecRequest) returns (stream ExecResponse);
 
   // Image operations
   rpc ListImages(ListImagesRequest) returns (ListImagesResponse);
   rpc GetImage(GetImageRequest) returns (GetImageResponse);
   rpc DeleteImage(DeleteImageRequest) returns (DeleteImageResponse);
+  rpc GetImageHistory(GetImageHistoryRequest) returns (GetImageHistoryResponse);
+
+  // Image pull with streaming progress (layer-by-layer)
+  rpc PullImage(PullImageRequest) returns (stream PullEvent);
+
+  // Image build with streaming progress
+  rpc BuildImage(BuildImageRequest) returns (stream BuildEvent);
 
   // Stack operations (streaming for progress updates)
   rpc DeployStack(DeployStackRequest) returns (stream DeployStackEvent);
   rpc DestroyStack(DestroyStackRequest) returns (DestroyStackResponse);
   rpc ListStacks(ListStacksRequest) returns (ListStacksResponse);
   rpc GetStack(GetStackRequest) returns (GetStackResponse);
+  rpc StreamStackServiceLogs(StreamStackServiceLogsRequest) returns (stream LogEntry);
 
-  // Health
+  // Network operations
+  rpc CreateNetwork(CreateNetworkRequest) returns (CreateNetworkResponse);
+  rpc DeleteNetwork(DeleteNetworkRequest) returns (DeleteNetworkResponse);
+  rpc ListNetworks(ListNetworksRequest) returns (ListNetworksResponse);
+  rpc GetNetwork(GetNetworkRequest) returns (GetNetworkResponse);
+
+  // Volume operations
+  rpc CreateVolume(CreateVolumeRequest) returns (CreateVolumeResponse);
+  rpc DeleteVolume(DeleteVolumeRequest) returns (DeleteVolumeResponse);
+  rpc ListVolumes(ListVolumesRequest) returns (ListVolumesResponse);
+  rpc GetVolume(GetVolumeRequest) returns (GetVolumeResponse);
+  rpc PruneVolumes(PruneVolumesRequest) returns (PruneVolumesResponse);
+
+  // System operations
+  rpc GetSystemStats(GetSystemStatsRequest) returns (GetSystemStatsResponse);
   rpc Health(HealthRequest) returns (HealthResponse);
+
+  // Settings
+  rpc GetSettings(GetSettingsRequest) returns (GetSettingsResponse);
+  rpc UpdateSettings(UpdateSettingsRequest) returns (UpdateSettingsResponse);
+
+  // Real-time event subscription
+  rpc SubscribeEvents(SubscribeEventsRequest) returns (stream HyprEvent);
 }
 
 // ============================================================================
@@ -374,4 +409,381 @@ message LogEntry {
   int64 timestamp = 1;        // Unix timestamp in milliseconds
   string line = 2;            // Log line content
   string stream = 3;          // "stdout" or "stderr"
+}
+
+// ============================================================================
+// Network Types
+// ============================================================================
+
+message Network {
+  string id = 1;
+  string name = 2;
+  string driver = 3;          // "bridge" (default), etc.
+  string cidr = 4;            // e.g., "10.89.0.0/16"
+  string gateway = 5;         // e.g., "10.89.0.1"
+  string bridge_name = 6;     // e.g., "vbr1"
+  int64 created_at = 7;       // Unix timestamp
+}
+
+message CreateNetworkRequest {
+  string name = 1;
+  optional string driver = 2;   // Default: "bridge"
+  optional string subnet = 3;   // CIDR, auto-allocated if not specified
+  optional string gateway = 4;  // Auto-set if not specified
+}
+
+message CreateNetworkResponse {
+  Network network = 1;
+}
+
+message DeleteNetworkRequest {
+  string name = 1;
+  bool force = 2;             // Force delete even if VMs are attached
+}
+
+message DeleteNetworkResponse {
+  bool success = 1;
+}
+
+message ListNetworksRequest {
+  optional string filter = 1;
+}
+
+message ListNetworksResponse {
+  repeated Network networks = 1;
+}
+
+message GetNetworkRequest {
+  string name = 1;
+}
+
+message GetNetworkResponse {
+  Network network = 1;
+}
+
+// ============================================================================
+// VM Metrics Types (Real-time monitoring)
+// ============================================================================
+
+message StreamVMMetricsRequest {
+  string vm_id = 1;
+  uint32 interval_ms = 2;     // Polling interval in milliseconds (default: 1000)
+}
+
+message VMMetrics {
+  int64 timestamp = 1;        // Unix timestamp in milliseconds
+  double cpu_percent = 2;     // CPU usage percentage (0-100 * num_cpus)
+  uint64 memory_used_bytes = 3;
+  uint64 memory_total_bytes = 4;
+  uint64 disk_read_bytes = 5;
+  uint64 disk_write_bytes = 6;
+  uint64 network_rx_bytes = 7;
+  uint64 network_tx_bytes = 8;
+  uint32 pids = 9;            // Number of processes in VM
+}
+
+// ============================================================================
+// Exec Types (Interactive PTY)
+// ============================================================================
+
+message ExecRequest {
+  oneof message {
+    ExecStart start = 1;
+    ExecInput input = 2;
+    ExecResize resize = 3;
+    ExecSignal signal = 4;
+  }
+}
+
+message ExecStart {
+  string vm_id = 1;
+  repeated string command = 2;  // Command to execute (default: /bin/sh)
+  bool tty = 3;                 // Allocate PTY
+  map<string, string> env = 4;  // Environment variables
+  string workdir = 5;           // Working directory
+  string user = 6;              // User to run as
+}
+
+message ExecInput {
+  bytes data = 1;               // Stdin data
+}
+
+message ExecResize {
+  uint32 rows = 1;
+  uint32 cols = 2;
+}
+
+message ExecSignal {
+  int32 signal = 1;             // Signal number (e.g., 2 for SIGINT)
+}
+
+message ExecResponse {
+  oneof message {
+    bytes stdout = 1;
+    bytes stderr = 2;
+    int32 exit_code = 3;
+    ExecStarted started = 4;
+  }
+}
+
+message ExecStarted {
+  string session_id = 1;        // Session ID for tracking
+}
+
+// ============================================================================
+// Image Build Types
+// ============================================================================
+
+message BuildImageRequest {
+  string context_path = 1;      // Path to build context directory
+  string dockerfile = 2;        // Dockerfile path relative to context (default: Dockerfile)
+  string tag = 3;               // Image tag (e.g., "myapp:latest")
+  map<string, string> build_args = 4;
+  optional string target = 5;   // Target build stage for multi-stage builds
+  bool no_cache = 6;            // Disable build cache
+  bool pull = 7;                // Always pull base images
+}
+
+message BuildEvent {
+  oneof event {
+    BuildStep step = 1;
+    BuildOutput output = 2;
+    BuildComplete complete = 3;
+    BuildError error = 4;
+  }
+}
+
+message BuildStep {
+  uint32 step_number = 1;
+  uint32 total_steps = 2;
+  string instruction = 3;       // e.g., "RUN apt-get update"
+  bool cached = 4;              // Whether this step used cache
+}
+
+message BuildOutput {
+  string line = 1;              // Build output line
+  string stream = 2;            // "stdout" or "stderr"
+}
+
+message BuildComplete {
+  Image image = 1;
+}
+
+message BuildError {
+  uint32 step_number = 1;
+  string message = 2;
+}
+
+// ============================================================================
+// Image Pull Types
+// ============================================================================
+
+message PullImageRequest {
+  string image = 1;             // Image reference (e.g., "nginx:latest")
+}
+
+message PullEvent {
+  oneof event {
+    PullProgress progress = 1;
+    PullComplete complete = 2;
+    PullError error = 3;
+  }
+}
+
+message PullProgress {
+  string layer_id = 1;          // Layer digest (short form)
+  string status = 2;            // "pulling", "downloading", "extracting", "done"
+  uint64 current = 3;           // Bytes downloaded
+  uint64 total = 4;             // Total bytes (0 if unknown)
+}
+
+message PullComplete {
+  Image image = 1;
+}
+
+message PullError {
+  string message = 1;
+}
+
+// ============================================================================
+// Image History Types
+// ============================================================================
+
+message GetImageHistoryRequest {
+  string image_id = 1;
+}
+
+message GetImageHistoryResponse {
+  repeated ImageLayer layers = 1;
+}
+
+message ImageLayer {
+  string id = 1;                // Layer ID (digest)
+  string created_by = 2;        // Dockerfile instruction that created this layer
+  uint64 size_bytes = 3;
+  int64 created_at = 4;         // Unix timestamp
+  string comment = 5;
+  bool empty_layer = 6;         // True if layer adds no files
+}
+
+// ============================================================================
+// Stack Service Logs
+// ============================================================================
+
+message StreamStackServiceLogsRequest {
+  string stack_name = 1;
+  string service_name = 2;
+  bool follow = 3;
+  uint32 tail = 4;
+  optional int64 since = 5;
+}
+
+// ============================================================================
+// Volume Types
+// ============================================================================
+
+message Volume {
+  string id = 1;
+  string name = 2;
+  string driver = 3;            // "local" (default)
+  string path = 4;              // Host path
+  uint64 size_bytes = 5;
+  int64 created_at = 6;
+  repeated string used_by = 7;  // VM IDs using this volume
+  map<string, string> labels = 8;
+}
+
+message CreateVolumeRequest {
+  string name = 1;
+  optional string driver = 2;   // Default: "local"
+  map<string, string> labels = 3;
+}
+
+message CreateVolumeResponse {
+  Volume volume = 1;
+}
+
+message DeleteVolumeRequest {
+  string name = 1;
+  bool force = 2;               // Force delete even if in use
+}
+
+message DeleteVolumeResponse {
+  bool success = 1;
+}
+
+message ListVolumesRequest {
+  optional string filter = 1;
+}
+
+message ListVolumesResponse {
+  repeated Volume volumes = 1;
+}
+
+message GetVolumeRequest {
+  string name = 1;
+}
+
+message GetVolumeResponse {
+  Volume volume = 1;
+}
+
+message PruneVolumesRequest {
+  bool all = 1;                 // Remove all unused, not just anonymous
+}
+
+message PruneVolumesResponse {
+  repeated string volumes_deleted = 1;
+  uint64 space_reclaimed = 2;
+}
+
+// ============================================================================
+// System Stats Types
+// ============================================================================
+
+message GetSystemStatsRequest {}
+
+message GetSystemStatsResponse {
+  // VM counts
+  uint32 total_vms = 1;
+  uint32 running_vms = 2;
+  uint32 stopped_vms = 3;
+
+  // Resource allocation
+  uint32 total_cpus_allocated = 4;
+  uint64 total_memory_allocated_mb = 5;
+
+  // Disk usage
+  uint64 total_disk_used_bytes = 6;
+  uint64 images_disk_used_bytes = 7;
+  uint64 volumes_disk_used_bytes = 8;
+  uint64 cache_disk_used_bytes = 9;
+  uint64 logs_disk_used_bytes = 10;
+
+  // Counts
+  uint32 total_images = 11;
+  uint32 total_stacks = 12;
+  uint32 total_networks = 13;
+  uint32 total_volumes = 14;
+}
+
+// ============================================================================
+// Settings Types
+// ============================================================================
+
+message GetSettingsRequest {}
+
+message GetSettingsResponse {
+  Settings settings = 1;
+}
+
+message UpdateSettingsRequest {
+  Settings settings = 1;
+}
+
+message UpdateSettingsResponse {
+  Settings settings = 1;
+}
+
+message Settings {
+  // Default VM resources
+  uint32 default_cpus = 1;
+  uint32 default_memory_mb = 2;
+
+  // Daemon settings
+  bool auto_start_daemon = 3;
+  bool start_at_login = 4;
+  string log_level = 5;         // "error", "warn", "info", "debug", "trace"
+
+  // Resource limits
+  uint32 max_concurrent_builds = 6;
+  uint64 cache_size_limit_bytes = 7;
+  uint64 log_retention_days = 8;
+
+  // Telemetry
+  bool telemetry_enabled = 9;
+
+  // Paths (read-only, informational)
+  string data_dir = 10;
+  string runtime_dir = 11;
+  string socket_path = 12;
+}
+
+// ============================================================================
+// Event Subscription Types
+// ============================================================================
+
+message SubscribeEventsRequest {
+  repeated string event_types = 1;  // Filter by type: "vm.*", "image.*", "stack.*", "network.*"
+                                     // Empty = all events
+}
+
+message HyprEvent {
+  int64 timestamp = 1;
+  string type = 2;              // e.g., "vm.created", "vm.started", "image.pulled"
+  string resource_type = 3;     // "vm", "image", "stack", "network", "volume"
+  string resource_id = 4;
+  string action = 5;            // "created", "started", "stopped", "deleted", "failed"
+  string message = 6;           // Human-readable description
+  map<string, string> metadata = 7;
 }

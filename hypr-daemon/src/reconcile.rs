@@ -142,6 +142,14 @@ impl StateReconciler {
             }
         }
 
+        // Clean up orphaned virtiofsd processes
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(orphaned) = cleanup_orphaned_virtiofsd(&self.state).await {
+                report.orphaned_virtiofsd = orphaned;
+            }
+        }
+
         info!(
             "Reconciliation complete: {} running, {} stopped, {} orphaned",
             report.running, report.stopped, report.orphaned
@@ -191,6 +199,8 @@ pub struct ReconcileReport {
     pub orphaned_taps: usize,
     /// Number of orphaned VFIO bindings cleaned up
     pub orphaned_vfio: usize,
+    /// Number of orphaned virtiofsd processes cleaned up
+    pub orphaned_virtiofsd: usize,
 }
 
 /// Check if a process with the given PID is still alive.
@@ -313,4 +323,155 @@ async fn cleanup_orphaned_vfio_bindings(
     }
 
     Ok(cleaned)
+}
+
+/// Clean up virtiofsd processes that don't correspond to running VMs.
+///
+/// virtiofsd processes are spawned with sockets in /run/hypr/ch/{vm_id}-{tag}.sock
+/// We can identify orphaned ones by checking if the socket's VM ID has a running process.
+#[cfg(target_os = "linux")]
+async fn cleanup_orphaned_virtiofsd(
+    state: &StateManager,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    use std::process::Command;
+
+    let mut cleaned = 0;
+
+    // Get running VM IDs
+    let vms = state.list_vms().await?;
+    let running_vm_ids: std::collections::HashSet<String> = vms
+        .iter()
+        .filter(|vm| vm.status == VmStatus::Running)
+        .map(|vm| vm.id.clone())
+        .collect();
+
+    // Find virtiofsd processes using pgrep
+    let output = Command::new("pgrep").args(["-f", "virtiofsd"]).output();
+
+    if let Ok(output) = output {
+        if !output.status.success() {
+            // No virtiofsd processes found
+            return Ok(0);
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        for pid_str in stdout.lines() {
+            if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                // Get the command line to extract the socket path
+                let cmdline_path = format!("/proc/{}/cmdline", pid);
+                if let Ok(cmdline) = std::fs::read_to_string(&cmdline_path) {
+                    // cmdline is null-separated
+                    let args: Vec<&str> = cmdline.split('\0').collect();
+
+                    // Look for --socket-path argument
+                    let mut socket_path = None;
+                    let mut next_is_socket = false;
+                    for arg in &args {
+                        if next_is_socket {
+                            socket_path = Some(*arg);
+                            break;
+                        }
+                        if arg.starts_with("--socket-path=") {
+                            socket_path = arg.strip_prefix("--socket-path=");
+                            break;
+                        }
+                        if *arg == "--socket-path" {
+                            next_is_socket = true;
+                        }
+                    }
+
+                    if let Some(socket) = socket_path {
+                        // Socket format: /run/hypr/ch/{vm_id}-{tag}.sock
+                        // Extract VM ID from socket path
+                        if let Some(filename) = std::path::Path::new(socket).file_name() {
+                            let name = filename.to_string_lossy();
+                            // Extract VM ID (everything before the first hyphen-word-dot pattern)
+                            if let Some(vm_id) = extract_vm_id_from_socket(&name) {
+                                if !running_vm_ids.contains(&vm_id) {
+                                    info!(
+                                        "Killing orphaned virtiofsd process: PID={}, socket={}",
+                                        pid, socket
+                                    );
+
+                                    // Send SIGTERM
+                                    let _ = Command::new("kill")
+                                        .args(["-TERM", &pid.to_string()])
+                                        .status();
+
+                                    // Remove socket file
+                                    let _ = std::fs::remove_file(socket);
+
+                                    cleaned += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if cleaned > 0 {
+        info!("Cleaned up {} orphaned virtiofsd processes", cleaned);
+    }
+
+    Ok(cleaned)
+}
+
+/// Extract VM ID from a virtiofsd socket filename.
+///
+/// Socket format: {vm_id}-{tag}.sock
+/// VM IDs are typically UUIDs (36 chars with hyphens) but we handle any format.
+#[cfg(target_os = "linux")]
+fn extract_vm_id_from_socket(filename: &str) -> Option<String> {
+    // Remove .sock extension
+    let name = filename.strip_suffix(".sock").unwrap_or(filename);
+
+    // Find the last hyphen that separates VM ID from tag
+    // The tag is typically a short name like "shared" or "data"
+    // while VM ID is a UUID like "abc123de-f456-7890-abcd-ef1234567890"
+    //
+    // Strategy: If the name looks like a UUID-tag pattern, extract the UUID part
+    // UUID format: 8-4-4-4-12 hex chars = 36 chars
+    if name.len() > 36 {
+        // Check if first 36 chars could be a UUID
+        let potential_uuid = &name[..36];
+        if is_uuid_format(potential_uuid) {
+            return Some(potential_uuid.to_string());
+        }
+    }
+
+    // Fallback: return everything before the last hyphen
+    // This handles both UUID and non-UUID VM IDs
+    if let Some(pos) = name.rfind('-') {
+        return Some(name[..pos].to_string());
+    }
+
+    None
+}
+
+/// Check if a string looks like a UUID format.
+#[cfg(target_os = "linux")]
+fn is_uuid_format(s: &str) -> bool {
+    if s.len() != 36 {
+        return false;
+    }
+
+    let chars: Vec<char> = s.chars().collect();
+    for (i, c) in chars.iter().enumerate() {
+        match i {
+            8 | 13 | 18 | 23 => {
+                if *c != '-' {
+                    return false;
+                }
+            }
+            _ => {
+                if !c.is_ascii_hexdigit() {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }

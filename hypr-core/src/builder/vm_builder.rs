@@ -610,19 +610,19 @@ mod tests {
     use super::*;
 
     /// Helper to create an adapter for tests, returns None if hypervisor deps not available.
-    fn try_create_adapter() -> Option<Box<dyn crate::adapters::VmmAdapter>> {
+    fn try_create_adapter() -> Option<Arc<dyn crate::adapters::VmmAdapter>> {
         #[cfg(target_os = "macos")]
         {
             crate::adapters::krun::LibkrunAdapter::new()
                 .ok()
-                .map(|a| Box::new(a) as Box<dyn crate::adapters::VmmAdapter>)
+                .map(|a| Arc::new(a) as Arc<dyn crate::adapters::VmmAdapter>)
         }
 
         #[cfg(target_os = "linux")]
         {
             crate::adapters::cloudhypervisor::CloudHypervisorAdapter::new()
                 .ok()
-                .map(|a| Box::new(a) as Box<dyn crate::adapters::VmmAdapter>)
+                .map(|a| Arc::new(a) as Arc<dyn crate::adapters::VmmAdapter>)
         }
     }
 

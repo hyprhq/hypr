@@ -4,6 +4,33 @@ use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
 use std::time::SystemTime;
 
+/// Network driver type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkDriver {
+    #[default]
+    Bridge,
+}
+
+impl std::fmt::Display for NetworkDriver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NetworkDriver::Bridge => write!(f, "bridge"),
+        }
+    }
+}
+
+impl std::str::FromStr for NetworkDriver {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "bridge" => Ok(NetworkDriver::Bridge),
+            _ => Err(format!("Unknown network driver: {}", s)),
+        }
+    }
+}
+
 /// Network.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Network {
@@ -13,8 +40,14 @@ pub struct Network {
     /// Network name
     pub name: String,
 
+    /// Network driver
+    pub driver: NetworkDriver,
+
     /// CIDR (e.g., "10.88.0.0/16")
     pub cidr: String,
+
+    /// Gateway IP address (e.g., "10.88.0.1")
+    pub gateway: Ipv4Addr,
 
     /// Bridge interface name (e.g., "vbr0")
     pub bridge_name: String,

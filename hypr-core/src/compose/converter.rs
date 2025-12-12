@@ -7,6 +7,7 @@ use super::types::*;
 use crate::builder::parser::parse_dockerfile;
 use crate::builder::{create_builder, BuildContext, BuildGraph, CacheManager};
 use crate::error::{HyprError, Result};
+use crate::network::defaults as net_defaults;
 use crate::types::{
     DiskConfig, DiskFormat, NetworkConfig, NetworkStackConfig, PortMapping, Protocol,
     ServiceConfig, StackConfig, VmConfig, VmResources, VolumeConfig, VolumeMount, VolumeSource,
@@ -27,26 +28,20 @@ impl ComposeConverter {
 
         let name = stack_name.unwrap_or_else(|| "default".to_string());
 
+        // Convert networks from compose file
+        let networks = Self::convert_networks(&name, &compose.networks);
+
         // Convert services to VM configs (no compose_dir in sync version)
-        let services = Self::convert_services(&compose.services, &HashMap::new(), None)?;
+        let services =
+            Self::convert_services(&compose.services, &HashMap::new(), None, &networks)?;
 
         // Convert volumes
         let volumes = Self::convert_volumes(&compose.volumes, &compose.services);
 
-        // Create network config (platform-specific subnet)
-        #[cfg(target_os = "linux")]
-        let subnet = "10.88.0.0/16".to_string();
-        #[cfg(target_os = "macos")]
-        let subnet = "192.168.64.0/24".to_string();
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        let subnet = "10.88.0.0/16".to_string();
-
-        let network = NetworkStackConfig { name: format!("{}_network", name), subnet };
-
         // Validate dependency graph (no cycles)
         Self::validate_dependencies(&services)?;
 
-        Ok(StackConfig { name, services, volumes, network })
+        Ok(StackConfig { name, services, volumes, networks })
     }
 
     /// Convert a compose file to a stack configuration, building images as needed.
@@ -66,28 +61,21 @@ impl ComposeConverter {
         // Build images for services with build config
         let built_images = Self::build_service_images(&compose.services, &compose_dir).await?;
 
+        // Convert networks from compose file
+        let networks = Self::convert_networks(&name, &compose.networks);
+
         // Convert services to VM configs, using built images where available
         // Pass compose_dir for automatic .env loading
         let services =
-            Self::convert_services(&compose.services, &built_images, Some(&compose_dir))?;
+            Self::convert_services(&compose.services, &built_images, Some(&compose_dir), &networks)?;
 
         // Convert volumes
         let volumes = Self::convert_volumes(&compose.volumes, &compose.services);
 
-        // Create network config (platform-specific subnet)
-        #[cfg(target_os = "linux")]
-        let subnet = "10.88.0.0/16".to_string();
-        #[cfg(target_os = "macos")]
-        let subnet = "192.168.64.0/24".to_string();
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        let subnet = "10.88.0.0/16".to_string();
-
-        let network = NetworkStackConfig { name: format!("{}_network", name), subnet };
-
         // Validate dependency graph (no cycles)
         Self::validate_dependencies(&services)?;
 
-        Ok(StackConfig { name, services, volumes, network })
+        Ok(StackConfig { name, services, volumes, networks })
     }
 
     /// Build images for services that have build configurations.
@@ -468,13 +456,17 @@ impl ComposeConverter {
     }
 
     /// Convert compose services to service configurations.
-    #[instrument(skip(services, built_images, compose_dir))]
+    #[instrument(skip(services, built_images, compose_dir, stack_networks))]
     fn convert_services(
         services: &HashMap<String, Service>,
         built_images: &HashMap<String, PathBuf>,
         compose_dir: Option<&Path>,
+        stack_networks: &[NetworkStackConfig],
     ) -> Result<Vec<ServiceConfig>> {
         let mut configs = Vec::new();
+
+        // Get the default network name (first network in the stack)
+        let default_network = stack_networks.first().map(|n| n.name.clone());
 
         for (name, service) in services {
             let vm_config =
@@ -504,6 +496,17 @@ impl ComposeConverter {
                 String::new() // Will be set from build output if applicable
             };
 
+            // Get service's network preferences, default to the stack's default network
+            let service_networks = {
+                let specified = service.networks.to_list();
+                if specified.is_empty() {
+                    // If no networks specified, use the default network
+                    default_network.iter().cloned().collect()
+                } else {
+                    specified
+                }
+            };
+
             let config = ServiceConfig {
                 name: name.clone(),
                 image: image_ref,
@@ -512,6 +515,7 @@ impl ComposeConverter {
                 healthcheck: None, // Health check parsing will be added when Phase 2 health checks are implemented
                 entrypoint,
                 workdir,
+                networks: service_networks,
             };
 
             configs.push(config);
@@ -746,6 +750,58 @@ impl ComposeConverter {
                 }
             })
             .collect()
+    }
+
+    /// Convert network definitions from compose file.
+    /// If no networks are defined, creates a default network for the stack.
+    fn convert_networks(
+        stack_name: &str,
+        network_defs: &HashMap<String, Option<NetworkDefinition>>,
+    ) -> Vec<NetworkStackConfig> {
+        let mut networks = Vec::new();
+
+        if network_defs.is_empty() {
+            // Create default network for the stack
+            networks.push(NetworkStackConfig {
+                name: format!("{}_default", stack_name),
+                subnet: net_defaults::cidr().to_string(),
+                gateway: net_defaults::gateway().to_string(),
+            });
+        } else {
+            for (name, def) in network_defs {
+                let full_name = format!("{}_{}", stack_name, name);
+
+                // Extract subnet and gateway from IPAM config if present
+                let (subnet, gateway) = if let Some(ref network_def) = def {
+                    if let Some(ref ipam) = network_def.ipam {
+                        // IPAM config is typically: config: [{subnet: "x.x.x.x/y", gateway: "x.x.x.x"}]
+                        let subnet_val = ipam
+                            .config
+                            .first()
+                            .and_then(|c| c.get("subnet"))
+                            .cloned()
+                            .unwrap_or_else(|| net_defaults::cidr().to_string());
+
+                        let gateway_val = ipam
+                            .config
+                            .first()
+                            .and_then(|c| c.get("gateway"))
+                            .cloned()
+                            .unwrap_or_else(|| net_defaults::gateway().to_string());
+
+                        (subnet_val, gateway_val)
+                    } else {
+                        (net_defaults::cidr().to_string(), net_defaults::gateway().to_string())
+                    }
+                } else {
+                    (net_defaults::cidr().to_string(), net_defaults::gateway().to_string())
+                };
+
+                networks.push(NetworkStackConfig { name: full_name, subnet, gateway });
+            }
+        }
+
+        networks
     }
 
     /// Convert volume definitions.
@@ -984,6 +1040,7 @@ mod tests {
                 healthcheck: None,
                 entrypoint: vec![],
                 workdir: String::new(),
+                networks: vec![],
             },
             ServiceConfig {
                 name: "db".to_string(),
@@ -1008,6 +1065,7 @@ mod tests {
                 healthcheck: None,
                 entrypoint: vec![],
                 workdir: String::new(),
+                networks: vec![],
             },
         ];
 
@@ -1043,6 +1101,7 @@ mod tests {
                 healthcheck: None,
                 entrypoint: vec![],
                 workdir: String::new(),
+                networks: vec![],
             },
             ServiceConfig {
                 name: "b".to_string(),
@@ -1067,6 +1126,7 @@ mod tests {
                 healthcheck: None,
                 entrypoint: vec![],
                 workdir: String::new(),
+                networks: vec![],
             },
         ];
 
@@ -1100,6 +1160,7 @@ mod tests {
             healthcheck: None,
             entrypoint: vec![],
             workdir: String::new(),
+            networks: vec![],
         }];
 
         let result = ComposeConverter::validate_dependencies(&services);

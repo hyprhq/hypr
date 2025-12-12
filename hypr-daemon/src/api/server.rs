@@ -39,7 +39,8 @@ impl HyprServiceImpl {
         adapter: Arc<dyn VmmAdapter>,
         network_mgr: Arc<NetworkManager>,
     ) -> Self {
-        let orchestrator = Arc::new(StackOrchestrator::new(state.clone(), adapter.clone()));
+        let orchestrator =
+            Arc::new(StackOrchestrator::new(state.clone(), adapter.clone(), network_mgr.clone()));
         Self { state, adapter, network_mgr, orchestrator }
     }
 }
@@ -121,20 +122,13 @@ impl HyprService for HyprServiceImpl {
                 manifest = manifest.with_user(user.clone());
             }
 
-            // Set network configuration
-            // Gateway is platform-specific (same as IPAM)
-            #[cfg(target_os = "linux")]
-            let gateway = "10.88.0.1";
-            #[cfg(target_os = "macos")]
-            let gateway = "192.168.64.1";
-            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-            let gateway = "10.88.0.1";
-
+            // Set network configuration using platform-aware defaults
+            let net_defaults = hypr_core::network_defaults();
             manifest = manifest.with_network(ManifestNetworkConfig {
                 ip: vm_ip.to_string(),
-                netmask: "255.255.255.0".to_string(),
-                gateway: gateway.to_string(),
-                dns: vec!["8.8.8.8".to_string(), "1.1.1.1".to_string()],
+                netmask: net_defaults.netmask_str.to_string(),
+                gateway: net_defaults.gateway.to_string(),
+                dns: net_defaults.dns_servers.iter().map(|s| (*s).to_string()).collect(),
             });
 
             // Encode manifest and add to kernel args
@@ -712,6 +706,890 @@ impl HyprService for HyprServiceImpl {
 
         Ok(Response::new(response))
     }
+
+    // =========================================================================
+    // Network Operations
+    // =========================================================================
+
+    #[instrument(skip(self), fields(name = %request.get_ref().name))]
+    async fn create_network(
+        &self,
+        request: Request<CreateNetworkRequest>,
+    ) -> std::result::Result<Response<CreateNetworkResponse>, Status> {
+        info!("gRPC: CreateNetwork");
+
+        let req = request.into_inner();
+
+        // Check if network with this name already exists
+        let existing = self.state.list_networks().await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        if existing.iter().any(|n| n.name == req.name) {
+            return Err(Status::already_exists(format!("Network {} already exists", req.name)));
+        }
+
+        // Generate unique ID
+        let id = uuid::Uuid::new_v4().to_string();
+
+        // Parse or auto-generate subnet
+        // For now, we'll use a simple scheme: vbr1, vbr2, etc. with 10.89.x.0/24
+        let network_num = existing.len() + 1; // +1 because default is vbr0
+        let cidr = req.subnet.unwrap_or_else(|| format!("10.{}.0.0/16", 88 + network_num));
+
+        // Parse gateway from CIDR or use provided
+        let gateway_str = req.gateway.unwrap_or_else(|| {
+            // Extract base from CIDR and set gateway to .1
+            if let Some(slash_pos) = cidr.find('/') {
+                let base = &cidr[..slash_pos];
+                if let Some(last_dot) = base.rfind('.') {
+                    return format!("{}.1", &base[..last_dot]);
+                }
+            }
+            format!("10.{}.0.1", 88 + network_num)
+        });
+
+        let gateway: std::net::Ipv4Addr = gateway_str.parse()
+            .map_err(|_| Status::invalid_argument("Invalid gateway IP"))?;
+
+        let bridge_name = format!("vbr{}", network_num);
+
+        let network = hypr_core::Network {
+            id: id.clone(),
+            name: req.name.clone(),
+            driver: hypr_core::types::NetworkDriver::Bridge,
+            cidr: cidr.clone(),
+            gateway,
+            bridge_name: bridge_name.clone(),
+            created_at: std::time::SystemTime::now(),
+        };
+
+        // Store in database
+        self.state.insert_network(&network).await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        // TODO: Actually create the bridge interface (Linux only)
+        // For now, this just stores the network metadata
+
+        let proto_network = proto::Network {
+            id,
+            name: req.name,
+            driver: "bridge".to_string(),
+            cidr,
+            gateway: gateway_str,
+            bridge_name,
+            created_at: network.created_at
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64,
+        };
+
+        Ok(Response::new(CreateNetworkResponse {
+            network: Some(proto_network),
+        }))
+    }
+
+    #[instrument(skip(self), fields(name = %request.get_ref().name))]
+    async fn delete_network(
+        &self,
+        request: Request<DeleteNetworkRequest>,
+    ) -> std::result::Result<Response<DeleteNetworkResponse>, Status> {
+        info!("gRPC: DeleteNetwork");
+
+        let req = request.into_inner();
+
+        // Don't allow deleting the default network
+        if req.name == "default" || req.name == "bridge" {
+            return Err(Status::failed_precondition("Cannot delete the default network"));
+        }
+
+        // Find network by name
+        let networks = self.state.list_networks().await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let network = networks.iter().find(|n| n.name == req.name)
+            .ok_or_else(|| Status::not_found(format!("Network {} not found", req.name)))?;
+
+        // Check if network is in use (unless force)
+        if !req.force {
+            let vms = self.state.list_vms().await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
+            // Check if any VM is using this network
+            // For now, all VMs use the default network, so this check is placeholder
+            let in_use = vms.iter().any(|vm| vm.config.network.network == req.name);
+            if in_use {
+                return Err(Status::failed_precondition(
+                    format!("Network {} is in use. Use force=true to delete anyway", req.name)
+                ));
+            }
+        }
+
+        // Delete from database
+        self.state.delete_network(&network.id).await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        // TODO: Actually delete the bridge interface (Linux only)
+
+        Ok(Response::new(DeleteNetworkResponse { success: true }))
+    }
+
+    #[instrument(skip(self))]
+    async fn list_networks(
+        &self,
+        _request: Request<ListNetworksRequest>,
+    ) -> std::result::Result<Response<ListNetworksResponse>, Status> {
+        info!("gRPC: ListNetworks");
+
+        let networks = self.state.list_networks().await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Always include the default network (even if not in DB)
+        let mut proto_networks: Vec<proto::Network> = networks.into_iter().map(|n| {
+            proto::Network {
+                id: n.id,
+                name: n.name,
+                driver: n.driver.to_string(),
+                cidr: n.cidr,
+                gateway: n.gateway.to_string(),
+                bridge_name: n.bridge_name,
+                created_at: n.created_at
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64,
+            }
+        }).collect();
+
+        // Add default network if not present
+        if !proto_networks.iter().any(|n| n.name == "bridge" || n.name == "default") {
+            let defaults = hypr_core::network::defaults::defaults();
+            proto_networks.insert(0, proto::Network {
+                id: "default".to_string(),
+                name: "bridge".to_string(),
+                driver: "bridge".to_string(),
+                cidr: hypr_core::network::defaults::cidr().to_string(),
+                gateway: defaults.gateway.to_string(),
+                bridge_name: if cfg!(target_os = "linux") { "vbr0".to_string() } else { "vmnet".to_string() },
+                created_at: 0, // System default
+            });
+        }
+
+        Ok(Response::new(ListNetworksResponse { networks: proto_networks }))
+    }
+
+    #[instrument(skip(self), fields(name = %request.get_ref().name))]
+    async fn get_network(
+        &self,
+        request: Request<GetNetworkRequest>,
+    ) -> std::result::Result<Response<GetNetworkResponse>, Status> {
+        info!("gRPC: GetNetwork");
+
+        let req = request.into_inner();
+
+        // Special case for default network
+        if req.name == "bridge" || req.name == "default" {
+            let defaults = hypr_core::network::defaults::defaults();
+            return Ok(Response::new(GetNetworkResponse {
+                network: Some(proto::Network {
+                    id: "default".to_string(),
+                    name: "bridge".to_string(),
+                    driver: "bridge".to_string(),
+                    cidr: hypr_core::network::defaults::cidr().to_string(),
+                    gateway: defaults.gateway.to_string(),
+                    bridge_name: if cfg!(target_os = "linux") { "vbr0".to_string() } else { "vmnet".to_string() },
+                    created_at: 0,
+                }),
+            }));
+        }
+
+        // Look up custom network
+        let networks = self.state.list_networks().await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let network = networks.into_iter().find(|n| n.name == req.name)
+            .ok_or_else(|| Status::not_found(format!("Network {} not found", req.name)))?;
+
+        Ok(Response::new(GetNetworkResponse {
+            network: Some(proto::Network {
+                id: network.id,
+                name: network.name,
+                driver: network.driver.to_string(),
+                cidr: network.cidr,
+                gateway: network.gateway.to_string(),
+                bridge_name: network.bridge_name,
+                created_at: network.created_at
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64,
+            }),
+        }))
+    }
+
+    // =========================================================================
+    // VM Metrics (Real-time monitoring)
+    // =========================================================================
+
+    type StreamVMMetricsStream =
+        Pin<Box<dyn Stream<Item = std::result::Result<VmMetrics, Status>> + Send + 'static>>;
+
+    async fn stream_vm_metrics(
+        &self,
+        request: Request<StreamVmMetricsRequest>,
+    ) -> std::result::Result<Response<Self::StreamVMMetricsStream>, Status> {
+        let req = request.into_inner();
+        let vm_id = req.vm_id;
+        let interval_ms = if req.interval_ms == 0 { 1000 } else { req.interval_ms };
+
+        // Verify VM exists
+        self.state
+            .get_vm(&vm_id)
+            .await
+            .map_err(|_| Status::not_found(format!("VM {} not found", vm_id)))?;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+
+        // Spawn metrics collection task
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(interval_ms as u64));
+            loop {
+                interval.tick().await;
+
+                // TODO: Collect real metrics from VM via vsock or /proc
+                // For now, send placeholder metrics
+                let metrics = VmMetrics {
+                    timestamp: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as i64,
+                    cpu_percent: 0.0,
+                    memory_used_bytes: 0,
+                    memory_total_bytes: 0,
+                    disk_read_bytes: 0,
+                    disk_write_bytes: 0,
+                    network_rx_bytes: 0,
+                    network_tx_bytes: 0,
+                    pids: 0,
+                };
+
+                if tx.send(Ok(metrics)).await.is_err() {
+                    break; // Client disconnected
+                }
+            }
+        });
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    // =========================================================================
+    // Exec (Interactive PTY)
+    // =========================================================================
+
+    type ExecStream =
+        Pin<Box<dyn Stream<Item = std::result::Result<ExecResponse, Status>> + Send + 'static>>;
+
+    async fn exec(
+        &self,
+        request: Request<tonic::Streaming<ExecRequest>>,
+    ) -> std::result::Result<Response<Self::ExecStream>, Status> {
+        let mut in_stream = request.into_inner();
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let state = self.state.clone();
+        let adapter = self.adapter.clone();
+
+        tokio::spawn(async move {
+            // Wait for ExecStart message
+            let start_msg = match in_stream.next().await {
+                Some(Ok(req)) => match req.message {
+                    Some(exec_request::Message::Start(start)) => start,
+                    _ => {
+                        let _ = tx.send(Err(Status::invalid_argument("First message must be ExecStart"))).await;
+                        return;
+                    }
+                },
+                _ => {
+                    let _ = tx.send(Err(Status::invalid_argument("No ExecStart received"))).await;
+                    return;
+                }
+            };
+
+            // Get VM and vsock path
+            let vm = match state.get_vm(&start_msg.vm_id).await {
+                Ok(vm) => vm,
+                Err(_) => {
+                    let _ = tx.send(Err(Status::not_found("VM not found"))).await;
+                    return;
+                }
+            };
+
+            let vsock_path = adapter.vsock_path(&VmHandle {
+                id: vm.id.clone(),
+                pid: vm.pid,
+                socket_path: None,
+            });
+
+            // Send started confirmation
+            let session_id = uuid::Uuid::new_v4().to_string();
+            let _ = tx.send(Ok(ExecResponse {
+                message: Some(exec_response::Message::Started(ExecStarted {
+                    session_id: session_id.clone(),
+                })),
+            })).await;
+
+            // Connect to vsock and relay I/O
+            // TODO: Implement actual vsock connection using kestrel exec protocol
+            // For now, this is a placeholder that will be implemented with console multiplexing
+            match tokio::net::UnixStream::connect(&vsock_path).await {
+                Ok(stream) => {
+                    let (mut reader, mut writer) = stream.into_split();
+
+                    // Spawn reader task
+                    let tx_clone = tx.clone();
+                    let reader_task = tokio::spawn(async move {
+                        let mut buf = vec![0u8; 4096];
+                        loop {
+                            match tokio::io::AsyncReadExt::read(&mut reader, &mut buf).await {
+                                Ok(0) => break, // EOF
+                                Ok(n) => {
+                                    let _ = tx_clone.send(Ok(ExecResponse {
+                                        message: Some(exec_response::Message::Stdout(buf[..n].to_vec())),
+                                    })).await;
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    });
+
+                    // Process input from client
+                    while let Some(Ok(req)) = in_stream.next().await {
+                        match req.message {
+                            Some(exec_request::Message::Input(input)) => {
+                                if tokio::io::AsyncWriteExt::write_all(&mut writer, &input.data).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Some(exec_request::Message::Resize(resize)) => {
+                                // TODO: Send SIGWINCH to guest process
+                                let _ = resize;
+                            }
+                            Some(exec_request::Message::Signal(sig)) => {
+                                // TODO: Send signal to guest process
+                                let _ = sig;
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    reader_task.abort();
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(Status::internal(format!("Failed to connect to VM: {}", e)))).await;
+                }
+            }
+
+            // Send exit code
+            let _ = tx.send(Ok(ExecResponse {
+                message: Some(exec_response::Message::ExitCode(0)),
+            })).await;
+        });
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    // =========================================================================
+    // Image History
+    // =========================================================================
+
+    async fn get_image_history(
+        &self,
+        request: Request<GetImageHistoryRequest>,
+    ) -> std::result::Result<Response<GetImageHistoryResponse>, Status> {
+        let req = request.into_inner();
+
+        // Get the image
+        let images = self.state.list_images().await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let _image = images.into_iter()
+            .find(|i| i.id == req.image_id)
+            .ok_or_else(|| Status::not_found("Image not found"))?;
+
+        // TODO: Parse actual layer history from OCI manifest
+        // For now, return empty history
+        Ok(Response::new(GetImageHistoryResponse {
+            layers: vec![],
+        }))
+    }
+
+    // =========================================================================
+    // Image Pull (Streaming)
+    // =========================================================================
+
+    type PullImageStream =
+        Pin<Box<dyn Stream<Item = std::result::Result<PullEvent, Status>> + Send + 'static>>;
+
+    async fn pull_image(
+        &self,
+        request: Request<PullImageRequest>,
+    ) -> std::result::Result<Response<Self::PullImageStream>, Status> {
+        let req = request.into_inner();
+        let image_ref = req.image;
+        let state = self.state.clone();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+
+        tokio::spawn(async move {
+            // Send initial progress
+            let _ = tx.send(Ok(PullEvent {
+                event: Some(pull_event::Event::Progress(PullProgress {
+                    layer_id: String::new(),
+                    status: "pulling".to_string(),
+                    current: 0,
+                    total: 0,
+                })),
+            })).await;
+
+            // Create puller and pull image
+            let mut puller = match ImagePuller::new() {
+                Ok(p) => p,
+                Err(e) => {
+                    let _ = tx.send(Ok(PullEvent {
+                        event: Some(pull_event::Event::Error(PullError {
+                            message: e.to_string(),
+                        })),
+                    })).await;
+                    return;
+                }
+            };
+
+            match puller.pull(&image_ref).await {
+                Ok(image) => {
+                    // Save to state
+                    if let Err(e) = state.insert_image(&image).await {
+                        let _ = tx.send(Ok(PullEvent {
+                            event: Some(pull_event::Event::Error(PullError {
+                                message: format!("Failed to save image: {}", e),
+                            })),
+                        })).await;
+                        return;
+                    }
+
+                    // Send complete
+                    let _ = tx.send(Ok(PullEvent {
+                        event: Some(pull_event::Event::Complete(PullComplete {
+                            image: Some(image.into()),
+                        })),
+                    })).await;
+                }
+                Err(e) => {
+                    let _ = tx.send(Ok(PullEvent {
+                        event: Some(pull_event::Event::Error(PullError {
+                            message: e.to_string(),
+                        })),
+                    })).await;
+                }
+            }
+        });
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    // =========================================================================
+    // Image Build (Streaming)
+    // =========================================================================
+
+    type BuildImageStream =
+        Pin<Box<dyn Stream<Item = std::result::Result<BuildEvent, Status>> + Send + 'static>>;
+
+    async fn build_image(
+        &self,
+        request: Request<BuildImageRequest>,
+    ) -> std::result::Result<Response<Self::BuildImageStream>, Status> {
+        let req = request.into_inner();
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+
+        let context_path = PathBuf::from(&req.context_path);
+        let dockerfile = if req.dockerfile.is_empty() { "Dockerfile".to_string() } else { req.dockerfile };
+        let tag = req.tag;
+        let _build_args = req.build_args;
+        let _target = req.target;
+        let _no_cache = req.no_cache;
+        let _state = self.state.clone();
+
+        // TODO: Integrate with the builder infrastructure
+        // The current builder uses CLI `hypr build`, which should be refactored
+        // to use gRPC streaming. For now, return an error indicating to use CLI.
+        tokio::spawn(async move {
+            // Validate context exists
+            if !context_path.exists() {
+                let _ = tx.send(Ok(BuildEvent {
+                    event: Some(build_event::Event::Error(BuildError {
+                        step_number: 0,
+                        message: format!("Context path does not exist: {}", context_path.display()),
+                    })),
+                })).await;
+                return;
+            }
+
+            let dockerfile_path = context_path.join(&dockerfile);
+            if !dockerfile_path.exists() {
+                let _ = tx.send(Ok(BuildEvent {
+                    event: Some(build_event::Event::Error(BuildError {
+                        step_number: 0,
+                        message: format!("Dockerfile not found: {}", dockerfile_path.display()),
+                    })),
+                })).await;
+                return;
+            }
+
+            // For now, indicate to use CLI for building
+            // TODO: Integrate with build executor properly
+            let _ = tx.send(Ok(BuildEvent {
+                event: Some(build_event::Event::Error(BuildError {
+                    step_number: 0,
+                    message: format!(
+                        "Build via gRPC is not yet implemented. Please use CLI: hypr build -t {} {}",
+                        tag, context_path.display()
+                    ),
+                })),
+            })).await;
+        });
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    // =========================================================================
+    // Stack Service Logs
+    // =========================================================================
+
+    type StreamStackServiceLogsStream =
+        Pin<Box<dyn Stream<Item = std::result::Result<LogEntry, Status>> + Send + 'static>>;
+
+    async fn stream_stack_service_logs(
+        &self,
+        request: Request<StreamStackServiceLogsRequest>,
+    ) -> std::result::Result<Response<Self::StreamStackServiceLogsStream>, Status> {
+        let req = request.into_inner();
+
+        // Get stack
+        let stack = self.state.get_stack(&req.stack_name).await
+            .map_err(|e| Status::not_found(e.to_string()))?;
+
+        // Find service in stack
+        let service = stack.services.iter()
+            .find(|s| s.name == req.service_name)
+            .ok_or_else(|| Status::not_found(format!("Service {} not found in stack", req.service_name)))?;
+
+        // Stream logs from the service's VM
+        let log_path = hypr_core::paths::logs_dir().join(format!("{}.log", service.vm_id));
+
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+
+        let tail = req.tail as usize;
+        let follow = req.follow;
+
+        tokio::spawn(async move {
+            if let Err(e) = stream_log_file(log_path, tx, tail, follow).await {
+                warn!("Log streaming error: {}", e);
+            }
+        });
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    // =========================================================================
+    // Volume Operations
+    // =========================================================================
+
+    async fn create_volume(
+        &self,
+        request: Request<CreateVolumeRequest>,
+    ) -> std::result::Result<Response<CreateVolumeResponse>, Status> {
+        let req = request.into_inner();
+
+        // Generate volume ID
+        let volume_id = format!("vol-{}", uuid::Uuid::new_v4());
+
+        // Create volume directory
+        let volumes_dir = hypr_core::paths::data_dir().join("volumes");
+        let volume_path = volumes_dir.join(&volume_id);
+
+        tokio::fs::create_dir_all(&volume_path).await
+            .map_err(|e| Status::internal(format!("Failed to create volume: {}", e)))?;
+
+        // Create volume record
+        let volume = hypr_core::types::volume::Volume {
+            id: volume_id.clone(),
+            name: req.name.clone(),
+            volume_type: hypr_core::types::volume::VolumeType::Bind,
+            path: volume_path.clone(),
+            size_bytes: 0,
+            created_at: SystemTime::now(),
+        };
+
+        self.state.insert_volume(&volume).await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(CreateVolumeResponse {
+            volume: Some(proto::Volume {
+                id: volume_id,
+                name: req.name,
+                driver: "local".to_string(),
+                path: volume_path.to_string_lossy().to_string(),
+                size_bytes: 0,
+                created_at: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64,
+                used_by: vec![],
+                labels: req.labels,
+            }),
+        }))
+    }
+
+    async fn delete_volume(
+        &self,
+        request: Request<DeleteVolumeRequest>,
+    ) -> std::result::Result<Response<DeleteVolumeResponse>, Status> {
+        let req = request.into_inner();
+
+        // Get volume
+        let volume = self.state.get_volume(&req.name).await
+            .map_err(|e| Status::not_found(e.to_string()))?;
+
+        // Delete from filesystem
+        if volume.path.exists() {
+            tokio::fs::remove_dir_all(&volume.path).await
+                .map_err(|e| Status::internal(format!("Failed to delete volume: {}", e)))?;
+        }
+
+        // Delete from state
+        self.state.delete_volume(&req.name).await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(DeleteVolumeResponse { success: true }))
+    }
+
+    async fn list_volumes(
+        &self,
+        _request: Request<ListVolumesRequest>,
+    ) -> std::result::Result<Response<ListVolumesResponse>, Status> {
+        let volumes = self.state.list_volumes().await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let proto_volumes: Vec<proto::Volume> = volumes.into_iter().map(|v| {
+            proto::Volume {
+                id: v.id,
+                name: v.name,
+                driver: "local".to_string(),
+                path: v.path.to_string_lossy().to_string(),
+                size_bytes: v.size_bytes,
+                created_at: v.created_at
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64,
+                used_by: vec![],
+                labels: HashMap::new(),
+            }
+        }).collect();
+
+        Ok(Response::new(ListVolumesResponse { volumes: proto_volumes }))
+    }
+
+    async fn get_volume(
+        &self,
+        request: Request<GetVolumeRequest>,
+    ) -> std::result::Result<Response<GetVolumeResponse>, Status> {
+        let req = request.into_inner();
+
+        let volume = self.state.get_volume(&req.name).await
+            .map_err(|e| Status::not_found(e.to_string()))?;
+
+        Ok(Response::new(GetVolumeResponse {
+            volume: Some(proto::Volume {
+                id: volume.id,
+                name: volume.name,
+                driver: "local".to_string(),
+                path: volume.path.to_string_lossy().to_string(),
+                size_bytes: volume.size_bytes,
+                created_at: volume.created_at
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64,
+                used_by: vec![],
+                labels: HashMap::new(),
+            }),
+        }))
+    }
+
+    async fn prune_volumes(
+        &self,
+        _request: Request<PruneVolumesRequest>,
+    ) -> std::result::Result<Response<PruneVolumesResponse>, Status> {
+        let volumes = self.state.list_volumes().await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let deleted = Vec::new();
+        let reclaimed: u64 = 0;
+
+        // TODO: Check which volumes are in use
+        for volume in volumes {
+            // For now, skip deletion - need to implement usage tracking
+            let _ = volume;
+        }
+
+        Ok(Response::new(PruneVolumesResponse {
+            volumes_deleted: deleted,
+            space_reclaimed: reclaimed,
+        }))
+    }
+
+    // =========================================================================
+    // System Stats
+    // =========================================================================
+
+    async fn get_system_stats(
+        &self,
+        _request: Request<GetSystemStatsRequest>,
+    ) -> std::result::Result<Response<GetSystemStatsResponse>, Status> {
+        // Get counts
+        let vms = self.state.list_vms().await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let images = self.state.list_images().await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let stacks = self.state.list_stacks().await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let networks = self.state.list_networks().await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let volumes = self.state.list_volumes().await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let running_vms = vms.iter().filter(|v| v.status == VmStatus::Running).count() as u32;
+        let stopped_vms = vms.iter().filter(|v| v.status == VmStatus::Stopped).count() as u32;
+
+        // Calculate resource allocation
+        let total_cpus: u32 = vms.iter()
+            .filter(|v| v.status == VmStatus::Running)
+            .map(|v| v.config.resources.cpus)
+            .sum();
+        let total_memory: u64 = vms.iter()
+            .filter(|v| v.status == VmStatus::Running)
+            .map(|v| v.config.resources.memory_mb as u64)
+            .sum();
+
+        // Calculate disk usage
+        let images_size: u64 = images.iter().map(|i| i.size_bytes).sum();
+        let volumes_size: u64 = volumes.iter().map(|v| v.size_bytes).sum();
+
+        // Get cache and logs directory sizes
+        let cache_size = dir_size(&hypr_core::paths::cache_dir()).await;
+        let logs_size = dir_size(&hypr_core::paths::logs_dir()).await;
+
+        Ok(Response::new(GetSystemStatsResponse {
+            total_vms: vms.len() as u32,
+            running_vms,
+            stopped_vms,
+            total_cpus_allocated: total_cpus,
+            total_memory_allocated_mb: total_memory,
+            total_disk_used_bytes: images_size + volumes_size + cache_size + logs_size,
+            images_disk_used_bytes: images_size,
+            volumes_disk_used_bytes: volumes_size,
+            cache_disk_used_bytes: cache_size,
+            logs_disk_used_bytes: logs_size,
+            total_images: images.len() as u32,
+            total_stacks: stacks.len() as u32,
+            total_networks: networks.len() as u32,
+            total_volumes: volumes.len() as u32,
+        }))
+    }
+
+    // =========================================================================
+    // Settings
+    // =========================================================================
+
+    async fn get_settings(
+        &self,
+        _request: Request<GetSettingsRequest>,
+    ) -> std::result::Result<Response<GetSettingsResponse>, Status> {
+        Ok(Response::new(GetSettingsResponse {
+            settings: Some(proto::Settings {
+                default_cpus: 2,
+                default_memory_mb: 512,
+                auto_start_daemon: true,
+                start_at_login: false,
+                log_level: "info".to_string(),
+                max_concurrent_builds: 4,
+                cache_size_limit_bytes: 10 * 1024 * 1024 * 1024, // 10 GB
+                log_retention_days: 7,
+                telemetry_enabled: false,
+                data_dir: hypr_core::paths::data_dir().to_string_lossy().to_string(),
+                runtime_dir: hypr_core::paths::runtime_dir().to_string_lossy().to_string(),
+                socket_path: "/tmp/hypr.sock".to_string(),
+            }),
+        }))
+    }
+
+    async fn update_settings(
+        &self,
+        request: Request<UpdateSettingsRequest>,
+    ) -> std::result::Result<Response<UpdateSettingsResponse>, Status> {
+        let req = request.into_inner();
+
+        // TODO: Persist settings to config file
+        // For now, just return the settings back
+        Ok(Response::new(UpdateSettingsResponse {
+            settings: req.settings,
+        }))
+    }
+
+    // =========================================================================
+    // Event Subscription
+    // =========================================================================
+
+    type SubscribeEventsStream =
+        Pin<Box<dyn Stream<Item = std::result::Result<HyprEvent, Status>> + Send + 'static>>;
+
+    async fn subscribe_events(
+        &self,
+        _request: Request<SubscribeEventsRequest>,
+    ) -> std::result::Result<Response<Self::SubscribeEventsStream>, Status> {
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+
+        // TODO: Implement actual event bus
+        // For now, just keep the connection open
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                // Send heartbeat to keep connection alive
+                if tx.is_closed() {
+                    break;
+                }
+            }
+        });
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream)))
+    }
+}
+
+/// Calculate directory size recursively
+async fn dir_size(path: &std::path::Path) -> u64 {
+    let mut size = 0u64;
+    if let Ok(mut entries) = tokio::fs::read_dir(path).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if let Ok(metadata) = entry.metadata().await {
+                if metadata.is_file() {
+                    size += metadata.len();
+                } else if metadata.is_dir() {
+                    size += Box::pin(dir_size(&entry.path())).await;
+                }
+            }
+        }
+    }
+    size
 }
 
 /// Start the gRPC API server on Unix socket
@@ -1042,19 +1920,13 @@ async fn run_vm_with_progress(
             manifest = manifest.with_workdir(image.manifest.workdir.clone());
         }
 
-        // Gateway is platform-specific
-        #[cfg(target_os = "linux")]
-        let gateway = "10.88.0.1";
-        #[cfg(target_os = "macos")]
-        let gateway = "192.168.64.1";
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        let gateway = "10.88.0.1";
-
+        // Set network configuration using platform-aware defaults
+        let net_defaults = hypr_core::network_defaults();
         manifest = manifest.with_network(ManifestNetworkConfig {
             ip: vm_ip.to_string(),
-            netmask: "255.255.255.0".to_string(),
-            gateway: gateway.to_string(),
-            dns: vec!["8.8.8.8".to_string(), "1.1.1.1".to_string()],
+            netmask: net_defaults.netmask_str.to_string(),
+            gateway: net_defaults.gateway.to_string(),
+            dns: net_defaults.dns_servers.iter().map(|s| (*s).to_string()).collect(),
         });
 
         if let Ok(encoded) = manifest.encode() {

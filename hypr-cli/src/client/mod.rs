@@ -290,4 +290,56 @@ impl HyprClient {
         let response = self.client.stream_logs(request).await?;
         Ok(response.into_inner())
     }
+
+    // Network operations
+
+    /// List all networks
+    pub async fn list_networks(&mut self) -> Result<Vec<Network>> {
+        let request = tonic::Request::new(ListNetworksRequest { filter: None });
+        let response = self.client.list_networks(request).await?;
+        Ok(response.into_inner().networks)
+    }
+
+    /// Create a new network
+    pub async fn create_network(
+        &mut self,
+        name: &str,
+        subnet: Option<&str>,
+        gateway: Option<&str>,
+        _driver: &str,
+    ) -> Result<Network> {
+        let request = tonic::Request::new(CreateNetworkRequest {
+            name: name.to_string(),
+            driver: Some("bridge".to_string()),
+            subnet: subnet.map(String::from),
+            gateway: gateway.map(String::from),
+        });
+        let response = self.client.create_network(request).await?;
+        response
+            .into_inner()
+            .network
+            .ok_or_else(|| anyhow::anyhow!("No network returned"))
+    }
+
+    /// Delete a network
+    pub async fn delete_network(&mut self, name: &str, force: bool) -> Result<bool> {
+        let request = tonic::Request::new(DeleteNetworkRequest {
+            name: name.to_string(),
+            force,
+        });
+        let response = self.client.delete_network(request).await?;
+        Ok(response.into_inner().success)
+    }
+
+    /// Get network details
+    pub async fn get_network(&mut self, name: &str) -> Result<Network> {
+        let request = tonic::Request::new(GetNetworkRequest {
+            name: name.to_string(),
+        });
+        let response = self.client.get_network(request).await?;
+        response
+            .into_inner()
+            .network
+            .ok_or_else(|| anyhow::anyhow!("Network not found"))
+    }
 }

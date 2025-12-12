@@ -111,6 +111,20 @@ enum Commands {
         image: String,
     },
 
+    /// Remove an image
+    Rmi {
+        /// Image name or ID
+        image: String,
+
+        /// Force removal
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Image management commands
+    #[command(subcommand)]
+    Image(ImageCommands),
+
     /// Stream logs from a VM
     Logs {
         /// VM ID or name
@@ -165,6 +179,10 @@ enum Commands {
     /// Volume management commands
     #[command(subcommand)]
     Volume(VolumeCommands),
+
+    /// Network management commands
+    #[command(subcommand)]
+    Network(NetworkCommands),
 }
 
 #[derive(Subcommand)]
@@ -196,6 +214,92 @@ enum VolumeCommands {
 
     /// Remove all unused local volumes
     Prune {
+        /// Do not prompt for confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum NetworkCommands {
+    /// List networks
+    Ls,
+
+    /// Create a network
+    Create {
+        /// Network name
+        name: String,
+
+        /// Subnet in CIDR notation (e.g., 10.89.0.0/16)
+        #[arg(long)]
+        subnet: Option<String>,
+
+        /// Gateway IP address
+        #[arg(long)]
+        gateway: Option<String>,
+
+        /// Network driver (default: bridge)
+        #[arg(short, long, default_value = "bridge")]
+        driver: String,
+    },
+
+    /// Remove a network
+    Rm {
+        /// Network name
+        name: String,
+
+        /// Force removal (don't check if in use)
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Display detailed information on a network
+    Inspect {
+        /// Network name
+        name: String,
+    },
+
+    /// Remove all unused networks
+    Prune {
+        /// Do not prompt for confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ImageCommands {
+    /// List images
+    Ls,
+
+    /// Pull an image from registry
+    Pull {
+        /// Image name (e.g., "nginx", "nginx:1.25", "ghcr.io/org/repo:tag")
+        image: String,
+    },
+
+    /// Remove an image
+    Rm {
+        /// Image name or ID
+        image: String,
+
+        /// Force removal
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Display detailed information on an image
+    Inspect {
+        /// Image name or ID
+        image: String,
+    },
+
+    /// Remove unused images
+    Prune {
+        /// Remove all unused images, not just dangling ones
+        #[arg(short, long)]
+        all: bool,
+
         /// Do not prompt for confirmation
         #[arg(short, long)]
         force: bool,
@@ -381,6 +485,36 @@ async fn main() -> Result<()> {
             commands::pull(&image).await?;
         }
 
+        Commands::Rmi { image, force } => {
+            let mut client = client::HyprClient::connect().await?;
+            let success = client.delete_image(&image, force).await?;
+            if success {
+                println!("Deleted: {}", image);
+            }
+        }
+
+        Commands::Image(image_cmd) => match image_cmd {
+            ImageCommands::Ls => {
+                commands::images().await?;
+            }
+            ImageCommands::Pull { image } => {
+                commands::pull(&image).await?;
+            }
+            ImageCommands::Rm { image, force } => {
+                let mut client = client::HyprClient::connect().await?;
+                let success = client.delete_image(&image, force).await?;
+                if success {
+                    println!("Deleted: {}", image);
+                }
+            }
+            ImageCommands::Inspect { image } => {
+                commands::image::inspect(&image).await?;
+            }
+            ImageCommands::Prune { all, force } => {
+                commands::image::prune(all, force).await?;
+            }
+        },
+
         Commands::Logs { vm, follow, tail } => {
             commands::logs(&vm, follow, tail).await?;
         }
@@ -507,6 +641,25 @@ async fn main() -> Result<()> {
             }
             VolumeCommands::Prune { force } => {
                 commands::volume::prune(force).await?;
+            }
+        },
+
+        Commands::Network(network_cmd) => match network_cmd {
+            NetworkCommands::Ls => {
+                commands::network::ls().await?;
+            }
+            NetworkCommands::Create { name, subnet, gateway, driver } => {
+                commands::network::create(&name, subnet.as_deref(), gateway.as_deref(), &driver)
+                    .await?;
+            }
+            NetworkCommands::Rm { name, force } => {
+                commands::network::rm(&name, force).await?;
+            }
+            NetworkCommands::Inspect { name } => {
+                commands::network::inspect(&name).await?;
+            }
+            NetworkCommands::Prune { force } => {
+                commands::network::prune(force).await?;
             }
         },
     }

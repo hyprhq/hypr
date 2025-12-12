@@ -8,6 +8,7 @@ use hypr_api::hypr::v1::{deploy_stack_event, DeployProgress, DeployStackEvent};
 use hypr_core::adapters::VmmAdapter;
 use hypr_core::compose::{ComposeConverter, ComposeParser};
 use hypr_core::registry::ImagePuller;
+use hypr_core::types::stack::{Service as StackService, Stack};
 use hypr_core::types::vm::{DiskConfig, DiskFormat, VirtioFsMount};
 use hypr_core::{
     HyprError, Result, ServiceConfig, StackConfig, StateManager, Vm, VmHandle, VmStatus,
@@ -19,7 +20,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc::Sender;
 use tonic::Status;
-use tracing::{error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 /// Type alias for progress event sender
 pub type ProgressSender = Sender<std::result::Result<DeployStackEvent, Status>>;
@@ -65,62 +66,80 @@ pub struct StackInfo {
     pub created_at: SystemTime,
     /// Overall stack state.
     pub state: StackState,
+    /// Compose file path (for reference)
+    pub compose_path: Option<String>,
 }
 
-/// Simple IP allocator for stack VMs.
-struct SimpleIpAllocator {
-    next_ip: u32,
-    allocated: HashMap<String, IpAddr>,
+impl StackInfo {
+    /// Convert to database-persistable Stack type.
+    pub fn to_stack(&self) -> Stack {
+        Stack {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            services: self
+                .services
+                .iter()
+                .map(|s| StackService {
+                    name: s.name.clone(),
+                    vm_id: s.vm_id.clone(),
+                    status: s.status.to_string(),
+                })
+                .collect(),
+            compose_path: self.compose_path.clone(),
+            created_at: self.created_at,
+        }
+    }
+
+    /// Create from database Stack type.
+    pub fn from_stack(stack: Stack, state: StackState) -> Self {
+        Self {
+            id: stack.id,
+            name: stack.name,
+            services: stack
+                .services
+                .into_iter()
+                .map(|s| {
+                    let status = match s.status.as_str() {
+                        "Running" | "running" => VmStatus::Running,
+                        "Stopped" | "stopped" => VmStatus::Stopped,
+                        "Creating" | "creating" => VmStatus::Creating,
+                        "Failed" | "failed" => VmStatus::Failed,
+                        _ => VmStatus::Stopped,
+                    };
+                    ServiceStatus { name: s.name, vm_id: s.vm_id, status, ip: None }
+                })
+                .collect(),
+            created_at: stack.created_at,
+            state,
+            compose_path: stack.compose_path,
+        }
+    }
 }
 
-impl SimpleIpAllocator {
-    fn new() -> Self {
-        // Platform-specific IP ranges:
-        // - Linux: 10.88.0.0/16 (gateway: 10.88.0.1)
-        // - macOS: 192.168.64.0/24 (vmnet gateway: 192.168.64.1)
-        #[cfg(target_os = "linux")]
-        let start_ip = 0x0A580002; // 10.88.0.2
-
-        #[cfg(target_os = "macos")]
-        let start_ip = 0xC0A84002; // 192.168.64.2
-
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        let start_ip = 0x0A580002; // 10.88.0.2
-
-        Self { next_ip: start_ip, allocated: HashMap::new() }
-    }
-
-    fn allocate(&mut self, vm_id: String) -> IpAddr {
-        let ip_num = self.next_ip;
-        self.next_ip += 1;
-
-        let ip = IpAddr::V4(std::net::Ipv4Addr::from(ip_num));
-        self.allocated.insert(vm_id, ip);
-        ip
-    }
-
-    fn release(&mut self, vm_id: &str) {
-        self.allocated.remove(vm_id);
-    }
-}
+// Re-export NetworkManager for use by stack orchestrator
+use crate::network_manager::NetworkManager;
 
 /// Stack orchestrator for managing multi-VM stacks.
 pub struct StackOrchestrator {
     state: Arc<StateManager>,
     adapter: Arc<dyn VmmAdapter>,
-    ip_allocator: tokio::sync::Mutex<SimpleIpAllocator>,
+    network_mgr: Arc<NetworkManager>,
     stacks: tokio::sync::RwLock<HashMap<String, StackInfo>>,
 }
 
 impl StackOrchestrator {
     /// Create a new stack orchestrator.
-    pub fn new(state: Arc<StateManager>, adapter: Arc<dyn VmmAdapter>) -> Self {
-        Self {
-            state,
-            adapter,
-            ip_allocator: tokio::sync::Mutex::new(SimpleIpAllocator::new()),
-            stacks: tokio::sync::RwLock::new(HashMap::new()),
-        }
+    ///
+    /// # Arguments
+    /// * `state` - State manager for persistence
+    /// * `adapter` - VMM adapter for VM lifecycle
+    /// * `network_mgr` - Network manager for IP allocation and port forwarding
+    pub fn new(
+        state: Arc<StateManager>,
+        adapter: Arc<dyn VmmAdapter>,
+        network_mgr: Arc<NetworkManager>,
+    ) -> Self {
+        Self { state, adapter, network_mgr, stacks: tokio::sync::RwLock::new(HashMap::new()) }
     }
 
     /// Deploy a stack from a docker-compose file (non-streaming version).
@@ -160,9 +179,10 @@ impl StackOrchestrator {
             services: Vec::new(),
             created_at: SystemTime::now(),
             state: StackState::Deploying,
+            compose_path: None,
         };
 
-        // Store initial stack state
+        // Store initial stack state in memory
         {
             let mut stacks = self.stacks.write().await;
             stacks.insert(stack_id.clone(), stack_info.clone());
@@ -174,9 +194,16 @@ impl StackOrchestrator {
                 stack_info.services = services;
                 stack_info.state = StackState::Running;
 
-                // Update stack state
-                let mut stacks = self.stacks.write().await;
-                stacks.insert(stack_id.clone(), stack_info);
+                // Update in-memory state
+                {
+                    let mut stacks = self.stacks.write().await;
+                    stacks.insert(stack_id.clone(), stack_info.clone());
+                }
+
+                // Persist to database
+                if let Err(e) = self.state.insert_stack(&stack_info.to_stack()).await {
+                    warn!(stack_id = %stack_id, error = %e, "Failed to persist stack to database");
+                }
 
                 info!(stack_id = %stack_id, "Stack deployed successfully");
                 Ok(stack_id)
@@ -232,6 +259,9 @@ impl StackOrchestrator {
 
         info!(stack_id = %stack_id, stack_name = %stack_config.name, "Generated stack ID");
 
+        // Get compose path as string for persistence
+        let compose_path_str = compose_file_path.as_ref().to_string_lossy().to_string();
+
         // Create stack info
         let mut stack_info = StackInfo {
             id: stack_id.clone(),
@@ -239,9 +269,10 @@ impl StackOrchestrator {
             services: Vec::new(),
             created_at: SystemTime::now(),
             state: StackState::Deploying,
+            compose_path: Some(compose_path_str),
         };
 
-        // Store initial stack state
+        // Store initial stack state in memory
         {
             let mut stacks = self.stacks.write().await;
             stacks.insert(stack_id.clone(), stack_info.clone());
@@ -254,8 +285,16 @@ impl StackOrchestrator {
                 stack_info.services = services;
                 stack_info.state = StackState::Running;
 
-                let mut stacks = self.stacks.write().await;
-                stacks.insert(stack_id.clone(), stack_info);
+                // Update in-memory state
+                {
+                    let mut stacks = self.stacks.write().await;
+                    stacks.insert(stack_id.clone(), stack_info.clone());
+                }
+
+                // Persist to database
+                if let Err(e) = self.state.insert_stack(&stack_info.to_stack()).await {
+                    warn!(stack_id = %stack_id, error = %e, "Failed to persist stack to database");
+                }
 
                 info!(stack_id = %stack_id, "Stack deployed successfully");
                 Ok(stack_id)
@@ -333,16 +372,15 @@ impl StackOrchestrator {
 
             info!(service = %service.name, "Creating VM for service");
 
-            // Allocate IP
-            let mut allocator = self.ip_allocator.lock().await;
-            let ip = allocator.allocate(service.vm_config.id.clone());
-            drop(allocator);
+            // Allocate IP using the network manager (persistent allocation)
+            let ip = self.network_mgr.allocate_ip(&service.vm_config.id).await.map_err(|e| {
+                error!(service = %service.name, error = %e, "Failed to allocate IP");
+                e
+            })?;
 
-            // Create VM config with allocated IP (will be passed to network setup)
+            // Create VM config with allocated IP
             let mut vm_config = service.vm_config.clone();
-            if let IpAddr::V4(ipv4) = ip {
-                vm_config.network.ip_address = Some(ipv4);
-            }
+            vm_config.network.ip_address = Some(ip);
 
             // Get image reference from service config
             let image_ref = if !service.image.is_empty() {
@@ -439,27 +477,20 @@ impl StackOrchestrator {
                     manifest = manifest.with_workdir(workdir.clone());
                 }
 
-                // Add network configuration
-                // Gateway is platform-specific
-                #[cfg(target_os = "linux")]
-                let gateway = "10.88.0.1";
-                #[cfg(target_os = "macos")]
-                let gateway = "192.168.64.1";
-                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-                let gateway = "10.88.0.1";
-
+                // Add network configuration using platform-aware defaults
+                let net_defaults = hypr_core::network_defaults();
                 manifest = manifest.with_network(ManifestNetworkConfig {
                     ip: ip.to_string(),
-                    netmask: "255.255.255.0".to_string(),
-                    gateway: gateway.to_string(),
-                    dns: vec!["8.8.8.8".to_string(), "1.1.1.1".to_string()],
+                    netmask: net_defaults.netmask_str.to_string(),
+                    gateway: net_defaults.gateway.to_string(),
+                    dns: net_defaults.dns_servers.iter().map(|s| (*s).to_string()).collect(),
                 });
 
                 // Set up volumes via virtiofs
                 if !vm_config.volumes.is_empty() {
                     use hypr_core::manifest::VolumeConfig as ManifestVolumeConfig;
 
-                    let volumes_base = hypr_core::paths::data_dir().join("volumes").join(&stack_id);
+                    let volumes_base = hypr_core::paths::data_dir().join("volumes").join(stack_id);
                     std::fs::create_dir_all(&volumes_base).map_err(|e| {
                         HyprError::IoError { path: volumes_base.clone(), source: e }
                     })?;
@@ -543,11 +574,43 @@ impl StackOrchestrator {
             // Update status
             self.state.update_vm_status(&vm.id, VmStatus::Running).await?;
 
+            // Set up port forwarding for this VM
+            for port in &vm_config.ports {
+                if let Err(e) = self
+                    .network_mgr
+                    .add_port_forward(
+                        port.host_port,
+                        ip,
+                        port.vm_port,
+                        port.protocol,
+                        vm.id.clone(),
+                    )
+                    .await
+                {
+                    warn!(
+                        service = %service.name,
+                        vm_id = %vm.id,
+                        host_port = port.host_port,
+                        vm_port = port.vm_port,
+                        error = %e,
+                        "Failed to set up port forwarding"
+                    );
+                } else {
+                    info!(
+                        service = %service.name,
+                        vm_id = %vm.id,
+                        host_port = port.host_port,
+                        vm_port = port.vm_port,
+                        "Port forwarding configured"
+                    );
+                }
+            }
+
             service_statuses.push(ServiceStatus {
                 name: service.name.clone(),
                 vm_id: vm.id.clone(),
                 status: VmStatus::Running,
-                ip: Some(ip),
+                ip: Some(IpAddr::V4(ip)),
             });
 
             info!(service = %service.name, vm_id = %vm.id, ip = %ip, "Service started successfully");
@@ -584,15 +647,14 @@ impl StackOrchestrator {
             )
             .await;
 
-            // Allocate IP
-            let mut allocator = self.ip_allocator.lock().await;
-            let ip = allocator.allocate(service.vm_config.id.clone());
-            drop(allocator);
+            // Allocate IP using the network manager (persistent allocation)
+            let ip = self.network_mgr.allocate_ip(&service.vm_config.id).await.map_err(|e| {
+                error!(service = %service.name, error = %e, "Failed to allocate IP");
+                e
+            })?;
 
             let mut vm_config = service.vm_config.clone();
-            if let std::net::IpAddr::V4(ipv4) = ip {
-                vm_config.network.ip_address = Some(ipv4);
-            }
+            vm_config.network.ip_address = Some(ip);
 
             // Get image
             let image_ref = &service.image;
@@ -693,26 +755,20 @@ impl StackOrchestrator {
                     manifest = manifest.with_workdir(workdir.clone());
                 }
 
-                // Gateway is platform-specific
-                #[cfg(target_os = "linux")]
-                let gateway = "10.88.0.1";
-                #[cfg(target_os = "macos")]
-                let gateway = "192.168.64.1";
-                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-                let gateway = "10.88.0.1";
-
+                // Add network configuration using platform-aware defaults
+                let net_defaults = hypr_core::network_defaults();
                 manifest = manifest.with_network(ManifestNetworkConfig {
                     ip: ip.to_string(),
-                    netmask: "255.255.255.0".to_string(),
-                    gateway: gateway.to_string(),
-                    dns: vec!["8.8.8.8".to_string(), "1.1.1.1".to_string()],
+                    netmask: net_defaults.netmask_str.to_string(),
+                    gateway: net_defaults.gateway.to_string(),
+                    dns: net_defaults.dns_servers.iter().map(|s| (*s).to_string()).collect(),
                 });
 
                 // Set up volumes via virtiofs
                 if !vm_config.volumes.is_empty() {
                     use hypr_core::manifest::VolumeConfig as ManifestVolumeConfig;
 
-                    let volumes_base = hypr_core::paths::data_dir().join("volumes").join(&stack_id);
+                    let volumes_base = hypr_core::paths::data_dir().join("volumes").join(stack_id);
                     std::fs::create_dir_all(&volumes_base).map_err(|e| {
                         HyprError::IoError { path: volumes_base.clone(), source: e }
                     })?;
@@ -794,6 +850,30 @@ impl StackOrchestrator {
             created_vms.push((vm.id.clone(), handle));
             self.state.update_vm_status(&vm.id, VmStatus::Running).await?;
 
+            // Set up port forwarding for this VM
+            for port in &vm_config.ports {
+                if let Err(e) = self
+                    .network_mgr
+                    .add_port_forward(
+                        port.host_port,
+                        ip,
+                        port.vm_port,
+                        port.protocol,
+                        vm.id.clone(),
+                    )
+                    .await
+                {
+                    warn!(
+                        service = %service.name,
+                        vm_id = %vm.id,
+                        host_port = port.host_port,
+                        vm_port = port.vm_port,
+                        error = %e,
+                        "Failed to set up port forwarding"
+                    );
+                }
+            }
+
             // Progress: running
             Self::send_progress(
                 progress_tx,
@@ -807,7 +887,7 @@ impl StackOrchestrator {
                 name: service.name.clone(),
                 vm_id: vm.id.clone(),
                 status: VmStatus::Running,
-                ip: Some(ip),
+                ip: Some(IpAddr::V4(ip)),
             });
         }
 
@@ -836,6 +916,11 @@ impl StackOrchestrator {
             if let Ok(vm) = self.state.get_vm(&service.vm_id).await {
                 let handle = VmHandle { id: vm.id.clone(), pid: vm.pid, socket_path: None };
 
+                // Remove port forwards for this VM
+                if let Err(e) = self.network_mgr.remove_vm_port_forwards(&vm.id).await {
+                    warn!(vm_id = %vm.id, error = %e, "Failed to remove port forwards");
+                }
+
                 // Stop VM (30 second timeout)
                 let timeout = Duration::from_secs(30);
                 if let Err(e) = self.adapter.stop(&handle, timeout).await {
@@ -851,9 +936,10 @@ impl StackOrchestrator {
                     error!(vm_id = %vm.id, error = %e, "Failed to delete VM");
                 }
 
-                // Release IP
-                let mut allocator = self.ip_allocator.lock().await;
-                allocator.release(&vm.id);
+                // Release IP (uses network manager for persistent tracking)
+                if let Err(e) = self.network_mgr.release_ip(&vm.id).await {
+                    warn!(vm_id = %vm.id, error = %e, "Failed to release IP");
+                }
 
                 // Delete from state
                 if let Err(e) = self.state.delete_vm(&vm.id).await {
@@ -862,10 +948,15 @@ impl StackOrchestrator {
             }
         }
 
-        // Remove stack from tracking
+        // Remove stack from in-memory tracking
         {
             let mut stacks = self.stacks.write().await;
             stacks.remove(stack_id);
+        }
+
+        // Delete from database
+        if let Err(e) = self.state.delete_stack(stack_id).await {
+            warn!(stack_id = %stack_id, error = %e, "Failed to delete stack from database");
         }
 
         info!(stack_id = %stack_id, "Stack destroyed successfully");
@@ -885,6 +976,9 @@ impl StackOrchestrator {
         for vm in stack_vms {
             let handle = VmHandle { id: vm.id.clone(), pid: vm.pid, socket_path: None };
 
+            // Remove port forwards for this VM
+            let _ = self.network_mgr.remove_vm_port_forwards(&vm.id).await;
+
             // Try to stop
             let _ = self.adapter.stop(&handle, Duration::from_secs(5)).await;
 
@@ -893,9 +987,10 @@ impl StackOrchestrator {
                 warn!(vm_id = %vm.id, error = %e, "Failed to delete VM during rollback");
             }
 
-            // Release IP
-            let mut allocator = self.ip_allocator.lock().await;
-            allocator.release(&vm.id);
+            // Release IP (uses network manager for persistent tracking)
+            if let Err(e) = self.network_mgr.release_ip(&vm.id).await {
+                warn!(vm_id = %vm.id, error = %e, "Failed to release IP during rollback");
+            }
 
             // Delete from state
             if let Err(e) = self.state.delete_vm(&vm.id).await {
@@ -907,15 +1002,98 @@ impl StackOrchestrator {
     }
 
     /// List all stacks.
+    ///
+    /// Returns stacks from both in-memory cache and database.
     pub async fn list_stacks(&self) -> Vec<StackInfo> {
-        let stacks = self.stacks.read().await;
-        stacks.values().cloned().collect()
+        // First, check in-memory cache
+        let mut stacks_map: HashMap<String, StackInfo> = {
+            let stacks = self.stacks.read().await;
+            stacks.clone()
+        };
+
+        // Also load from database (for stacks that survived daemon restart)
+        if let Ok(db_stacks) = self.state.list_stacks().await {
+            for db_stack in db_stacks {
+                if !stacks_map.contains_key(&db_stack.id) {
+                    // Determine state by checking if VMs are running
+                    let state = self.determine_stack_state(&db_stack).await;
+                    stacks_map.insert(db_stack.id.clone(), StackInfo::from_stack(db_stack, state));
+                }
+            }
+        }
+
+        stacks_map.into_values().collect()
     }
 
     /// Get a specific stack by ID.
+    ///
+    /// Checks both in-memory cache and database.
     pub async fn get_stack(&self, stack_id: &str) -> Option<StackInfo> {
-        let stacks = self.stacks.read().await;
-        stacks.get(stack_id).cloned()
+        // First check in-memory cache
+        {
+            let stacks = self.stacks.read().await;
+            if let Some(stack) = stacks.get(stack_id) {
+                return Some(stack.clone());
+            }
+        }
+
+        // Fall back to database
+        if let Ok(db_stack) = self.state.get_stack(stack_id).await {
+            let state = self.determine_stack_state(&db_stack).await;
+            return Some(StackInfo::from_stack(db_stack, state));
+        }
+
+        None
+    }
+
+    /// Determine stack state by checking VM statuses.
+    async fn determine_stack_state(&self, stack: &Stack) -> StackState {
+        let total = stack.services.len();
+        let mut running = 0;
+        let mut failed = 0;
+
+        for service in &stack.services {
+            if let Ok(vm) = self.state.get_vm(&service.vm_id).await {
+                match vm.status {
+                    VmStatus::Running => running += 1,
+                    VmStatus::Failed => failed += 1,
+                    _ => {}
+                }
+            }
+        }
+
+        if running == total && total > 0 {
+            StackState::Running
+        } else if failed > 0 {
+            StackState::Failed
+        } else if running > 0 {
+            StackState::Partial
+        } else {
+            StackState::Stopped
+        }
+    }
+
+    /// Load stacks from database on startup.
+    ///
+    /// Call this after creating the orchestrator to restore state from previous session.
+    #[allow(dead_code)]
+    pub async fn load_from_database(&self) {
+        debug!("Loading stacks from database");
+
+        match self.state.list_stacks().await {
+            Ok(db_stacks) => {
+                let mut stacks = self.stacks.write().await;
+                for db_stack in db_stacks {
+                    let state = StackState::Running; // Assume running, will be updated on first list
+                    let stack_info = StackInfo::from_stack(db_stack, state);
+                    info!(stack_id = %stack_info.id, name = %stack_info.name, "Loaded stack from database");
+                    stacks.insert(stack_info.id.clone(), stack_info);
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to load stacks from database");
+            }
+        }
     }
 
     /// Perform topological sort on services based on dependencies.
@@ -1056,19 +1234,8 @@ mod tests {
         // assert!(result.unwrap_err().to_string().contains("non-existent"));
     }
 
-    #[test]
-    fn test_ip_allocator() {
-        let mut allocator = SimpleIpAllocator::new();
-
-        let ip1 = allocator.allocate("vm1".to_string());
-        let ip2 = allocator.allocate("vm2".to_string());
-
-        assert_ne!(ip1, ip2);
-        assert_eq!(allocator.allocated.len(), 2);
-
-        allocator.release("vm1");
-        assert_eq!(allocator.allocated.len(), 1);
-    }
+    // Note: IP allocation tests are now in hypr_core::network::ipam tests
+    // since the StackOrchestrator uses NetworkManager's IpAllocator
 
     // Helper functions for tests - using async runtime for test setup
     #[allow(dead_code)]
@@ -1107,6 +1274,7 @@ mod tests {
             healthcheck: None,
             entrypoint: vec![],
             workdir: String::new(),
+            networks: vec![],
         }
     }
 }

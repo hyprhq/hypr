@@ -83,6 +83,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     health_checker.register_subsystem("networking".to_string()).await;
 
+    // Start DNS server for service discovery (*.hypr domains)
+    network_mgr.start_dns_server();
+
     // Reconcile state from previous run
     info!("Reconciling state from previous session...");
     let reconciler =
@@ -90,10 +93,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match reconciler.reconcile().await {
         Ok(report) => {
-            if report.orphaned > 0 || report.orphaned_taps > 0 || report.orphaned_vfio > 0 {
+            if report.orphaned > 0
+                || report.orphaned_taps > 0
+                || report.orphaned_vfio > 0
+                || report.orphaned_virtiofsd > 0
+            {
                 info!(
-                    "Reconciliation cleaned up orphaned resources: {} VMs, {} TAPs, {} VFIO bindings",
-                    report.orphaned, report.orphaned_taps, report.orphaned_vfio
+                    "Reconciliation cleaned up orphaned resources: {} VMs, {} TAPs, {} VFIO, {} virtiofsd",
+                    report.orphaned, report.orphaned_taps, report.orphaned_vfio, report.orphaned_virtiofsd
                 );
             }
             info!("State reconciliation complete: {} running VMs", report.running);

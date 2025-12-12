@@ -7,7 +7,9 @@
 //! - hypr volume inspect
 //! - hypr volume prune
 
+use crate::client::HyprClient;
 use anyhow::{Context, Result};
+use hypr_core::types::VmStatus;
 use std::fs;
 use std::path::PathBuf;
 use tabled::{Table, Tabled};
@@ -15,6 +17,81 @@ use tabled::{Table, Tabled};
 /// Get the volumes directory path
 fn volumes_dir() -> PathBuf {
     hypr_core::paths::data_dir().join("volumes")
+}
+
+/// Check if a volume is in use by any running VM.
+///
+/// Returns the list of VM names using this volume.
+async fn check_volume_in_use(volume_name: &str) -> Result<Vec<String>> {
+    // Try to connect to daemon - if daemon isn't running, assume volume is not in use
+    let client = match HyprClient::connect().await {
+        Ok(c) => c,
+        Err(_) => return Ok(vec![]), // Daemon not running, can't check
+    };
+
+    let mut client = client;
+    let vms = match client.list_vms().await {
+        Ok(v) => v,
+        Err(_) => return Ok(vec![]), // Can't list VMs, assume not in use
+    };
+
+    let mut using_vms = Vec::new();
+
+    // Get the full path for volume name resolution
+    let vol_dir = volumes_dir();
+    let local_vol_path = vol_dir.join("local").join(volume_name);
+
+    // Check stack volume path too (stack_name_volume_name format)
+    let stack_vol_path = if volume_name.contains('_') {
+        let parts: Vec<&str> = volume_name.splitn(2, '_').collect();
+        if parts.len() == 2 {
+            Some(vol_dir.join(parts[0]).join(parts[1]))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    for vm in vms {
+        // Only check running VMs
+        if vm.status != VmStatus::Running {
+            continue;
+        }
+
+        for vol in &vm.config.volumes {
+            // Check if source matches the volume name or path
+            let source = &vol.source;
+
+            // Direct name match
+            if source == volume_name {
+                using_vms.push(vm.name.clone());
+                break;
+            }
+
+            // Path-based match (for local volumes)
+            if local_vol_path.exists() {
+                let local_str = local_vol_path.to_string_lossy();
+                if source == local_str.as_ref() || source.starts_with(local_str.as_ref()) {
+                    using_vms.push(vm.name.clone());
+                    break;
+                }
+            }
+
+            // Stack volume path match
+            if let Some(ref stack_path) = stack_vol_path {
+                if stack_path.exists() {
+                    let stack_str = stack_path.to_string_lossy();
+                    if source == stack_str.as_ref() || source.starts_with(stack_str.as_ref()) {
+                        using_vms.push(vm.name.clone());
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(using_vms)
 }
 
 /// List all volumes
@@ -100,12 +177,21 @@ pub async fn create(name: &str) -> Result<()> {
 pub async fn rm(name: &str, force: bool) -> Result<()> {
     let vol_dir = volumes_dir();
 
+    // Check if volume is in use (unless --force)
+    if !force {
+        let using_vms = check_volume_in_use(name).await?;
+        if !using_vms.is_empty() {
+            anyhow::bail!(
+                "Volume '{}' is in use by: {}. Use --force to remove anyway.",
+                name,
+                using_vms.join(", ")
+            );
+        }
+    }
+
     // Try local volume first
     let local_path = vol_dir.join("local").join(name);
     if local_path.exists() {
-        if !force {
-            // Check if volume is in use (TODO: check running VMs)
-        }
         fs::remove_dir_all(&local_path)
             .with_context(|| format!("Failed to remove volume: {}", name))?;
         println!("{}", name);
@@ -118,9 +204,6 @@ pub async fn rm(name: &str, force: bool) -> Result<()> {
         if parts.len() == 2 {
             let stack_path = vol_dir.join(parts[0]).join(parts[1]);
             if stack_path.exists() {
-                if !force {
-                    // Check if volume is in use
-                }
                 fs::remove_dir_all(&stack_path)
                     .with_context(|| format!("Failed to remove volume: {}", name))?;
                 println!("{}", name);
@@ -231,11 +314,16 @@ pub async fn prune(force: bool) -> Result<()> {
                 continue;
             }
 
-            // TODO: Check if volume is in use by any running VM
-            // For now, prune all local volumes
-            let size = dir_size(&path)?;
             let name = entry.file_name().to_string_lossy().to_string();
 
+            // Check if volume is in use by any running VM
+            let using_vms = check_volume_in_use(&name).await?;
+            if !using_vms.is_empty() {
+                // Skip volumes in use
+                continue;
+            }
+
+            let size = dir_size(&path)?;
             fs::remove_dir_all(&path)?;
             removed.push(name);
             total_reclaimed += size;

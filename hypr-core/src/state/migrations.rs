@@ -4,7 +4,7 @@ use crate::error::{HyprError, Result};
 use sqlx::SqlitePool;
 use tracing::{info, instrument};
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 #[instrument(skip(pool))]
 pub async fn run(pool: &SqlitePool) -> Result<()> {
@@ -47,6 +47,10 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
 
     if current_version < 3 {
         migrate_to_v3(pool).await?;
+    }
+
+    if current_version < 4 {
+        migrate_to_v4(pool).await?;
     }
 
     Ok(())
@@ -284,5 +288,46 @@ async fn migrate_to_v3(pool: &SqlitePool) -> Result<()> {
         .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
 
     info!("Migration to schema version 3 complete");
+    Ok(())
+}
+
+/// Migration to schema version 4: Add driver and gateway to networks table.
+async fn migrate_to_v4(pool: &SqlitePool) -> Result<()> {
+    info!("Running migration to schema version 4");
+
+    // Add driver column with default 'bridge'
+    sqlx::query(
+        r#"
+        ALTER TABLE networks ADD COLUMN driver TEXT NOT NULL DEFAULT 'bridge'
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    // Add gateway column (derived from CIDR - first usable IP)
+    // For existing networks, we'll default to .1 of the subnet
+    sqlx::query(
+        r#"
+        ALTER TABLE networks ADD COLUMN gateway TEXT NOT NULL DEFAULT '10.88.0.1'
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    // Update schema version
+    sqlx::query("DELETE FROM schema_version")
+        .execute(pool)
+        .await
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    sqlx::query("INSERT INTO schema_version (version) VALUES (?)")
+        .bind(4i64)
+        .execute(pool)
+        .await
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    info!("Migration to schema version 4 complete");
     Ok(())
 }

@@ -307,7 +307,7 @@ main() {
             setup_systemd
             ;;
         darwin)
-            setup_launcnhdaemon
+            setup_launchdaemon
             ;;
     esac
 

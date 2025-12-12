@@ -5,6 +5,8 @@
 #[cfg(target_os = "linux")]
 use super::*;
 #[cfg(target_os = "linux")]
+use crate::network::defaults;
+#[cfg(target_os = "linux")]
 use tokio::process::Command;
 #[cfg(target_os = "linux")]
 use tracing::{info, instrument, warn};
@@ -179,20 +181,12 @@ impl BridgeManager for LinuxBridgeManager {
         let default_iface = self.detect_default_interface().await?;
         info!("Using default interface: {}", default_iface);
 
+        // Get CIDR from centralized defaults
+        let network_cidr = defaults::cidr();
+
         // Check if MASQUERADE rule exists
         let output = Command::new("iptables")
-            .args([
-                "-t",
-                "nat",
-                "-C",
-                "POSTROUTING",
-                "-s",
-                "10.88.0.0/16",
-                "-o",
-                &default_iface,
-                "-j",
-                "MASQUERADE",
-            ])
+            .args(["-t", "nat", "-C", "POSTROUTING", "-s", network_cidr, "-o", &default_iface, "-j", "MASQUERADE"])
             .output()
             .await
             .map_err(|e| HyprError::NetworkSetupFailed {
@@ -203,18 +197,7 @@ impl BridgeManager for LinuxBridgeManager {
         if !output.status.success() {
             // Add the MASQUERADE rule
             let output = Command::new("iptables")
-                .args([
-                    "-t",
-                    "nat",
-                    "-A",
-                    "POSTROUTING",
-                    "-s",
-                    "10.88.0.0/16",
-                    "-o",
-                    &default_iface,
-                    "-j",
-                    "MASQUERADE",
-                ])
+                .args(["-t", "nat", "-A", "POSTROUTING", "-s", network_cidr, "-o", &default_iface, "-j", "MASQUERADE"])
                 .output()
                 .await
                 .map_err(|e| HyprError::NetworkSetupFailed {
@@ -227,9 +210,9 @@ impl BridgeManager for LinuxBridgeManager {
                 });
             }
 
-            info!("NAT MASQUERADE rule added");
+            info!("NAT MASQUERADE rule added for {}", network_cidr);
         } else {
-            info!("NAT MASQUERADE rule already exists");
+            info!("NAT MASQUERADE rule already exists for {}", network_cidr);
         }
 
         // Allow forwarding from bridge

@@ -3,7 +3,7 @@
 //! Manages all networking concerns: IP allocation, port forwarding, DNS, and service registry.
 
 use hypr_core::network::{
-    IpAllocator, PortForwarder, PortMapping, ProxyForwarder, ServiceRegistry,
+    DnsServer, IpAllocator, PortForwarder, PortMapping, ProxyForwarder, ServiceRegistry,
 };
 use hypr_core::types::network::Protocol;
 use hypr_core::{Result, StateManager};
@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{info, instrument};
+use tracing::{error, info, instrument};
 
 #[cfg(target_os = "linux")]
 use hypr_core::network::{EbpfForwarder, HybridForwarder};
@@ -181,6 +181,39 @@ impl NetworkManager {
     #[allow(dead_code)]
     pub fn list_port_mappings(&self) -> Vec<PortMapping> {
         self.port_forwarder.list_mappings()
+    }
+
+    /// Start the DNS server for service discovery.
+    ///
+    /// The DNS server listens on the gateway IP (e.g., 10.88.0.1:53 on Linux,
+    /// 192.168.64.1:53 on macOS) and resolves `*.hypr` domains to VM IPs.
+    ///
+    /// # Note
+    ///
+    /// This spawns a background task that runs until the daemon shuts down.
+    /// The server will return errors if it cannot bind to port 53 (requires root).
+    #[instrument(skip(self))]
+    pub fn start_dns_server(&self) {
+        if let Some(bind_ip) = self.dns_bind_addr {
+            let registry = self.service_registry.clone();
+
+            // Upstream DNS servers for non-.hypr queries
+            let upstream = vec![
+                IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+                IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+            ];
+
+            tokio::spawn(async move {
+                let dns_server = DnsServer::new(bind_ip, 53, registry, upstream);
+
+                info!("Starting DNS server on {}:53", bind_ip);
+                if let Err(e) = dns_server.start().await {
+                    error!("DNS server failed: {} (service discovery may not work)", e);
+                }
+            });
+        } else {
+            info!("DNS server disabled (no bind address configured)");
+        }
     }
 }
 

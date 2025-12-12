@@ -49,8 +49,8 @@ pub struct StackConfig {
     /// Volume configurations
     pub volumes: Vec<VolumeConfig>,
 
-    /// Network configuration
-    pub network: NetworkStackConfig,
+    /// Network configurations (multiple networks supported)
+    pub networks: Vec<NetworkStackConfig>,
 }
 
 /// Service configuration within a stack.
@@ -79,6 +79,10 @@ pub struct ServiceConfig {
     /// Working directory
     #[serde(default)]
     pub workdir: String,
+
+    /// Networks this service connects to
+    #[serde(default)]
+    pub networks: Vec<String>,
 }
 
 /// Volume configuration.
@@ -112,6 +116,10 @@ pub struct NetworkStackConfig {
 
     /// Subnet CIDR
     pub subnet: String,
+
+    /// Gateway IP address
+    #[serde(default)]
+    pub gateway: String,
 }
 
 /// Health check configuration.

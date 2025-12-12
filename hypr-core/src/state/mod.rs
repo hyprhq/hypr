@@ -9,7 +9,7 @@
 
 use crate::error::{HyprError, Result};
 use crate::types::volume::VolumeType;
-use crate::types::{Image, Network, Stack, Vm, Volume};
+use crate::types::{Image, Network, NetworkDriver, Stack, Vm, Volume};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use sqlx::{ConnectOptions, Row};
 use std::path::Path;
@@ -479,13 +479,15 @@ impl StateManager {
 
         sqlx::query(
             r#"
-            INSERT INTO networks (id, name, cidr, bridge_name, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO networks (id, name, driver, cidr, gateway, bridge_name, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&network.id)
         .bind(&network.name)
+        .bind(network.driver.to_string())
         .bind(&network.cidr)
+        .bind(network.gateway.to_string())
         .bind(&network.bridge_name)
         .bind(created_at)
         .execute(&self.pool)
@@ -532,14 +534,26 @@ impl StateManager {
     }
 
     fn row_to_network(&self, row: sqlx::sqlite::SqliteRow) -> Result<Network> {
+        use std::str::FromStr;
+        
         let created_at_secs: i64 = row.get("created_at");
         let created_at =
             SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(created_at_secs as u64);
 
+        let driver_str: String = row.get("driver");
+        let driver = NetworkDriver::from_str(&driver_str)
+            .map_err(HyprError::DatabaseError)?;
+
+        let gateway_str: String = row.get("gateway");
+        let gateway: std::net::Ipv4Addr = gateway_str.parse()
+            .map_err(|e: std::net::AddrParseError| HyprError::DatabaseError(e.to_string()))?;
+
         Ok(Network {
             id: row.get("id"),
             name: row.get("name"),
+            driver,
             cidr: row.get("cidr"),
+            gateway,
             bridge_name: row.get("bridge_name"),
             created_at,
         })

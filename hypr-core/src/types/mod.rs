@@ -8,7 +8,7 @@ pub mod volume;
 
 // Re-exports
 pub use image::{Image, ImageManifest};
-pub use network::{Network, NetworkConfig, PortMapping, Protocol};
+pub use network::{Network, NetworkConfig, NetworkDriver, PortMapping, Protocol};
 pub use stack::{
     HealthCheck, NetworkStackConfig, Service, ServiceConfig, Stack, StackConfig, VolumeConfig,
     VolumeSource,

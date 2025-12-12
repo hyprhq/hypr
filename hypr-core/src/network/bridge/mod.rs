@@ -8,6 +8,7 @@ pub mod macos;
 
 #[allow(unused_imports)]
 use crate::error::{HyprError, Result};
+use crate::network::defaults;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tracing::{info, instrument};
@@ -36,10 +37,11 @@ pub struct BridgeConfig {
 
 impl Default for BridgeConfig {
     fn default() -> Self {
+        let net = defaults::defaults();
         Self {
             name: "vbr0".to_string(),
-            ip: Ipv4Addr::new(10, 88, 0, 1),
-            netmask: Ipv4Addr::new(255, 255, 0, 0), // /16
+            ip: net.gateway,
+            netmask: net.netmask,
             mtu: 1500,
         }
     }
@@ -142,9 +144,11 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = BridgeConfig::default();
+        let net = defaults::defaults();
+
         assert_eq!(config.name, "vbr0");
-        assert_eq!(config.ip, Ipv4Addr::new(10, 88, 0, 1));
-        assert_eq!(config.netmask, Ipv4Addr::new(255, 255, 0, 0));
+        assert_eq!(config.ip, net.gateway);
+        assert_eq!(config.netmask, net.netmask);
         assert_eq!(config.mtu, 1500);
     }
 
