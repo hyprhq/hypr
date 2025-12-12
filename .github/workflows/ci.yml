@@ -28,7 +28,7 @@ jobs:
       - name: Install system dependencies
         run: |
           if [ "$RUNNER_OS" == "macOS" ]; then
-            brew install protobuf libffi lld xz libepoxy
+            brew install protobuf libffi lld xz libepoxy slp/krun/virglrenderer
             # Set up pkg-config for keg-only packages
             echo "PKG_CONFIG_PATH=/opt/homebrew/opt/libffi/lib/pkgconfig:/opt/homebrew/opt/libepoxy/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
           elif [ "$RUNNER_OS" == "Linux" ]; then
