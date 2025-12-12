@@ -254,7 +254,7 @@ impl CloudHypervisorAdapter {
             // Wait for socket to be created (virtiofsd creates it on startup)
             let start = Instant::now();
             while !socket_path.exists() {
-                if start.elapsed() > Duration::from_secs(15) {
+                if start.elapsed() > Duration::from_secs(30) {
                     // Kill the daemon
                     let _ = child.kill().await;
                     return Err(HyprError::Internal(format!(
@@ -707,9 +707,9 @@ impl VmmAdapter for CloudHypervisorAdapter {
             reason: "Failed to get process ID".to_string(),
         })?;
 
-        // Wait for API socket (30s timeout to allow for large rootfs loading)
+        // Wait for API socket (120s timeout - multiple VMs starting simultaneously can be slow)
         let api_socket = self.api_socket_path(&config.id);
-        self.wait_for_api_socket(&api_socket, Duration::from_secs(30)).await?;
+        self.wait_for_api_socket(&api_socket, Duration::from_secs(120)).await?;
 
         // Record metrics
         let histogram =

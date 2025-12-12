@@ -10,6 +10,7 @@ pub mod ps;
 pub mod pull;
 pub mod run;
 pub mod system;
+pub mod volume;
 
 pub use images::images;
 pub use logs::logs;

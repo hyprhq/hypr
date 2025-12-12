@@ -4,7 +4,7 @@ pub mod runtime_manifest;
 
 pub use runtime_manifest::{
     HealthCheckConfig, HealthCheckType, NetworkConfig, RestartPolicy, RuntimeManifest,
-    WorkloadConfig,
+    VolumeConfig, WorkloadConfig,
 };
 
 use crate::error::{HyprError, Result};

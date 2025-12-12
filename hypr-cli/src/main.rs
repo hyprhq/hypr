@@ -161,6 +161,45 @@ enum Commands {
     /// System maintenance commands
     #[command(subcommand)]
     System(SystemCommands),
+
+    /// Volume management commands
+    #[command(subcommand)]
+    Volume(VolumeCommands),
+}
+
+#[derive(Subcommand)]
+enum VolumeCommands {
+    /// List volumes
+    Ls,
+
+    /// Create a volume
+    Create {
+        /// Volume name
+        name: String,
+    },
+
+    /// Remove a volume
+    Rm {
+        /// Volume name
+        name: String,
+
+        /// Force removal (don't check if in use)
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Display detailed information on a volume
+    Inspect {
+        /// Volume name
+        name: String,
+    },
+
+    /// Remove all unused local volumes
+    Prune {
+        /// Do not prompt for confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -450,6 +489,24 @@ async fn main() -> Result<()> {
             }
             SystemCommands::Df => {
                 commands::system::df().await?;
+            }
+        },
+
+        Commands::Volume(volume_cmd) => match volume_cmd {
+            VolumeCommands::Ls => {
+                commands::volume::ls().await?;
+            }
+            VolumeCommands::Create { name } => {
+                commands::volume::create(&name).await?;
+            }
+            VolumeCommands::Rm { name, force } => {
+                commands::volume::rm(&name, force).await?;
+            }
+            VolumeCommands::Inspect { name } => {
+                commands::volume::inspect(&name).await?;
+            }
+            VolumeCommands::Prune { force } => {
+                commands::volume::prune(force).await?;
             }
         },
     }

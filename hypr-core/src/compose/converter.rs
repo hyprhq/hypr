@@ -589,15 +589,10 @@ impl ComposeConverter {
 
         let rootfs = DiskConfig { path: rootfs_path, readonly: true, format: DiskFormat::Squashfs };
 
-        // Parse volume mounts (as disks for now)
-        let mut disks = vec![rootfs];
-        for volume_spec in &service.volumes {
-            if let Some(disk) = Self::parse_volume_mount(volume_spec) {
-                disks.push(disk);
-            }
-        }
+        // Only rootfs goes in disks - volumes are handled via virtiofs
+        let disks = vec![rootfs];
 
-        // Parse volume mounts for VmConfig
+        // Parse volume mounts (will be converted to virtiofs by orchestrator)
         let volumes = Self::parse_volume_mounts(&service.volumes);
 
         // Generate unique VM ID
@@ -731,27 +726,6 @@ impl ComposeConverter {
         }
 
         Ok(mappings)
-    }
-
-    /// Parse a single volume mount spec into a disk config.
-    fn parse_volume_mount(spec: &str) -> Option<DiskConfig> {
-        // Format: "HOST:GUEST" or "HOST:GUEST:ro" or "NAME:GUEST"
-        let parts: Vec<&str> = spec.split(':').collect();
-
-        if parts.len() >= 2 {
-            let readonly = parts.get(2) == Some(&"ro");
-
-            // For now, create a disk config pointing to the source
-            // The actual path resolution will happen at runtime
-            Some(DiskConfig {
-                path: PathBuf::from(parts[0]),
-                readonly,
-                format: DiskFormat::Ext4, // Default for volumes
-            })
-        } else {
-            warn!("Invalid volume spec: {}", spec);
-            None
-        }
     }
 
     /// Parse volume mounts for VmConfig volumes field.

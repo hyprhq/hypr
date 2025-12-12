@@ -8,7 +8,7 @@ use hypr_api::hypr::v1::{deploy_stack_event, DeployProgress, DeployStackEvent};
 use hypr_core::adapters::VmmAdapter;
 use hypr_core::compose::{ComposeConverter, ComposeParser};
 use hypr_core::registry::ImagePuller;
-use hypr_core::types::vm::{DiskConfig, DiskFormat};
+use hypr_core::types::vm::{DiskConfig, DiskFormat, VirtioFsMount};
 use hypr_core::{
     HyprError, Result, ServiceConfig, StackConfig, StateManager, Vm, VmHandle, VmStatus,
 };
@@ -455,6 +455,39 @@ impl StackOrchestrator {
                     dns: vec!["8.8.8.8".to_string(), "1.1.1.1".to_string()],
                 });
 
+                // Set up volumes via virtiofs
+                if !vm_config.volumes.is_empty() {
+                    use hypr_core::manifest::VolumeConfig as ManifestVolumeConfig;
+
+                    let volumes_base = hypr_core::paths::data_dir().join("volumes").join(&stack_id);
+                    std::fs::create_dir_all(&volumes_base).map_err(|e| {
+                        HyprError::IoError { path: volumes_base.clone(), source: e }
+                    })?;
+
+                    let mut manifest_volumes = Vec::new();
+
+                    for vol in &vm_config.volumes {
+                        let vol_dir = volumes_base.join(&vol.source);
+                        std::fs::create_dir_all(&vol_dir).map_err(|e| {
+                            HyprError::IoError { path: vol_dir.clone(), source: e }
+                        })?;
+
+                        let tag = format!("vol_{}", vol.source);
+                        vm_config.virtio_fs_mounts.push(VirtioFsMount {
+                            host_path: vol_dir,
+                            tag: tag.clone(),
+                        });
+
+                        manifest_volumes.push(ManifestVolumeConfig {
+                            tag,
+                            target: vol.target.clone(),
+                            readonly: vol.readonly,
+                        });
+                    }
+
+                    manifest.volumes = manifest_volumes;
+                }
+
                 // Encode manifest and add to kernel args
                 match manifest.encode() {
                     Ok(encoded) => {
@@ -674,6 +707,42 @@ impl StackOrchestrator {
                     gateway: gateway.to_string(),
                     dns: vec!["8.8.8.8".to_string(), "1.1.1.1".to_string()],
                 });
+
+                // Set up volumes via virtiofs
+                if !vm_config.volumes.is_empty() {
+                    use hypr_core::manifest::VolumeConfig as ManifestVolumeConfig;
+
+                    let volumes_base = hypr_core::paths::data_dir().join("volumes").join(&stack_id);
+                    std::fs::create_dir_all(&volumes_base).map_err(|e| {
+                        HyprError::IoError { path: volumes_base.clone(), source: e }
+                    })?;
+
+                    let mut manifest_volumes = Vec::new();
+
+                    for vol in &vm_config.volumes {
+                        // Create volume directory
+                        let vol_dir = volumes_base.join(&vol.source);
+                        std::fs::create_dir_all(&vol_dir).map_err(|e| {
+                            HyprError::IoError { path: vol_dir.clone(), source: e }
+                        })?;
+
+                        // Add virtiofs mount
+                        let tag = format!("vol_{}", vol.source);
+                        vm_config.virtio_fs_mounts.push(VirtioFsMount {
+                            host_path: vol_dir,
+                            tag: tag.clone(),
+                        });
+
+                        // Add to manifest so kestrel knows where to mount
+                        manifest_volumes.push(ManifestVolumeConfig {
+                            tag,
+                            target: vol.target.clone(),
+                            readonly: vol.readonly,
+                        });
+                    }
+
+                    manifest.volumes = manifest_volumes;
+                }
 
                 match manifest.encode() {
                     Ok(encoded) => {

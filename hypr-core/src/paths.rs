@@ -9,42 +9,15 @@ use std::path::PathBuf;
 ///
 /// Resolution order:
 /// 1. `HYPR_DATA_DIR` environment variable (for testing/custom installs)
-/// 2. `~/.hypr` (user's home directory)
+/// 2. `/var/lib/hypr` (system-level, requires root)
 pub fn data_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("HYPR_DATA_DIR") {
         return PathBuf::from(dir);
     }
-
-    // Use ~/.hypr - works for both daemon (root) and CLI (user)
-    // When running as root via sudo, get the real user's home
-    let home = get_real_user_home();
-    PathBuf::from(home).join(".hypr")
+    PathBuf::from("/var/lib/hypr")
 }
 
-/// Get the real user's home directory, even when running as root via sudo.
-fn get_real_user_home() -> String {
-    // Check SUDO_USER first (set when running via sudo)
-    if let Ok(sudo_user) = std::env::var("SUDO_USER") {
-        // Get home directory for the sudo user
-        if let Ok(output) = std::process::Command::new("sh")
-            .args(["-c", &format!("eval echo ~{}", sudo_user)])
-            .output()
-        {
-            if let Ok(home) = String::from_utf8(output.stdout) {
-                let home = home.trim();
-                if !home.is_empty() && home != "~" {
-                    return home.to_string();
-                }
-            }
-        }
-    }
-
-    // Fallback to HOME
-    std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
-}
-
-/// Ensure the data directory exists and has proper permissions.
-/// On macOS, adds ACL for the real user so both root daemon and user CLI can access.
+/// Ensure the data directory exists with proper permissions.
 pub fn ensure_data_dir() -> std::io::Result<()> {
     let dir = data_dir();
     std::fs::create_dir_all(&dir)?;

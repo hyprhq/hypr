@@ -21,6 +21,10 @@ pub struct RuntimeManifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkConfig>,
 
+    /// Volume mounts (virtiofs tags to mount paths)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub volumes: Vec<VolumeConfig>,
+
     /// Restart policy
     #[serde(default)]
     pub restart: RestartPolicy,
@@ -28,6 +32,20 @@ pub struct RuntimeManifest {
     /// Health check configuration (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub health: Option<HealthCheckConfig>,
+}
+
+/// Volume mount configuration (virtiofs)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumeConfig {
+    /// virtiofs tag (used to identify the filesystem in guest)
+    pub tag: String,
+
+    /// Target mount path inside the container
+    pub target: String,
+
+    /// Whether the mount is read-only
+    #[serde(default)]
+    pub readonly: bool,
 }
 
 /// Workload configuration (what to run)
@@ -154,6 +172,7 @@ impl RuntimeManifest {
                 user: None,
             },
             network: None,
+            volumes: vec![],
             restart: RestartPolicy::Never,
             health: None,
         }

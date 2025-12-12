@@ -1138,6 +1138,116 @@ static char* json_get_object_at_depth(const char *json, const char *key, int tar
 }
 
 // ============================================================================
+// VOLUME MOUNTING (virtiofs)
+// ============================================================================
+
+// Mount volumes from manifest JSON
+// volumes: [{"tag": "vol_redis", "target": "/data", "readonly": false}, ...]
+static int mount_volumes_from_manifest(const char *manifest_json) {
+    if (!manifest_json) return 0;
+
+    jsmn_parser parser;
+    jsmntok_t tokens[JSON_MAX_TOKENS];
+
+    jsmn_init(&parser);
+    int num_tokens = jsmn_parse(&parser, manifest_json, strlen(manifest_json), tokens, JSON_MAX_TOKENS);
+    if (num_tokens < 0) return 0;
+
+    // Find "volumes" array
+    int volumes_idx = -1;
+    for (int i = 1; i < num_tokens; i++) {
+        if (json_tok_eq(manifest_json, &tokens[i], "volumes") && i + 1 < num_tokens) {
+            if (tokens[i + 1].type == JSMN_ARRAY) {
+                volumes_idx = i + 1;
+                break;
+            }
+        }
+    }
+
+    if (volumes_idx < 0) {
+        LOG("No volumes in manifest");
+        return 0;
+    }
+
+    int arr_size = tokens[volumes_idx].size;
+    if (arr_size == 0) return 0;
+
+    LOG("Mounting %d volume(s) from manifest", arr_size);
+
+    int mounted = 0;
+    int current = volumes_idx + 1;
+
+    for (int v = 0; v < arr_size && current < num_tokens; v++) {
+        if (tokens[current].type != JSMN_OBJECT) {
+            current++;
+            continue;
+        }
+
+        // Parse this volume object
+        char *tag = NULL;
+        char *target = NULL;
+        int readonly = 0;
+
+        int obj_size = tokens[current].size;
+        int obj_end = current + 1;
+
+        // Parse key-value pairs in object
+        for (int k = 0; k < obj_size && obj_end < num_tokens; k++) {
+            jsmntok_t *key_tok = &tokens[obj_end];
+            jsmntok_t *val_tok = &tokens[obj_end + 1];
+
+            if (json_tok_eq(manifest_json, key_tok, "tag") && val_tok->type == JSMN_STRING) {
+                int len = val_tok->end - val_tok->start;
+                tag = malloc(len + 1);
+                if (tag) {
+                    strncpy(tag, manifest_json + val_tok->start, len);
+                    tag[len] = '\0';
+                }
+            } else if (json_tok_eq(manifest_json, key_tok, "target") && val_tok->type == JSMN_STRING) {
+                int len = val_tok->end - val_tok->start;
+                target = malloc(len + 1);
+                if (target) {
+                    strncpy(target, manifest_json + val_tok->start, len);
+                    target[len] = '\0';
+                }
+            } else if (json_tok_eq(manifest_json, key_tok, "readonly")) {
+                if (val_tok->type == JSMN_PRIMITIVE) {
+                    readonly = (manifest_json[val_tok->start] == 't');
+                }
+            }
+
+            obj_end += 2;
+        }
+
+        // Mount if we have tag and target
+        if (tag && target) {
+            // Create target directory
+            char mkdir_cmd[512];
+            snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p '%s' 2>/dev/null", target);
+            system(mkdir_cmd);
+
+            // Mount virtiofs
+            unsigned long flags = readonly ? MS_RDONLY : 0;
+            if (mount(tag, target, "virtiofs", flags, NULL) == 0) {
+                LOG("Mounted volume: %s -> %s%s", tag, target, readonly ? " (ro)" : "");
+                mounted++;
+            } else {
+                LOG("Failed to mount volume %s -> %s: %s", tag, target, strerror(errno));
+            }
+        }
+
+        if (tag) free(tag);
+        if (target) free(target);
+
+        // Skip to next object
+        current = obj_end;
+    }
+
+    LOG("Mounted %d/%d volumes", mounted, arr_size);
+    return mounted;
+}
+
+// ============================================================================
 // USER/GROUP SWITCHING
 // ============================================================================
 
@@ -2335,6 +2445,11 @@ static void run_runtime_mode(void) {
         } else {
             LOG("Chroot failed: %s", strerror(errno));
         }
+    }
+
+    // Mount volumes from manifest (virtiofs)
+    if (manifest_json) {
+        mount_volumes_from_manifest(manifest_json);
     }
 
     // Set up Rosetta x86_64 emulation if available (macOS ARM64 Mixed Mode)
