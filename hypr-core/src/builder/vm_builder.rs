@@ -58,6 +58,7 @@ use crate::error::{HyprError, Result};
 use crate::types::vm::{VirtioFsMount, VmConfig, VmHandle};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, error, info, instrument, warn};
 
@@ -66,7 +67,7 @@ use tracing::{debug, error, info, instrument, warn};
 /// Each build spawns a fresh VM, executes build steps, extracts layers, and terminates.
 pub struct VmBuilder {
     /// VMM adapter for spawning VMs
-    adapter: Box<dyn VmmAdapter>,
+    adapter: Arc<dyn VmmAdapter>,
 
     /// Path to Linux kernel
     kernel_path: PathBuf,
@@ -86,7 +87,7 @@ impl VmBuilder {
         kernel_path: PathBuf,
         work_dir: PathBuf,
     ) -> Self {
-        Self { adapter, kernel_path, _work_dir: work_dir, initramfs_cache: None }
+        Self { adapter: Arc::from(adapter), kernel_path, _work_dir: work_dir, initramfs_cache: None }
     }
 
     /// Get or create the initramfs for builder VMs.
@@ -152,7 +153,7 @@ impl VmBuilder {
         // PHASE 2: SPAWN VM & STREAM OUTPUT
         // ═══════════════════════════════════════════════════════════════════
 
-        let (vm, mut child) =
+        let (vm, child) =
             self.spawn_builder_vm(context_dir, output_layer.parent().unwrap(), base_rootfs).await?;
 
         // Stream stdout using prettifier (pure presentation layer)
@@ -166,12 +167,16 @@ impl VmBuilder {
         // PHASE 3: WAIT FOR VM EXIT & PARSE RESULTS
         // ═══════════════════════════════════════════════════════════════════
 
-        // Wait for VM to exit
-        let exit_status = child.wait().await.map_err(|e| HyprError::BuildFailed {
-            reason: format!("Failed to wait for VM: {}", e),
-        })?;
-
-        debug!("VM exited with status: {:?}", exit_status);
+        // Wait for VM to exit (only for external processes like cloud-hypervisor)
+        // For in-process VMs (libkrun), streaming completion signals VM is done
+        if let Some(mut child) = child {
+            let exit_status = child.wait().await.map_err(|e| HyprError::BuildFailed {
+                reason: format!("Failed to wait for VM: {}", e),
+            })?;
+            debug!("VM exited with status: {:?}", exit_status);
+        } else {
+            debug!("In-process VM (libkrun) - streaming completion signals VM done");
+        }
 
         // Clean up command file
         let _ = std::fs::remove_file(&cmd_file);
@@ -226,13 +231,14 @@ impl VmBuilder {
     }
 
     /// Spawn an ephemeral builder VM with minimal initramfs.
+    /// Returns (handle, child) where child is None for in-process VMs (libkrun).
     #[instrument(skip(self))]
     async fn spawn_builder_vm(
         &mut self,
         context_dir: &Path,
         output_dir: &Path,
         base_rootfs: Option<&Path>,
-    ) -> Result<(VmHandle, tokio::process::Child)> {
+    ) -> Result<(VmHandle, Option<tokio::process::Child>)> {
         debug!("Spawning builder VM");
 
         let vm_id = format!("builder-{}", uuid::Uuid::new_v4());
@@ -309,18 +315,9 @@ impl VmBuilder {
 
             info!("Builder VM started (libkrun in-process)");
 
-            // For libkrun, we don't have a child process to return
-            // Create a dummy child that represents the in-process VM
-            // The actual VM lifecycle is managed by the adapter
-            let dummy_child =
-                tokio::process::Command::new("sleep").arg("infinity").spawn().map_err(|e| {
-                    error!("Failed to create placeholder process: {}", e);
-                    HyprError::BuildFailed {
-                        reason: format!("Failed to create placeholder: {}", e),
-                    }
-                })?;
-
-            Ok((handle, dummy_child))
+            // For libkrun, we don't have a child process - the VM runs in-process
+            // Return None for child - the caller will handle this case
+            Ok((handle, None))
         } else {
             // External process (cloud-hypervisor)
             let log_file =
@@ -350,7 +347,7 @@ impl VmBuilder {
 
             info!("Builder VM spawned: pid={}", pid);
 
-            Ok((handle, child))
+            Ok((handle, Some(child)))
         }
     }
 
@@ -424,14 +421,14 @@ impl VmBuilder {
         info!("Written {} build commands + 1 FINALIZE command", steps.len());
 
         // Boot VM ONCE
-        let (vm, mut child) = self.spawn_builder_vm(context_dir, output_dir, base_rootfs).await?;
+        let (vm, child) = self.spawn_builder_vm(context_dir, output_dir, base_rootfs).await?;
 
         // Stream logs in real-time WHILE VM runs
         // Use the virtio-serial log path where kestrel writes its output
         let log_path = crate::paths::vm_log_path(&vm.id);
 
         // Run streaming and VM concurrently
-        let stream_task = tokio::spawn({
+        let mut stream_task = tokio::spawn({
             let log_path = log_path.clone();
             async move {
                 let mut s = BuildOutputStream::new();
@@ -439,47 +436,108 @@ impl VmBuilder {
             }
         });
 
-        // Wait for VM to finish OR handle Ctrl+C
-        let _vm_result = tokio::select! {
-            result = child.wait() => {
-                let status = result.map_err(|e| HyprError::BuildFailed { reason: format!("VM wait failed: {}", e) })?;
-                status
+        // Wait for VM to finish OR streaming to complete OR handle Ctrl+C
+        // Use select! to race between all completion signals
+        let results = if let Some(mut child) = child {
+            // External process (cloud-hypervisor) - wait for process OR stream OR ctrl+c
+            tokio::select! {
+                result = child.wait() => {
+                    let _status = result.map_err(|e| HyprError::BuildFailed {
+                        reason: format!("VM wait failed: {}", e)
+                    })?;
+                    // Process exited - wait for stream to flush remaining output
+                    stream_task.await.map_err(|e| HyprError::BuildFailed {
+                        reason: format!("Stream task failed: {}", e),
+                    })??
+                }
+                result = &mut stream_task => {
+                    // Stream completed (saw [HYPR-RESULT-END] or timed out)
+                    // Kill the child process since build logic is done
+                    let _ = child.start_kill();
+                    result.map_err(|e| HyprError::BuildFailed {
+                        reason: format!("Stream task failed: {}", e),
+                    })??
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Received SIGINT, shutting down build VM");
+                    let _ = child.start_kill();
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        child.wait()
+                    ).await {
+                        Ok(_) => debug!("VM process terminated gracefully"),
+                        Err(_) => warn!("VM process did not terminate within 5s"),
+                    }
+                    if let Err(e) = self.adapter.delete(&vm).await {
+                        warn!("Failed to clean up VM resources: {}", e);
+                    }
+                    return Err(HyprError::BuildFailed {
+                        reason: "Build cancelled by user".to_string()
+                    });
+                }
             }
-            _ = tokio::signal::ctrl_c() => {
-                // User pressed Ctrl+C - kill the VM and clean up
-                info!("Received SIGINT, shutting down build VM");
-                let _ = child.start_kill();
+        } else {
+            // In-process VM (libkrun) - wait for stream OR VM exit signal OR ctrl+c
+            // Get the exit waiter by downcasting to LibkrunAdapter
+            #[cfg(target_os = "macos")]
+            {
+                use crate::adapters::LibkrunAdapter;
+                if let Some(libkrun) = self.adapter.as_any().downcast_ref::<LibkrunAdapter>() {
+                    let vm_clone = vm.clone();
+                    let exit_wait = libkrun.wait_for_exit(&vm_clone);
+                    tokio::pin!(exit_wait);
 
-                // Wait for process to die with a timeout to avoid hanging indefinitely
-                // If the process doesn't exit within 5 seconds, it's likely stuck
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    child.wait()
-                ).await {
-                    Ok(_) => {
-                        debug!("VM process terminated gracefully");
+                    tokio::select! {
+                        result = &mut stream_task => {
+                            // Stream completed - build logic is done
+                            debug!("Stream completed, build finished");
+                            result.map_err(|e| HyprError::BuildFailed {
+                                reason: format!("Stream task failed: {}", e),
+                            })??
+                        }
+                        _ = &mut exit_wait => {
+                            // VM exited - wait for stream to flush with timeout
+                            debug!("VM exited, waiting for stream to flush");
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(2),
+                                stream_task
+                            ).await {
+                                Ok(Ok(Ok(results))) => results,
+                                Ok(Ok(Err(e))) => return Err(e),
+                                Ok(Err(e)) => return Err(HyprError::BuildFailed {
+                                    reason: format!("Stream task panicked: {}", e),
+                                }),
+                                Err(_) => {
+                                    debug!("Stream flush timed out, proceeding with empty results");
+                                    Vec::new()
+                                }
+                            }
+                        }
+                        _ = tokio::signal::ctrl_c() => {
+                            info!("Received SIGINT, shutting down build VM");
+                            if let Err(e) = self.adapter.kill(&vm).await {
+                                warn!("Failed to kill VM: {}", e);
+                            }
+                            return Err(HyprError::BuildFailed {
+                                reason: "Build cancelled by user".to_string()
+                            });
+                        }
                     }
-                    Err(_) => {
-                        // Timeout - process didn't die, force kill via adapter
-                        warn!("VM process did not terminate within 5s, forcing cleanup");
-                    }
+                } else {
+                    // Fallback - just wait for stream
+                    stream_task.await.map_err(|e| HyprError::BuildFailed {
+                        reason: format!("Stream task failed: {}", e),
+                    })??
                 }
-
-                // Clean up any adapter-managed resources (e.g., virtiofsd on Linux)
-                if let Err(e) = self.adapter.delete(&vm).await {
-                    warn!("Failed to clean up VM resources: {}", e);
-                }
-
-                return Err(HyprError::BuildFailed {
-                    reason: "Build cancelled by user".to_string()
-                });
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                // Non-macOS fallback - just wait for stream
+                stream_task.await.map_err(|e| HyprError::BuildFailed {
+                    reason: format!("Stream task failed: {}", e),
+                })??
             }
         };
-
-        // Wait for streaming to complete (should finish shortly after VM exits)
-        let results = stream_task.await.map_err(|e| HyprError::BuildFailed {
-            reason: format!("Stream task failed: {}", e),
-        })??;
 
         // Check if any build step failed (non-zero exit code)
         for (idx, result) in results.iter().enumerate() {

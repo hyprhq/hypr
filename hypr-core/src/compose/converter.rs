@@ -33,11 +33,15 @@ impl ComposeConverter {
         // Convert volumes
         let volumes = Self::convert_volumes(&compose.volumes, &compose.services);
 
-        // Create network config
-        let network = NetworkStackConfig {
-            name: format!("{}_network", name),
-            subnet: "10.88.0.0/16".to_string(),
-        };
+        // Create network config (platform-specific subnet)
+        #[cfg(target_os = "linux")]
+        let subnet = "10.88.0.0/16".to_string();
+        #[cfg(target_os = "macos")]
+        let subnet = "192.168.64.0/24".to_string();
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let subnet = "10.88.0.0/16".to_string();
+
+        let network = NetworkStackConfig { name: format!("{}_network", name), subnet };
 
         // Validate dependency graph (no cycles)
         Self::validate_dependencies(&services)?;
@@ -70,11 +74,15 @@ impl ComposeConverter {
         // Convert volumes
         let volumes = Self::convert_volumes(&compose.volumes, &compose.services);
 
-        // Create network config
-        let network = NetworkStackConfig {
-            name: format!("{}_network", name),
-            subnet: "10.88.0.0/16".to_string(),
-        };
+        // Create network config (platform-specific subnet)
+        #[cfg(target_os = "linux")]
+        let subnet = "10.88.0.0/16".to_string();
+        #[cfg(target_os = "macos")]
+        let subnet = "192.168.64.0/24".to_string();
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let subnet = "10.88.0.0/16".to_string();
+
+        let network = NetworkStackConfig { name: format!("{}_network", name), subnet };
 
         // Validate dependency graph (no cycles)
         Self::validate_dependencies(&services)?;

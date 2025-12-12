@@ -9,6 +9,7 @@ use crate::error::Result;
 use crate::types::network::NetworkConfig;
 use crate::types::vm::{CommandSpec, DiskConfig, GpuConfig, VmConfig, VmHandle};
 use async_trait::async_trait;
+use std::any::Any;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -72,6 +73,9 @@ pub trait VmmAdapter: Send + Sync {
 
     /// Get adapter name (for logging/metrics).
     fn name(&self) -> &str;
+
+    /// Downcast to concrete type (for adapter-specific methods).
+    fn as_any(&self) -> &dyn Any;
 }
 
 /// Adapter capabilities.

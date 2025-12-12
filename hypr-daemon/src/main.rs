@@ -24,6 +24,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("HYPR daemon starting");
 
+    // Ensure data directory exists with proper permissions (adds ACL on macOS)
+    hypr_core::paths::ensure_data_dir()?;
+
     // Write PID file for single-instance enforcement
     let pid_path = hypr_core::paths::runtime_dir().join("hyprd.pid");
     write_pid_file(&pid_path)?;

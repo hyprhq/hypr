@@ -1,4 +1,4 @@
-//! FFI bindings for libkrun-efi.
+//! FFI bindings for libkrun.
 //!
 //! This module provides safe Rust wrappers around the libkrun C API.
 //! The library is loaded dynamically at runtime via dlopen.
@@ -40,6 +40,22 @@ pub enum GpuFlags {
     Virgl = 1,
 }
 
+/// Network feature flags from libkrun.h (virtio_net features)
+#[allow(dead_code)]
+pub mod net_features {
+    pub const CSUM: u32 = 1 << 0;
+    pub const GUEST_CSUM: u32 = 1 << 1;
+    pub const GUEST_TSO4: u32 = 1 << 7;
+    pub const GUEST_TSO6: u32 = 1 << 8;
+    pub const GUEST_UFO: u32 = 1 << 10;
+    pub const HOST_TSO4: u32 = 1 << 11;
+    pub const HOST_TSO6: u32 = 1 << 12;
+    pub const HOST_UFO: u32 = 1 << 14;
+
+    /// Compatible features for TAP networking
+    pub const COMPAT: u32 = CSUM | GUEST_CSUM | GUEST_TSO4 | GUEST_UFO | HOST_TSO4 | HOST_UFO;
+}
+
 /// libkrun function signatures
 type KrunSetLogLevel = unsafe extern "C" fn(level: c_uint) -> c_int;
 type KrunCreateCtx = unsafe extern "C" fn() -> c_int;
@@ -77,10 +93,25 @@ type KrunStartEnter = unsafe extern "C" fn(ctx_id: c_uint) -> c_int;
 type KrunSetNestedVirt = unsafe extern "C" fn(ctx_id: c_uint, enabled: bool) -> c_int;
 type KrunSetNetMac = unsafe extern "C" fn(ctx_id: c_uint, mac: *const u8) -> c_int;
 type KrunSetPasstFd = unsafe extern "C" fn(ctx_id: c_uint, fd: c_int) -> c_int;
+type KrunAddNetTap = unsafe extern "C" fn(
+    ctx_id: c_uint,
+    tap_name: *const c_char,
+    mac: *const u8,
+    features: c_uint,
+    flags: c_uint,
+) -> c_int;
+type KrunAddNetUnixstream = unsafe extern "C" fn(
+    ctx_id: c_uint,
+    path: *const c_char,
+    fd: c_int,
+    mac: *const u8,
+    features: c_uint,
+    flags: c_uint,
+) -> c_int;
 type KrunSetSmbiosOemStrings =
     unsafe extern "C" fn(ctx_id: c_uint, oem_strings: *const *const c_char) -> c_int;
 
-/// Safe wrapper around libkrun-efi.
+/// Safe wrapper around libkrun.
 ///
 /// Handles dynamic loading of the library and provides safe Rust methods
 /// for all libkrun operations.
@@ -105,23 +136,25 @@ pub struct Libkrun {
     set_nested_virt: KrunSetNestedVirt,
     set_net_mac: KrunSetNetMac,
     set_passt_fd: KrunSetPasstFd,
+    add_net_tap: KrunAddNetTap,
+    add_net_unixstream: KrunAddNetUnixstream,
     set_smbios_oem_strings: KrunSetSmbiosOemStrings,
 }
 
 #[allow(dead_code)] // Some methods for future use
 impl Libkrun {
-    /// Load libkrun-efi dynamically.
+    /// Load libkrun dynamically.
     ///
     /// Searches standard Homebrew paths for the library.
     pub fn load() -> Result<Self> {
         let library_path = Self::find_library()?;
-        info!(path = %library_path.display(), "Loading libkrun-efi");
+        info!(path = %library_path.display(), "Loading libkrun");
 
         // Safety: We're loading a known library with a stable C ABI
         let library = unsafe {
             Library::new(&library_path).map_err(|e| HyprError::HypervisorNotFound {
                 hypervisor: format!(
-                    "libkrun-efi: failed to load {}: {}",
+                    "libkrun: failed to load {}: {}",
                     library_path.display(),
                     e
                 ),
@@ -185,6 +218,12 @@ impl Libkrun {
             let set_passt_fd: Symbol<KrunSetPasstFd> = lib_clone
                 .get(b"krun_set_passt_fd\0")
                 .map_err(|e| Self::symbol_error("krun_set_passt_fd", e))?;
+            let add_net_tap: Symbol<KrunAddNetTap> = lib_clone
+                .get(b"krun_add_net_tap\0")
+                .map_err(|e| Self::symbol_error("krun_add_net_tap", e))?;
+            let add_net_unixstream: Symbol<KrunAddNetUnixstream> = lib_clone
+                .get(b"krun_add_net_unixstream\0")
+                .map_err(|e| Self::symbol_error("krun_add_net_unixstream", e))?;
             let set_smbios_oem_strings: Symbol<KrunSetSmbiosOemStrings> = lib_clone
                 .get(b"krun_set_smbios_oem_strings\0")
                 .map_err(|e| Self::symbol_error("krun_set_smbios_oem_strings", e))?;
@@ -209,39 +248,48 @@ impl Libkrun {
                 set_nested_virt: *set_nested_virt,
                 set_net_mac: *set_net_mac,
                 set_passt_fd: *set_passt_fd,
+                add_net_tap: *add_net_tap,
+                add_net_unixstream: *add_net_unixstream,
                 set_smbios_oem_strings: *set_smbios_oem_strings,
             })
         }
     }
 
-    /// Find libkrun-efi.dylib in standard locations.
+    /// Find libkrun.dylib - first try embedded, then system paths.
     fn find_library() -> Result<PathBuf> {
+        // First, try to get embedded libkrun (preferred - no external dependencies)
+        if let Ok(path) = crate::embedded::get_libkrun_path() {
+            debug!(path = %path.display(), "Using embedded libkrun");
+            return Ok(path);
+        }
+
+        // Fallback to system-installed libkrun
         let candidates = [
             // Homebrew Apple Silicon
-            "/opt/homebrew/opt/libkrun-efi/lib/libkrun-efi.dylib",
-            "/opt/homebrew/lib/libkrun-efi.dylib",
+            "/opt/homebrew/opt/libkrun/lib/libkrun.dylib",
+            "/opt/homebrew/lib/libkrun.dylib",
             // Homebrew Intel
-            "/usr/local/opt/libkrun-efi/lib/libkrun-efi.dylib",
-            "/usr/local/lib/libkrun-efi.dylib",
+            "/usr/local/opt/libkrun/lib/libkrun.dylib",
+            "/usr/local/lib/libkrun.dylib",
         ];
 
         for path in candidates {
             let path = PathBuf::from(path);
             if path.exists() {
-                debug!(path = %path.display(), "Found libkrun-efi");
+                debug!(path = %path.display(), "Found system libkrun");
                 return Ok(path);
             }
         }
 
         Err(HyprError::HypervisorNotFound {
-            hypervisor: "libkrun-efi (install: brew tap slp/krunkit && brew install libkrun-efi)"
+            hypervisor: "libkrun (embedded extraction failed and not found in system paths)"
                 .to_string(),
         })
     }
 
     fn symbol_error(name: &str, e: libloading::Error) -> HyprError {
         HyprError::HypervisorNotFound {
-            hypervisor: format!("libkrun-efi: missing symbol {}: {}", name, e),
+            hypervisor: format!("libkrun: missing symbol {}: {}", name, e),
         }
     }
 
@@ -448,6 +496,71 @@ impl Libkrun {
         Self::check_result(ret, "krun_set_passt_fd")
     }
 
+    /// Add a TAP network device (same as cloud-hypervisor).
+    ///
+    /// Creates a virtio-net device connected to the specified TAP interface.
+    /// The TAP device must already exist on the host.
+    pub fn add_net_tap(
+        &self,
+        ctx_id: u32,
+        tap_name: &str,
+        mac: &[u8; 6],
+        features: u32,
+        flags: u32,
+    ) -> Result<()> {
+        let tap_cstr = CString::new(tap_name).map_err(|_| HyprError::InvalidConfig {
+            reason: "TAP name contains null byte".to_string(),
+        })?;
+        debug!(
+            ctx_id,
+            tap_name,
+            mac = format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]),
+            features,
+            flags,
+            "Adding TAP network device"
+        );
+        let ret =
+            unsafe { (self.add_net_tap)(ctx_id, tap_cstr.as_ptr(), mac.as_ptr(), features, flags) };
+        Self::check_result(ret, "krun_add_net_tap")
+    }
+
+    /// Add a network device via unix stream socket (for passt/socket_vmnet on macOS).
+    ///
+    /// Creates a virtio-net device connected to a userspace network proxy.
+    /// Either `path` (socket path) or `fd` (open socket fd) must be provided, not both.
+    pub fn add_net_unixstream(
+        &self,
+        ctx_id: u32,
+        path: Option<&Path>,
+        fd: Option<i32>,
+        mac: &[u8; 6],
+        features: u32,
+        flags: u32,
+    ) -> Result<()> {
+        let path_cstr = match path {
+            Some(p) => Some(Self::path_to_cstring(p)?),
+            None => None,
+        };
+        let path_ptr = path_cstr.as_ref().map(|c| c.as_ptr()).unwrap_or(std::ptr::null());
+        let fd_val = fd.unwrap_or(-1);
+
+        debug!(
+            ctx_id,
+            path = ?path,
+            fd = fd_val,
+            mac = format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]),
+            features,
+            flags,
+            "Adding network device via unix stream"
+        );
+        let ret = unsafe {
+            (self.add_net_unixstream)(ctx_id, path_ptr, fd_val, mac.as_ptr(), features, flags)
+        };
+        Self::check_result(ret, "krun_add_net_unixstream")
+    }
+
     /// Set SMBIOS OEM strings (for passing data to guest).
     pub fn set_smbios_oem_strings(&self, ctx_id: u32, strings: &[&str]) -> Result<()> {
         let cstrings: Vec<CString> = strings
@@ -488,10 +601,10 @@ mod tests {
 
     #[test]
     fn test_libkrun_load() {
-        // This will fail if libkrun-efi is not installed, which is expected
+        // This will fail if libkrun is not installed, which is expected
         match Libkrun::load() {
             Ok(lib) => {
-                println!("libkrun-efi loaded successfully");
+                println!("libkrun loaded successfully");
                 // Try creating and freeing a context
                 if let Ok(ctx) = lib.create_ctx() {
                     println!("Created context: {}", ctx);
@@ -499,7 +612,7 @@ mod tests {
                 }
             }
             Err(e) => {
-                println!("libkrun-efi not available: {} (expected if not installed)", e);
+                println!("libkrun not available: {} (expected if not installed)", e);
             }
         }
     }

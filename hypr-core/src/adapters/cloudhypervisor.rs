@@ -929,4 +929,8 @@ impl VmmAdapter for CloudHypervisorAdapter {
     fn name(&self) -> &str {
         "cloud-hypervisor"
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }

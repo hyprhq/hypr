@@ -1,6 +1,6 @@
 //! Embedded hypervisor binaries and resources.
 //!
-//! This module contains cloud-hypervisor binaries and eBPF programs embedded at compile time.
+//! This module contains cloud-hypervisor binaries, libkrun, and eBPF programs embedded at compile time.
 //! These are extracted to a runtime directory when needed, eliminating the need
 //! for users to install dependencies separately.
 
@@ -8,6 +8,10 @@ use crate::error::{HyprError, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
+
+/// Embedded libkrun dynamic library (macOS only)
+#[cfg(target_os = "macos")]
+const LIBKRUN_BINARY: &[u8] = include_bytes!("../embedded/libkrun.dylib");
 
 /// Embedded cloud-hypervisor binary (architecture-specific at compile time)
 #[cfg(target_arch = "x86_64")]
@@ -91,6 +95,62 @@ fn extract_cloud_hypervisor(dest: &Path) -> Result<()> {
     info!(
         "Extracted cloud-hypervisor ({:.2} MB) to {}",
         bytes.len() as f64 / 1024.0 / 1024.0,
+        dest.display()
+    );
+
+    Ok(())
+}
+
+/// Get the libkrun library path, extracting if needed (macOS only).
+///
+/// This function:
+/// 1. Checks if libkrun.dylib is already extracted
+/// 2. Extracts the embedded library if missing
+/// 3. Returns the path to the library
+#[cfg(target_os = "macos")]
+pub fn get_libkrun_path() -> Result<PathBuf> {
+    let lib_dir = crate::paths::data_dir().join("lib");
+    fs::create_dir_all(&lib_dir)
+        .map_err(|e| HyprError::IoError { path: lib_dir.clone(), source: e })?;
+
+    let library_path = lib_dir.join("libkrun.dylib");
+
+    // Extract if not exists or size mismatch (updated binary)
+    let should_extract = if library_path.exists() {
+        match fs::metadata(&library_path) {
+            Ok(meta) => meta.len() != LIBKRUN_BINARY.len() as u64,
+            Err(_) => true,
+        }
+    } else {
+        true
+    };
+
+    if should_extract {
+        info!("Extracting embedded libkrun to {}", library_path.display());
+        extract_libkrun(&library_path)?;
+    } else {
+        debug!("Using existing libkrun at {}", library_path.display());
+    }
+
+    Ok(library_path)
+}
+
+/// Extract libkrun.dylib to disk.
+#[cfg(target_os = "macos")]
+fn extract_libkrun(dest: &Path) -> Result<()> {
+    // Ensure parent directory exists
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| HyprError::IoError { path: parent.to_path_buf(), source: e })?;
+    }
+
+    // Write library
+    fs::write(dest, LIBKRUN_BINARY)
+        .map_err(|e| HyprError::IoError { path: dest.to_path_buf(), source: e })?;
+
+    info!(
+        "Extracted libkrun ({:.2} MB) to {}",
+        LIBKRUN_BINARY.len() as f64 / 1024.0 / 1024.0,
         dest.display()
     );
 

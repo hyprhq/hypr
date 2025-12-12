@@ -1041,10 +1041,19 @@ async fn run_vm_with_progress(
         if !image.manifest.workdir.is_empty() {
             manifest = manifest.with_workdir(image.manifest.workdir.clone());
         }
+
+        // Gateway is platform-specific
+        #[cfg(target_os = "linux")]
+        let gateway = "10.88.0.1";
+        #[cfg(target_os = "macos")]
+        let gateway = "192.168.64.1";
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let gateway = "10.88.0.1";
+
         manifest = manifest.with_network(ManifestNetworkConfig {
             ip: vm_ip.to_string(),
             netmask: "255.255.255.0".to_string(),
-            gateway: "10.88.0.1".to_string(),
+            gateway: gateway.to_string(),
             dns: vec!["8.8.8.8".to_string(), "1.1.1.1".to_string()],
         });
 

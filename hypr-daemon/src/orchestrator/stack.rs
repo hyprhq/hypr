@@ -75,8 +75,19 @@ struct SimpleIpAllocator {
 
 impl SimpleIpAllocator {
     fn new() -> Self {
-        // Start from 10.88.0.2 (10.88.0.1 is gateway)
-        Self { next_ip: 0x0A580002, allocated: HashMap::new() }
+        // Platform-specific IP ranges:
+        // - Linux: 10.88.0.0/16 (gateway: 10.88.0.1)
+        // - macOS: 192.168.64.0/24 (vmnet gateway: 192.168.64.1)
+        #[cfg(target_os = "linux")]
+        let start_ip = 0x0A580002; // 10.88.0.2
+
+        #[cfg(target_os = "macos")]
+        let start_ip = 0xC0A84002; // 192.168.64.2
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let start_ip = 0x0A580002; // 10.88.0.2
+
+        Self { next_ip: start_ip, allocated: HashMap::new() }
     }
 
     fn allocate(&mut self, vm_id: String) -> IpAddr {
@@ -429,10 +440,18 @@ impl StackOrchestrator {
                 }
 
                 // Add network configuration
+                // Gateway is platform-specific
+                #[cfg(target_os = "linux")]
+                let gateway = "10.88.0.1";
+                #[cfg(target_os = "macos")]
+                let gateway = "192.168.64.1";
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                let gateway = "10.88.0.1";
+
                 manifest = manifest.with_network(ManifestNetworkConfig {
                     ip: ip.to_string(),
                     netmask: "255.255.255.0".to_string(),
-                    gateway: "10.88.0.1".to_string(),
+                    gateway: gateway.to_string(),
                     dns: vec!["8.8.8.8".to_string(), "1.1.1.1".to_string()],
                 });
 
@@ -466,7 +485,7 @@ impl StackOrchestrator {
             let vm = Vm {
                 id: vm_config.id.clone(),
                 name: vm_config.name.clone(),
-                image_id: format!("stack_{}", stack_id),
+                image_id: stack_id.to_string(),
                 status: VmStatus::Creating,
                 config: vm_config.clone(),
                 ip_address: Some(ip.to_string()),
@@ -640,10 +659,19 @@ impl StackOrchestrator {
                 if !workdir.is_empty() {
                     manifest = manifest.with_workdir(workdir.clone());
                 }
+
+                // Gateway is platform-specific
+                #[cfg(target_os = "linux")]
+                let gateway = "10.88.0.1";
+                #[cfg(target_os = "macos")]
+                let gateway = "192.168.64.1";
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                let gateway = "10.88.0.1";
+
                 manifest = manifest.with_network(ManifestNetworkConfig {
                     ip: ip.to_string(),
                     netmask: "255.255.255.0".to_string(),
-                    gateway: "10.88.0.1".to_string(),
+                    gateway: gateway.to_string(),
                     dns: vec!["8.8.8.8".to_string(), "1.1.1.1".to_string()],
                 });
 
@@ -678,7 +706,7 @@ impl StackOrchestrator {
             let vm = Vm {
                 id: vm_config.id.clone(),
                 name: vm_config.name.clone(),
-                image_id: format!("stack_{}", stack_id),
+                image_id: stack_id.to_string(),
                 status: VmStatus::Creating,
                 config: vm_config.clone(),
                 ip_address: Some(ip.to_string()),
@@ -782,7 +810,7 @@ impl StackOrchestrator {
         // Get all VMs for this stack
         let vms = self.state.list_vms().await?;
         let stack_vms: Vec<_> =
-            vms.into_iter().filter(|vm| vm.image_id == format!("stack_{}", stack_id)).collect();
+            vms.into_iter().filter(|vm| vm.image_id == stack_id).collect();
 
         // Delete all VMs
         for vm in stack_vms {

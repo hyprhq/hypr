@@ -1,14 +1,14 @@
 //! libkrun adapter for macOS.
 //!
-//! Provides VM lifecycle management using libkrun-efi, which leverages
-//! Apple's Virtualization.framework with additional features:
+//! Provides VM lifecycle management using libkrun, which leverages
+//! Apple's Hypervisor.framework with additional features:
 //!
 //! - **Direct kernel boot**: via `krun_set_kernel()` - same model as Linux
 //! - **GPU passthrough**: via virtio-gpu + Venus → Metal
 //! - **Rosetta support**: x86_64 emulation on Apple Silicon
 //! - **Native performance**: Uses Virtualization.framework under the hood
 
-use super::libkrun_ffi::{GpuFlags, KernelFormat, Libkrun};
+use super::libkrun_ffi::{net_features, GpuFlags, KernelFormat, Libkrun};
 use crate::adapters::{AdapterCapabilities, VmmAdapter};
 use crate::error::{HyprError, Result};
 use crate::types::network::NetworkConfig;
@@ -16,7 +16,8 @@ use crate::types::vm::{CommandSpec, DiskConfig, GpuConfig, VmConfig, VmHandle};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::PathBuf;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -35,11 +36,13 @@ static KESTREL_INITRAMFS: &[u8] =
 struct VmContext {
     ctx_id: u32,
     shutdown_eventfd: Option<i32>,
+    /// Receiver to wait for VM exit (for builders)
+    exit_receiver: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 /// libkrun adapter for macOS.
 ///
-/// Uses libkrun-efi for native macOS virtualization with:
+/// Uses libkrun for native macOS virtualization with:
 /// - Direct kernel boot (same as cloud-hypervisor on Linux)
 /// - GPU passthrough via virtio-gpu + Venus (Metal backend)
 /// - Full virtio device support
@@ -50,6 +53,8 @@ pub struct LibkrunAdapter {
     kernel_path: PathBuf,
     /// Active VM contexts (vm_id -> context)
     contexts: Mutex<HashMap<String, VmContext>>,
+    /// Exit notification senders (moved to start())
+    exit_senders: Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>,
     /// Whether GPU is available (Apple Silicon)
     gpu_available: bool,
 }
@@ -88,7 +93,13 @@ impl LibkrunAdapter {
             "libkrun adapter initialized"
         );
 
-        Ok(Self { libkrun, kernel_path, contexts: Mutex::new(HashMap::new()), gpu_available })
+        Ok(Self {
+            libkrun,
+            kernel_path,
+            contexts: Mutex::new(HashMap::new()),
+            exit_senders: Mutex::new(HashMap::new()),
+            gpu_available,
+        })
     }
 
     /// Write embedded initramfs to a temporary file and return its path.
@@ -151,6 +162,110 @@ impl LibkrunAdapter {
         parts.join(" ")
     }
 
+
+    /// Generate a random locally-administered MAC address.
+    ///
+    /// Uses the 52:54:00 prefix (QEMU/KVM convention) with random suffix.
+    fn generate_mac_address_bytes() -> [u8; 6] {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+        [
+            0x52, // Locally administered, unicast
+            0x54,
+            0x00,
+            ((seed >> 16) & 0xff) as u8,
+            ((seed >> 8) & 0xff) as u8,
+            (seed & 0xff) as u8,
+        ]
+    }
+
+    /// Connect to socket_vmnet daemon, spawning it if necessary.
+    ///
+    /// socket_vmnet provides vmnet.framework access for VMs on macOS.
+    /// hyprd will automatically start socket_vmnet if it's not running.
+    fn connect_to_socket_vmnet() -> Result<i32> {
+        use std::os::unix::io::IntoRawFd;
+
+        let socket_path = "/var/run/socket_vmnet";
+
+        // Try to connect first
+        if let Ok(stream) = UnixStream::connect(socket_path) {
+            info!("Connected to existing socket_vmnet");
+            return Ok(stream.into_raw_fd());
+        }
+
+        // Not running - try to spawn it ourselves
+        info!("socket_vmnet not running, attempting to start it");
+
+        // Find socket_vmnet binary
+        let binary_paths = [
+            "/opt/homebrew/opt/socket_vmnet/bin/socket_vmnet",  // Homebrew ARM
+            "/usr/local/opt/socket_vmnet/bin/socket_vmnet",     // Homebrew Intel
+            "/opt/homebrew/bin/socket_vmnet",
+            "/usr/local/bin/socket_vmnet",
+        ];
+
+        let binary = binary_paths.iter().find(|p| Path::new(p).exists());
+
+        let binary = match binary {
+            Some(b) => *b,
+            None => {
+                return Err(HyprError::NetworkSetupFailed {
+                    reason: "socket_vmnet not installed. Install with: brew install socket_vmnet".to_string(),
+                });
+            }
+        };
+
+        // Spawn socket_vmnet daemon
+        // It needs --vmnet-gateway to set the gateway IP for the vmnet network
+        match std::process::Command::new(binary)
+            .args(["--vmnet-gateway=192.168.64.1", socket_path])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(_child) => {
+                info!("Started socket_vmnet daemon");
+
+                // Wait for socket to become available (up to 2 seconds)
+                for _ in 0..20 {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    if let Ok(stream) = UnixStream::connect(socket_path) {
+                        info!("Connected to socket_vmnet");
+                        return Ok(stream.into_raw_fd());
+                    }
+                }
+
+                Err(HyprError::NetworkSetupFailed {
+                    reason: "socket_vmnet started but socket not available".to_string(),
+                })
+            }
+            Err(e) => {
+                Err(HyprError::NetworkSetupFailed {
+                    reason: format!("Failed to start socket_vmnet: {}. Make sure hyprd runs as root.", e),
+                })
+            }
+        }
+    }
+
+    /// Wait for the VM to exit.
+    /// This is useful for builders that need to wait for the VM to complete.
+    pub async fn wait_for_exit(&self, handle: &VmHandle) -> Result<()> {
+        let receiver = {
+            let mut contexts = self.contexts.lock().await;
+            contexts.get_mut(&handle.id).and_then(|ctx| ctx.exit_receiver.take())
+        };
+
+        if let Some(rx) = receiver {
+            let _ = rx.await;
+            info!(vm_id = %handle.id, "VM exit detected");
+        } else {
+            warn!(vm_id = %handle.id, "No exit receiver available, VM may have already exited");
+        }
+        Ok(())
+    }
+
     /// Configure a libkrun context with VM settings.
     fn configure_context(&self, ctx_id: u32, config: &VmConfig) -> Result<()> {
         // Set VM resources
@@ -167,11 +282,12 @@ impl LibkrunAdapter {
         let cmdline = self.build_kernel_cmdline(config);
 
         // Detect kernel format based on architecture
+        // ARM64 uses Raw format (uncompressed Image), x86_64 uses ELF (vmlinux)
         #[cfg(target_arch = "aarch64")]
-        let kernel_format = KernelFormat::ImageGz; // ARM64 uses Image.gz
+        let kernel_format = KernelFormat::Raw;
 
         #[cfg(target_arch = "x86_64")]
-        let kernel_format = KernelFormat::Elf; // x86_64 typically uses vmlinux (ELF)
+        let kernel_format = KernelFormat::Elf;
 
         self.libkrun.set_kernel(ctx_id, kernel, kernel_format, Some(&initramfs), &cmdline)?;
 
@@ -189,6 +305,26 @@ impl LibkrunAdapter {
         // Add virtio-fs mounts
         for mount in &config.virtio_fs_mounts {
             self.libkrun.add_virtiofs(ctx_id, &mount.tag, &mount.host_path)?;
+        }
+
+        // Enable networking if requested
+        // On macOS, we use socket_vmnet which provides vmnet.framework access
+        if config.network_enabled {
+            let mac = Self::generate_mac_address_bytes();
+            let socket_fd = Self::connect_to_socket_vmnet()?;
+            self.libkrun.add_net_unixstream(
+                ctx_id,
+                None, // path (we pass fd instead)
+                Some(socket_fd),
+                &mac,
+                net_features::COMPAT,
+                0, // flags
+            )?;
+            debug!(
+                mac = format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]),
+                "Network enabled via socket_vmnet"
+            );
         }
 
         // Add Rosetta support on ARM64
@@ -274,11 +410,21 @@ impl VmmAdapter for LibkrunAdapter {
         // Get shutdown eventfd for graceful shutdown
         let shutdown_eventfd = self.libkrun.get_shutdown_eventfd(ctx_id).ok();
 
-        // Store context
+        // Create exit notification channel
+        let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+
+        // Store context with exit receiver
         {
             let mut contexts = self.contexts.lock().await;
-            contexts.insert(config.id.clone(), VmContext { ctx_id, shutdown_eventfd });
+            contexts.insert(
+                config.id.clone(),
+                VmContext { ctx_id, shutdown_eventfd, exit_receiver: Some(exit_rx) },
+            );
         }
+
+        // Store sender for later use in start()
+        // We use a separate map because we need to move the sender
+        self.exit_senders.lock().await.insert(config.id.clone(), exit_tx);
 
         // Record metrics
         let histogram =
@@ -309,15 +455,46 @@ impl VmmAdapter for LibkrunAdapter {
 
         info!(ctx_id, "Starting VM");
 
+        // Get the exit sender to notify when VM exits
+        let exit_sender = self.exit_senders.lock().await.remove(&handle.id);
+
         // krun_start_enter is blocking - spawn in a separate thread
         let libkrun = self.libkrun.clone();
         let vm_id = handle.id.clone();
 
         tokio::task::spawn_blocking(move || {
-            if let Err(e) = libkrun.start_enter(ctx_id) {
-                error!(vm_id = %vm_id, error = %e, "VM exited with error");
-            } else {
-                info!(vm_id = %vm_id, "VM exited normally");
+            // Fork before calling start_enter because libkrun calls exit() on VM shutdown
+            // This ensures only the child process dies, not the parent
+            unsafe {
+                let pid = libc::fork();
+                if pid == 0 {
+                    // Child process - run the VM (will exit when VM shuts down)
+                    let _ = libkrun.start_enter(ctx_id);
+                    // If we get here, VM exited normally (shouldn't happen with libkrun)
+                    std::process::exit(0);
+                } else if pid > 0 {
+                    // Parent process - wait for child
+                    let mut status: libc::c_int = 0;
+                    libc::waitpid(pid, &mut status, 0);
+
+                    if libc::WIFEXITED(status) {
+                        let exit_code = libc::WEXITSTATUS(status);
+                        if exit_code == 0 {
+                            info!(vm_id = %vm_id, "VM exited normally");
+                        } else {
+                            error!(vm_id = %vm_id, exit_code, "VM exited with error");
+                        }
+                    } else {
+                        info!(vm_id = %vm_id, "VM terminated by signal");
+                    }
+                } else {
+                    error!(vm_id = %vm_id, "Failed to fork for VM execution");
+                }
+            }
+
+            // Signal that VM has exited
+            if let Some(sender) = exit_sender {
+                let _ = sender.send(());
             }
         });
 
@@ -460,7 +637,7 @@ impl VmmAdapter for LibkrunAdapter {
             hotplug_devices: false,
             metadata: HashMap::from([
                 ("adapter".to_string(), "libkrun".to_string()),
-                ("backend".to_string(), "libkrun-efi".to_string()),
+                ("backend".to_string(), "libkrun".to_string()),
                 (
                     "gpu_backend".to_string(),
                     if self.gpu_available { "metal" } else { "none" }.to_string(),
@@ -471,6 +648,10 @@ impl VmmAdapter for LibkrunAdapter {
 
     fn name(&self) -> &str {
         "libkrun"
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
@@ -487,7 +668,7 @@ mod tests {
                 println!("GPU available: {}", caps.gpu_passthrough);
             }
             Err(e) => {
-                println!("Adapter creation failed (expected if libkrun-efi not installed): {}", e);
+                println!("Adapter creation failed (expected if libkrun not installed): {}", e);
             }
         }
     }
