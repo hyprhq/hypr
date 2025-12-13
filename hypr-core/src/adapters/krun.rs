@@ -8,7 +8,7 @@
 //! - **Rosetta support**: x86_64 emulation on Apple Silicon
 //! - **Native performance**: Uses Virtualization.framework under the hood
 
-use super::libkrun_ffi::{net_features, GpuFlags, KernelFormat, Libkrun};
+use super::libkrun_ffi::{net_features, net_flags, GpuFlags, KernelFormat, Libkrun};
 use crate::adapters::{AdapterCapabilities, VmmAdapter};
 use crate::error::{HyprError, Result};
 use crate::types::network::NetworkConfig;
@@ -16,8 +16,7 @@ use crate::types::vm::{CommandSpec, DiskConfig, GpuConfig, VmConfig, VmHandle};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::io::Write;
-use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -32,12 +31,16 @@ static KESTREL_INITRAMFS: &[u8] =
 static KESTREL_INITRAMFS: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/embedded/initramfs-linux-arm64.cpio"));
 
+use crate::network::{GvproxyBackend, GvproxyPortForward, gvproxy};
+
 /// VM context state tracked by the adapter.
 struct VmContext {
     ctx_id: u32,
     shutdown_eventfd: Option<i32>,
     /// Receiver to wait for VM exit (for builders)
     exit_receiver: Option<tokio::sync::oneshot::Receiver<()>>,
+    /// gvproxy backend (if networking enabled)
+    gvproxy: Option<GvproxyBackend>,
 }
 
 /// libkrun adapter for macOS.
@@ -145,17 +148,24 @@ impl LibkrunAdapter {
         parts.push("console=hvc0".to_string());
 
         // Inject network configuration for runtime VMs
+        // gvproxy uses 192.168.127.0/24 subnet with DHCP
         if config.network_enabled {
             if let Some(ip) = &config.network.ip_address {
+                // Use static IP if specified
                 parts.push(format!("ip={}", ip));
-                // libkrun uses vmnet which defaults to 192.168.64.0/24
-                parts.push("netmask=255.255.255.0".to_string());
-                parts.push("gateway=192.168.64.1".to_string());
+                parts.push(format!("netmask={}", gvproxy::defaults::NETMASK_STR));
+                parts.push(format!("gateway={}", gvproxy::defaults::GATEWAY));
                 parts.push("mode=runtime".to_string());
                 debug!(
-                    "Injected network config: ip={} netmask=255.255.255.0 gateway=192.168.64.1",
-                    ip
+                    "Injected network config: ip={} netmask={} gateway={}",
+                    ip,
+                    gvproxy::defaults::NETMASK_STR,
+                    gvproxy::defaults::GATEWAY
                 );
+            } else {
+                // Use DHCP (gvproxy default)
+                parts.push("mode=runtime".to_string());
+                debug!("Network enabled with DHCP (gvproxy default)");
             }
         }
 
@@ -178,117 +188,6 @@ impl LibkrunAdapter {
         ]
     }
 
-    /// Connect to socket_vmnet daemon, spawning it if necessary.
-    ///
-    /// socket_vmnet provides vmnet.framework access for VMs on macOS.
-    /// hyprd will automatically start socket_vmnet if it's not running.
-    fn connect_to_socket_vmnet() -> Result<i32> {
-        use std::os::unix::io::IntoRawFd;
-
-        let socket_path = "/var/run/socket_vmnet";
-
-        // Try to connect first
-        if let Ok(stream) = UnixStream::connect(socket_path) {
-            info!("Connected to existing socket_vmnet");
-            return Ok(stream.into_raw_fd());
-        }
-
-        // Not running - try to spawn it ourselves
-        info!("socket_vmnet not running, attempting to start it");
-
-        // Remove stale socket file if it exists
-        if Path::new(socket_path).exists() {
-            debug!("Removing stale socket file: {}", socket_path);
-            let _ = std::fs::remove_file(socket_path);
-        }
-
-        // Find socket_vmnet binary
-        let binary_paths = [
-            "/opt/homebrew/opt/socket_vmnet/bin/socket_vmnet", // Homebrew ARM
-            "/usr/local/opt/socket_vmnet/bin/socket_vmnet",    // Homebrew Intel
-            "/opt/homebrew/bin/socket_vmnet",
-            "/usr/local/bin/socket_vmnet",
-        ];
-
-        let binary = binary_paths.iter().find(|p| Path::new(p).exists());
-
-        let binary = match binary {
-            Some(b) => *b,
-            None => {
-                return Err(HyprError::NetworkSetupFailed {
-                    reason: "socket_vmnet not installed. Install with: brew install socket_vmnet"
-                        .to_string(),
-                });
-            }
-        };
-
-        // Spawn socket_vmnet daemon
-        // --vmnet-gateway sets the gateway IP for the vmnet network
-        // --vmnet-dhcp-end=192.168.64.2 effectively disables DHCP (only 1 IP: .2)
-        // Our IPAM allocates static IPs starting from .10 to avoid any conflict
-        info!("Starting socket_vmnet: {}", binary);
-        match std::process::Command::new(binary)
-            .args([
-                "--vmnet-gateway=192.168.64.1",
-                "--vmnet-dhcp-end=192.168.64.2",
-                socket_path,
-            ])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
-            Ok(mut child) => {
-                info!("Started socket_vmnet daemon (pid: {:?})", child.id());
-
-                // Wait for socket to become available (up to 3 seconds)
-                for i in 0..30 {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    if let Ok(stream) = UnixStream::connect(socket_path) {
-                        info!("Connected to socket_vmnet after {}ms", (i + 1) * 100);
-                        return Ok(stream.into_raw_fd());
-                    }
-
-                    // Check if child exited with error
-                    if let Ok(Some(status)) = child.try_wait() {
-                        let mut stderr_output = String::new();
-                        if let Some(mut stderr) = child.stderr.take() {
-                            use std::io::Read;
-                            let _ = stderr.read_to_string(&mut stderr_output);
-                        }
-                        return Err(HyprError::NetworkSetupFailed {
-                            reason: format!(
-                                "socket_vmnet exited with {}: {}",
-                                status,
-                                stderr_output.trim()
-                            ),
-                        });
-                    }
-                }
-
-                // Still not available, get any error output
-                let mut stderr_output = String::new();
-                if let Some(mut stderr) = child.stderr.take() {
-                    use std::io::Read;
-                    let _ = stderr.read_to_string(&mut stderr_output);
-                }
-
-                Err(HyprError::NetworkSetupFailed {
-                    reason: format!(
-                        "socket_vmnet started but socket not available after 3s. stderr: {}",
-                        stderr_output.trim()
-                    ),
-                })
-            }
-            Err(e) => Err(HyprError::NetworkSetupFailed {
-                reason: format!(
-                    "Failed to start socket_vmnet: {}. Make sure hyprd runs as root.",
-                    e
-                ),
-            }),
-        }
-    }
-
     /// Wait for the VM to exit.
     /// This is useful for builders that need to wait for the VM to complete.
     pub async fn wait_for_exit(&self, handle: &VmHandle) -> Result<()> {
@@ -307,7 +206,17 @@ impl LibkrunAdapter {
     }
 
     /// Configure a libkrun context with VM settings.
-    fn configure_context(&self, ctx_id: u32, config: &VmConfig) -> Result<()> {
+    ///
+    /// # Arguments
+    /// * `ctx_id` - libkrun context ID
+    /// * `config` - VM configuration
+    /// * `gvproxy_socket` - Optional gvproxy socket path (for networking)
+    fn configure_context(
+        &self,
+        ctx_id: u32,
+        config: &VmConfig,
+        gvproxy_socket: Option<&std::path::Path>,
+    ) -> Result<()> {
         // Set VM resources
         let vcpus = config.resources.cpus.min(255) as u8;
         let ram_mib = config.resources.memory_mb;
@@ -348,25 +257,36 @@ impl LibkrunAdapter {
         }
 
         // Enable networking if requested
-        // On macOS, we use socket_vmnet which provides vmnet.framework access
+        // On macOS, we use gvproxy for userspace networking
         if config.network_enabled {
-            let mac = Self::generate_mac_address_bytes();
-            let socket_fd = Self::connect_to_socket_vmnet()?;
-            self.libkrun.add_net_unixstream(
-                ctx_id,
-                None, // path (we pass fd instead)
-                Some(socket_fd),
-                &mac,
-                net_features::COMPAT,
-                0, // flags
-            )?;
-            debug!(
-                mac = format!(
-                    "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-                ),
-                "Network enabled via socket_vmnet"
-            );
+            if let Some(socket_path) = gvproxy_socket {
+                let mac = Self::generate_mac_address_bytes();
+
+                // Create our side of the unixgram socket pair
+                // gvproxy listens on vfkit_socket_path, we connect from vm_socket_path
+                let vm_socket_path = socket_path.with_extension("vm.sock");
+
+                // Use add_net_unixgram for gvproxy/vfkit mode
+                self.libkrun.add_net_unixgram(
+                    ctx_id,
+                    &vm_socket_path,  // Our socket
+                    socket_path,      // gvproxy's socket
+                    &mac,
+                    net_features::COMPAT,
+                    net_flags::VFKIT, // vfkit compatibility mode for gvproxy
+                )?;
+
+                debug!(
+                    mac = format!(
+                        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+                    ),
+                    socket = %socket_path.display(),
+                    "Network enabled via gvproxy"
+                );
+            } else {
+                warn!("Network enabled but no gvproxy socket provided");
+            }
         }
 
         // Add Rosetta support on ARM64
@@ -441,14 +361,49 @@ impl VmmAdapter for LibkrunAdapter {
 
         let start = Instant::now();
 
+        // Start gvproxy for networking if enabled
+        let mut gvproxy_backend: Option<GvproxyBackend> = None;
+        let gvproxy_socket: Option<PathBuf>;
+
+        if config.network_enabled {
+            debug!("Starting gvproxy for networking");
+            let mut backend = GvproxyBackend::new(&config.id);
+
+            // Convert port mappings to gvproxy format
+            let port_forwards: Vec<GvproxyPortForward> = config
+                .ports
+                .iter()
+                .map(|pm| GvproxyPortForward {
+                    host_port: pm.host_port,
+                    guest_port: pm.vm_port,
+                    protocol: format!("{:?}", pm.protocol).to_lowercase(),
+                })
+                .collect();
+
+            backend.start(
+                gvproxy::defaults::GATEWAY,
+                gvproxy::defaults::CIDR,
+                port_forwards,
+                None, // Use gvproxy's built-in DNS
+            )?;
+
+            gvproxy_socket = Some(backend.vfkit_socket_path().to_path_buf());
+            gvproxy_backend = Some(backend);
+        } else {
+            gvproxy_socket = None;
+        }
+
         // Create libkrun context
         let ctx_id = self.libkrun.create_ctx()?;
         debug!(ctx_id, "Created libkrun context");
 
-        // Configure the context
-        if let Err(e) = self.configure_context(ctx_id, config) {
+        // Configure the context (pass gvproxy socket path if available)
+        if let Err(e) = self.configure_context(ctx_id, config, gvproxy_socket.as_deref()) {
             // Clean up on failure
             let _ = self.libkrun.free_ctx(ctx_id);
+            if let Some(mut gv) = gvproxy_backend.take() {
+                let _ = gv.stop();
+            }
             metrics::counter!("hypr_vm_start_failures_total", "adapter" => "libkrun", "reason" => "config_failed").increment(1);
             return Err(e);
         }
@@ -459,12 +414,17 @@ impl VmmAdapter for LibkrunAdapter {
         // Create exit notification channel
         let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
 
-        // Store context with exit receiver
+        // Store context with exit receiver and gvproxy backend
         {
             let mut contexts = self.contexts.lock().await;
             contexts.insert(
                 config.id.clone(),
-                VmContext { ctx_id, shutdown_eventfd, exit_receiver: Some(exit_rx) },
+                VmContext {
+                    ctx_id,
+                    shutdown_eventfd,
+                    exit_receiver: Some(exit_rx),
+                    gvproxy: gvproxy_backend,
+                },
             );
         }
 
@@ -606,14 +566,25 @@ impl VmmAdapter for LibkrunAdapter {
     async fn delete(&self, handle: &VmHandle) -> Result<()> {
         info!("Deleting VM resources");
 
-        let ctx_id = {
+        let (ctx_id, mut gvproxy) = {
             let mut contexts = self.contexts.lock().await;
-            contexts.remove(&handle.id).map(|c| c.ctx_id)
+            contexts
+                .remove(&handle.id)
+                .map(|c| (Some(c.ctx_id), c.gvproxy))
+                .unwrap_or((None, None))
         };
 
+        // Free libkrun context
         if let Some(ctx_id) = ctx_id {
             if let Err(e) = self.libkrun.free_ctx(ctx_id) {
                 warn!(error = %e, "Failed to free libkrun context");
+            }
+        }
+
+        // Stop gvproxy
+        if let Some(ref mut gv) = gvproxy {
+            if let Err(e) = gv.stop() {
+                warn!(error = %e, "Failed to stop gvproxy");
             }
         }
 

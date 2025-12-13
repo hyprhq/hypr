@@ -431,7 +431,8 @@ mod tests {
     #[test]
     fn test_packet_size() {
         // Ensure packet size matches what Kestrel sends
-        assert_eq!(VmMetricsPacket::SIZE, 112);
+        // 4 (magic) + 1 (version) + 3 (reserved) + 11 * 8 (u64 fields) + 2 * 4 (u32 fields) = 104
+        assert_eq!(VmMetricsPacket::SIZE, 104);
     }
 
     #[test]

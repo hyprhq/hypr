@@ -107,6 +107,10 @@ mod libkrun_ffi;
 #[cfg(target_os = "macos")]
 pub mod krun;
 
+// Re-export libkrun network feature/flag constants for gvproxy integration
+#[cfg(target_os = "macos")]
+pub use libkrun_ffi::{net_features, net_flags};
+
 // VFIO module (GPU passthrough)
 // Available on all platforms, but VFIO operations only work on Linux
 pub mod vfio;

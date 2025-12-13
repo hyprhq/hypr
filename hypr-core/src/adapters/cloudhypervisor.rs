@@ -5,10 +5,11 @@
 //! - Start: No-op (VM boots on create)
 //! - Stop: Send graceful shutdown via API, wait for exit, fallback to SIGKILL
 //! - Kill: SIGKILL the CH process immediately
-//! - Delete: Clean up resources (virtiofsd, TAP devices, VFIO)
+//! - Delete: Clean up resources (virtiofsd, gvproxy, VFIO)
 
 use crate::adapters::{AdapterCapabilities, CommandSpec, VmmAdapter};
 use crate::error::{HyprError, Result};
+use crate::network::{gvproxy, GvproxyBackend, GvproxyPortForward};
 use crate::types::network::NetworkConfig;
 use crate::types::vm::{DiskConfig, GpuConfig, VmConfig, VmHandle};
 use async_trait::async_trait;
@@ -35,6 +36,8 @@ pub struct CloudHypervisorAdapter {
     kernel_path: PathBuf,
     /// Track virtiofsd daemons by VM ID (for cleanup)
     virtiofsd_daemons: Arc<Mutex<HashMap<String, Vec<VirtiofsdDaemon>>>>,
+    /// Track gvproxy backends by VM ID (for cleanup)
+    gvproxy_backends: Arc<Mutex<HashMap<String, GvproxyBackend>>>,
     /// Track bound VFIO devices by VM ID (for cleanup/restore)
     bound_vfio_devices: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
@@ -66,6 +69,7 @@ impl CloudHypervisorAdapter {
             runtime_dir,
             kernel_path,
             virtiofsd_daemons: Arc::new(Mutex::new(HashMap::new())),
+            gvproxy_backends: Arc::new(Mutex::new(HashMap::new())),
             bound_vfio_devices: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -109,102 +113,6 @@ impl CloudHypervisorAdapter {
         use std::time::{SystemTime, UNIX_EPOCH};
         let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
         format!("52:54:00:{:02x}:{:02x}:{:02x}", (seed >> 16) as u8, (seed >> 8) as u8, seed as u8)
-    }
-
-    /// Create and configure a TAP device for VM networking.
-    ///
-    /// This must be called BEFORE spawning cloud-hypervisor, as it expects
-    /// the TAP device to already exist.
-    fn configure_tap_device(tap_name: &str) -> Result<()> {
-        use std::process::Command as StdCommand;
-
-        // Enable IP forwarding (required for routing between host and VM)
-        let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1");
-
-        // Create the TAP device
-        let output =
-            StdCommand::new("ip").args(["tuntap", "add", "mode", "tap", "name", tap_name]).output();
-
-        match output {
-            Ok(o) if o.status.success() => {
-                debug!("Created TAP device {}", tap_name);
-            }
-            Ok(o) => {
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                // Ignore "RTNETLINK answers: File exists" - TAP already exists
-                if !stderr.contains("File exists") && !stderr.contains("already exists") {
-                    warn!("Failed to create TAP {}: {}", tap_name, stderr);
-                }
-            }
-            Err(e) => {
-                return Err(HyprError::NetworkSetupFailed {
-                    reason: format!("Failed to create TAP device {}: {}", tap_name, e),
-                });
-            }
-        }
-
-        // Attach TAP to the bridge (vbr0)
-        // The bridge has IP 10.88.0.1, VMs get 10.88.0.x addresses
-        let output =
-            StdCommand::new("ip").args(["link", "set", tap_name, "master", "vbr0"]).output();
-
-        match output {
-            Ok(o) if o.status.success() => {
-                debug!("Attached TAP {} to bridge vbr0", tap_name);
-            }
-            Ok(o) => {
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                if !stderr.contains("already a member") {
-                    warn!("Failed to attach TAP {} to bridge: {}", tap_name, stderr);
-                }
-            }
-            Err(e) => {
-                warn!("Failed to attach TAP {} to bridge: {}", tap_name, e);
-            }
-        }
-
-        // Bring TAP device up
-        let output = StdCommand::new("ip").args(["link", "set", tap_name, "up"]).output();
-
-        match output {
-            Ok(o) if o.status.success() => {
-                debug!("Brought up TAP device {}", tap_name);
-            }
-            Ok(o) => {
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                warn!("Failed to bring up TAP {}: {}", tap_name, stderr);
-            }
-            Err(e) => {
-                warn!("Failed to bring up TAP {}: {}", tap_name, e);
-            }
-        }
-
-        info!("Configured TAP device {} attached to vbr0", tap_name);
-        Ok(())
-    }
-
-    /// Clean up a TAP device when VM is deleted.
-    fn cleanup_tap_device(tap_name: &str) {
-        use std::process::Command as StdCommand;
-
-        // Delete the TAP device
-        let output = StdCommand::new("ip").args(["link", "delete", tap_name]).output();
-
-        match output {
-            Ok(o) if o.status.success() => {
-                debug!("Deleted TAP device {}", tap_name);
-            }
-            Ok(o) => {
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                // Ignore "Cannot find device" - already deleted
-                if !stderr.contains("Cannot find device") {
-                    debug!("TAP {} cleanup: {}", tap_name, stderr.trim());
-                }
-            }
-            Err(e) => {
-                debug!("Failed to delete TAP {}: {}", tap_name, e);
-            }
-        }
     }
 
     /// Start virtiofsd daemons for virtio-fs mounts.
@@ -312,6 +220,7 @@ impl CloudHypervisorAdapter {
         &self,
         config: &VmConfig,
         virtiofsd_daemons: &[VirtiofsdDaemon],
+        gvproxy_socket: Option<&std::path::Path>,
         log_path: Option<&std::path::Path>,
     ) -> Result<Vec<String>> {
         let mut args = Vec::new();
@@ -354,17 +263,31 @@ impl CloudHypervisorAdapter {
         kernel_cmdline_parts.push("console=ttyAMA0".to_string());
 
         // Inject network configuration into kernel cmdline for runtime VMs
+        // gvproxy uses 192.168.127.0/24 subnet with DHCP
         if config.network_enabled {
             if let Some(ip) = &config.network.ip_address {
                 // Use proper kernel IP-Config format: ip=<client>:<server>:<gw>:<netmask>:<host>:<dev>:<autoconf>
                 // This ensures the kernel sets up networking correctly before init runs
-                // Format: ip=10.88.0.2::10.88.0.1:255.255.0.0:::off
-                kernel_cmdline_parts.push(format!("ip={}::10.88.0.1:255.255.0.0:::off", ip));
+                kernel_cmdline_parts.push(format!(
+                    "ip={}::{}:{}:::off",
+                    ip,
+                    gvproxy::defaults::GATEWAY,
+                    gvproxy::defaults::NETMASK_STR
+                ));
                 // Also pass for kestrel's use (backwards compatibility)
-                kernel_cmdline_parts.push("netmask=255.255.0.0".to_string());
-                kernel_cmdline_parts.push("gateway=10.88.0.1".to_string());
+                kernel_cmdline_parts.push(format!("netmask={}", gvproxy::defaults::NETMASK_STR));
+                kernel_cmdline_parts.push(format!("gateway={}", gvproxy::defaults::GATEWAY));
                 kernel_cmdline_parts.push("mode=runtime".to_string());
-                debug!("Injected network config: ip={}::10.88.0.1:255.255.0.0:::off", ip);
+                debug!(
+                    "Injected network config: ip={}::{}:{}:::off",
+                    ip,
+                    gvproxy::defaults::GATEWAY,
+                    gvproxy::defaults::NETMASK_STR
+                );
+            } else {
+                // Use DHCP (gvproxy default)
+                kernel_cmdline_parts.push("mode=runtime".to_string());
+                debug!("Network enabled with DHCP (gvproxy default)");
             }
         }
 
@@ -415,14 +338,17 @@ impl CloudHypervisorAdapter {
             }
         }
 
-        // Network (only if enabled - build VMs have this disabled for security)
+        // Network via gvproxy (only if enabled - build VMs have this disabled for security)
         if config.network_enabled {
-            let mac = config.network.mac_address.clone().unwrap_or_else(Self::generate_mac_address);
-            // TAP device names are limited to 15 chars (IFNAMSIZ-1 on Linux)
-            // Use "tap" prefix (3 chars) + truncated ID (12 chars max)
-            let tap_name = format!("tap{}", &config.id[..config.id.len().min(12)]);
-            args.push("--net".to_string());
-            args.push(format!("tap={},mac={}", tap_name, mac));
+            if let Some(socket_path) = gvproxy_socket {
+                let mac = config.network.mac_address.clone().unwrap_or_else(Self::generate_mac_address);
+                // Use gvproxy's qemu socket for virtio-net
+                args.push("--net".to_string());
+                args.push(format!("socket={},mac={}", socket_path.display(), mac));
+                debug!(socket = %socket_path.display(), mac = %mac, "Network via gvproxy");
+            } else {
+                warn!("Network enabled but no gvproxy socket provided");
+            }
         }
 
         // Serial console - redirect to log file if provided, otherwise tty
@@ -586,8 +512,9 @@ impl VmmAdapter for CloudHypervisorAdapter {
             Vec::new()
         };
 
-        // Build arguments with virtiofsd socket paths (no log file for command spec)
-        let args = self.build_args(config, &virtiofsd_daemons, None)?;
+        // Build arguments with virtiofsd socket paths (no gvproxy or log file for command spec)
+        // Build VMs don't use networking for security
+        let args = self.build_args(config, &virtiofsd_daemons, None, None)?;
 
         Ok(CommandSpec {
             program: self.binary_path.to_string_lossy().to_string(),
@@ -625,10 +552,46 @@ impl VmmAdapter for CloudHypervisorAdapter {
         // Create log file path for VM output
         let log_path = Self::get_vm_log_path(&config.id)?;
 
-        // Build arguments (using virtiofsd daemon socket paths and log path for serial)
+        // Start gvproxy for networking if enabled
+        let gvproxy_socket: Option<PathBuf> = if config.network_enabled {
+            debug!("Starting gvproxy for networking");
+            let mut backend = GvproxyBackend::new(&config.id);
+
+            // Convert port mappings to gvproxy format
+            let port_forwards: Vec<GvproxyPortForward> = config
+                .ports
+                .iter()
+                .map(|pm| GvproxyPortForward {
+                    host_port: pm.host_port,
+                    guest_port: pm.vm_port,
+                    protocol: format!("{:?}", pm.protocol).to_lowercase(),
+                })
+                .collect();
+
+            backend.start(
+                gvproxy::defaults::GATEWAY,
+                gvproxy::defaults::CIDR,
+                port_forwards,
+                None, // Use gvproxy's built-in DNS
+            )?;
+
+            let socket_path = backend.qemu_socket_path().to_path_buf();
+
+            // Store gvproxy for cleanup
+            {
+                let mut map = self.gvproxy_backends.lock().unwrap();
+                map.insert(config.id.clone(), backend);
+            }
+
+            Some(socket_path)
+        } else {
+            None
+        };
+
+        // Build arguments (using virtiofsd daemon socket paths, gvproxy socket, and log path)
         let args = {
             let _span = span!(Level::DEBUG, "build_ch_args").entered();
-            self.build_args(config, &virtiofsd_daemons, Some(&log_path))?
+            self.build_args(config, &virtiofsd_daemons, gvproxy_socket.as_deref(), Some(&log_path))?
         };
         let log_file = std::fs::File::create(&log_path)
             .map_err(|e| HyprError::IoError { path: log_path.clone(), source: e })?;
@@ -637,13 +600,6 @@ impl VmmAdapter for CloudHypervisorAdapter {
             .map_err(|e| HyprError::IoError { path: log_path.clone(), source: e })?;
 
         info!("VM logs will be written to: {}", log_path.display());
-
-        // Create and configure TAP device BEFORE spawning cloud-hypervisor
-        // Cloud-hypervisor expects the TAP device to already exist
-        if config.network_enabled {
-            let tap_name = format!("tap{}", &config.id[..config.id.len().min(12)]);
-            Self::configure_tap_device(&tap_name)?;
-        }
 
         // Bind GPU device to vfio-pci if GPU passthrough is requested
         if let Some(gpu) = &config.gpu {
@@ -679,10 +635,13 @@ impl VmmAdapter for CloudHypervisorAdapter {
             .stderr(std::process::Stdio::from(log_file_err))
             .spawn()
             .map_err(|e| {
-                // Clean up TAP device on failure
+                // Clean up gvproxy on failure
                 if config.network_enabled {
-                    let tap_name = format!("tap{}", &config.id[..config.id.len().min(12)]);
-                    Self::cleanup_tap_device(&tap_name);
+                    if let Ok(mut map) = self.gvproxy_backends.lock() {
+                        if let Some(mut backend) = map.remove(&config.id) {
+                            let _ = backend.stop();
+                        }
+                    }
                 }
 
                 // Clean up virtiofsd daemons on failure
@@ -846,9 +805,15 @@ impl VmmAdapter for CloudHypervisorAdapter {
             }
         }
 
-        // Clean up TAP device
-        let tap_name = format!("tap{}", &handle.id[..handle.id.len().min(12)]);
-        Self::cleanup_tap_device(&tap_name);
+        // Stop gvproxy
+        {
+            let mut map = self.gvproxy_backends.lock().unwrap();
+            if let Some(mut backend) = map.remove(&handle.id) {
+                if let Err(e) = backend.stop() {
+                    warn!(error = %e, "Failed to stop gvproxy");
+                }
+            }
+        }
 
         // Clean up API socket
         if let Some(socket_path) = &handle.socket_path {

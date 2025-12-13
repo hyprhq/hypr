@@ -109,6 +109,10 @@ impl VmmAdapter for MockAdapter {
         self.temp_dir.join(format!("mock-{}.vsock", handle.id))
     }
 
+    fn metrics_vsock_path(&self, handle: &VmHandle) -> PathBuf {
+        self.temp_dir.join(format!("mock-{}-metrics.vsock", handle.id))
+    }
+
     fn capabilities(&self) -> AdapterCapabilities {
         self.capabilities.clone()
     }

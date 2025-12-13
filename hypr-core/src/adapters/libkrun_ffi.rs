@@ -56,6 +56,16 @@ pub mod net_features {
     pub const COMPAT: u32 = CSUM | GUEST_CSUM | GUEST_TSO4 | GUEST_UFO | HOST_TSO4 | HOST_UFO;
 }
 
+/// Network flags for libkrun (for add_net_* functions)
+#[allow(dead_code)]
+pub mod net_flags {
+    /// No flags (default)
+    pub const NONE: u32 = 0;
+    /// VFKit compatibility mode for gvproxy
+    /// Uses vfkit/gvproxy datagram protocol instead of standard virtio-net stream
+    pub const VFKIT: u32 = 1 << 0;
+}
+
 /// libkrun function signatures
 type KrunSetLogLevel = unsafe extern "C" fn(level: c_uint) -> c_int;
 type KrunCreateCtx = unsafe extern "C" fn() -> c_int;
@@ -108,6 +118,14 @@ type KrunAddNetUnixstream = unsafe extern "C" fn(
     features: c_uint,
     flags: c_uint,
 ) -> c_int;
+type KrunAddNetUnixgram = unsafe extern "C" fn(
+    ctx_id: c_uint,
+    path: *const c_char,
+    path_peer: *const c_char,
+    mac: *const u8,
+    features: c_uint,
+    flags: c_uint,
+) -> c_int;
 type KrunSetSmbiosOemStrings =
     unsafe extern "C" fn(ctx_id: c_uint, oem_strings: *const *const c_char) -> c_int;
 
@@ -152,6 +170,7 @@ pub struct Libkrun {
     set_passt_fd: KrunSetPasstFd,
     add_net_tap: KrunAddNetTap,
     add_net_unixstream: KrunAddNetUnixstream,
+    add_net_unixgram: Option<KrunAddNetUnixgram>,
     set_smbios_oem_strings: KrunSetSmbiosOemStrings,
     // Console multiplexing (for PTY/exec support)
     add_virtio_console_multiport: Option<KrunAddVirtioConsoleMultiport>,
@@ -238,6 +257,9 @@ impl Libkrun {
             let add_net_unixstream: Symbol<KrunAddNetUnixstream> = lib_clone
                 .get(b"krun_add_net_unixstream\0")
                 .map_err(|e| Self::symbol_error("krun_add_net_unixstream", e))?;
+            // add_net_unixgram is optional (available in newer libkrun with gvproxy support)
+            let add_net_unixgram: Option<Symbol<KrunAddNetUnixgram>> =
+                lib_clone.get(b"krun_add_net_unixgram\0").ok();
             let set_smbios_oem_strings: Symbol<KrunSetSmbiosOemStrings> = lib_clone
                 .get(b"krun_set_smbios_oem_strings\0")
                 .map_err(|e| Self::symbol_error("krun_set_smbios_oem_strings", e))?;
@@ -272,6 +294,7 @@ impl Libkrun {
                 set_passt_fd: *set_passt_fd,
                 add_net_tap: *add_net_tap,
                 add_net_unixstream: *add_net_unixstream,
+                add_net_unixgram: add_net_unixgram.map(|s| *s),
                 set_smbios_oem_strings: *set_smbios_oem_strings,
                 // Console multiplexing (optional)
                 add_virtio_console_multiport: add_virtio_console_multiport.map(|s| *s),
@@ -587,6 +610,62 @@ impl Libkrun {
             (self.add_net_unixstream)(ctx_id, path_ptr, fd_val, mac.as_ptr(), features, flags)
         };
         Self::check_result(ret, "krun_add_net_unixstream")
+    }
+
+    /// Add a network device via unix datagram socket (for gvproxy/vfkit on macOS).
+    ///
+    /// Creates a virtio-net device connected to gvproxy via unixgram sockets.
+    /// This is the preferred method for networking with gvproxy on macOS.
+    ///
+    /// # Arguments
+    /// * `ctx_id` - libkrun context ID
+    /// * `path` - Socket path for the VM side (our socket)
+    /// * `path_peer` - Socket path for gvproxy side (gvproxy's listen socket)
+    /// * `mac` - 6-byte MAC address
+    /// * `features` - virtio-net features (use net_features::COMPAT)
+    /// * `flags` - net_flags::VFKIT for gvproxy compatibility
+    pub fn add_net_unixgram(
+        &self,
+        ctx_id: u32,
+        path: &Path,
+        path_peer: &Path,
+        mac: &[u8; 6],
+        features: u32,
+        flags: u32,
+    ) -> Result<()> {
+        let add_net_unixgram = self.add_net_unixgram.ok_or_else(|| HyprError::HypervisorNotFound {
+            hypervisor: "libkrun: add_net_unixgram not available (need newer libkrun with gvproxy support)".to_string(),
+        })?;
+
+        let path_cstr = Self::path_to_cstring(path)?;
+        let path_peer_cstr = Self::path_to_cstring(path_peer)?;
+
+        debug!(
+            ctx_id,
+            path = ?path,
+            path_peer = ?path_peer,
+            mac = format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]),
+            features,
+            flags,
+            "Adding network device via unix datagram (gvproxy)"
+        );
+        let ret = unsafe {
+            (add_net_unixgram)(
+                ctx_id,
+                path_cstr.as_ptr(),
+                path_peer_cstr.as_ptr(),
+                mac.as_ptr(),
+                features,
+                flags,
+            )
+        };
+        Self::check_result(ret, "krun_add_net_unixgram")
+    }
+
+    /// Check if gvproxy/unixgram networking is available.
+    pub fn has_gvproxy_support(&self) -> bool {
+        self.add_net_unixgram.is_some()
     }
 
     /// Set SMBIOS OEM strings (for passing data to guest).

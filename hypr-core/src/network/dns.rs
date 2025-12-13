@@ -5,7 +5,7 @@
 //!
 //! # Example
 //!
-//! ```no_run
+//! ```ignore
 //! use hypr_core::network::dns::DnsServer;
 //! use hypr_core::network::registry::ServiceRegistry;
 //! use std::sync::Arc;
@@ -13,15 +13,15 @@
 //!
 //! # #[tokio::main]
 //! # async fn main() -> anyhow::Result<()> {
-//! let registry = Arc::new(ServiceRegistry::new_in_memory());
-//! let dns = DnsServer::new(
-//!     IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1)),
-//!     53,
-//!     registry,
-//!     vec![IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))],
-//! );
-//!
-//! dns.start().await?;
+//! // ServiceRegistry requires a database connection
+//! // let registry = Arc::new(ServiceRegistry::new(pool).await?);
+//! // let dns = DnsServer::new(
+//! //     IpAddr::V4(Ipv4Addr::new(192, 168, 127, 1)),
+//! //     53,
+//! //     registry,
+//! //     vec![IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))],
+//! // );
+//! // dns.start().await?;
 //! # Ok(())
 //! # }
 //! ```

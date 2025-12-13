@@ -26,8 +26,8 @@ pub use error::{HyprError, Result};
 pub use events::{Event, EventBus, EventSubscriber, EventType};
 pub use metrics::{MetricsCollector, VmMetrics};
 pub use network::{
-    create_bridge_manager, gateway, netmask, netmask_str, network_cidr, network_defaults,
-    BridgeConfig, BridgeManager, IpAllocator, NetworkDefaults,
+    gateway, gvproxy, netmask, netmask_str, network_cidr, network_defaults, GvproxyBackend,
+    GvproxyPortForward, IpAllocator, NetworkDefaults,
 };
 pub use observability::{
     health::HealthChecker, init as init_observability, shutdown as shutdown_observability,
