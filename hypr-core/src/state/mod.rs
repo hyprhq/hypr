@@ -904,4 +904,147 @@ impl StateManager {
             labels,
         })
     }
+
+    // ========================
+    // Security Report Operations
+    // ========================
+
+    /// Insert a new security report.
+    #[instrument(skip(self), fields(report_id = %report.id))]
+    pub async fn insert_security_report(
+        &self,
+        report: &crate::security::SecurityReport,
+    ) -> Result<()> {
+        let summary_json = serde_json::to_string(&report.summary)
+            .map_err(|e| HyprError::DatabaseError(format!("Failed to serialize summary: {}", e)))?;
+
+        let vulns_json = serde_json::to_string(&report.vulnerabilities).map_err(|e| {
+            HyprError::DatabaseError(format!("Failed to serialize vulnerabilities: {}", e))
+        })?;
+
+        let metadata_json = serde_json::to_string(&report.metadata)
+            .map_err(|e| HyprError::DatabaseError(format!("Failed to serialize metadata: {}", e)))?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO security_reports (id, image_id, image_name, scanned_at, scanner_version, risk_level, summary, vulnerabilities, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&report.id)
+        .bind(&report.image_id)
+        .bind(&report.image_name)
+        .bind(report.scanned_at)
+        .bind(&report.scanner_version)
+        .bind(report.risk_level.as_str())
+        .bind(summary_json)
+        .bind(vulns_json)
+        .bind(metadata_json)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Get a security report by ID.
+    #[instrument(skip(self), fields(report_id = %id))]
+    pub async fn get_security_report(&self, id: &str) -> Result<crate::security::SecurityReport> {
+        let row = sqlx::query("SELECT * FROM security_reports WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| HyprError::DatabaseError(e.to_string()))?
+            .ok_or_else(|| HyprError::Internal(format!("Security report not found: {}", id)))?;
+
+        self.row_to_security_report(row)
+    }
+
+    /// List security reports with optional filters.
+    #[instrument(skip(self))]
+    pub async fn list_security_reports(
+        &self,
+        image_id: Option<&str>,
+        image_name: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<Vec<crate::security::SecurityReport>> {
+        let limit = limit.unwrap_or(50) as i64;
+
+        let rows = if let Some(image_id) = image_id {
+            sqlx::query(
+                "SELECT * FROM security_reports WHERE image_id = ? ORDER BY scanned_at DESC LIMIT ?",
+            )
+            .bind(image_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| HyprError::DatabaseError(e.to_string()))?
+        } else if let Some(image_name) = image_name {
+            let pattern = format!("{}%", image_name);
+            sqlx::query(
+                "SELECT * FROM security_reports WHERE image_name LIKE ? ORDER BY scanned_at DESC LIMIT ?",
+            )
+            .bind(&pattern)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| HyprError::DatabaseError(e.to_string()))?
+        } else {
+            sqlx::query("SELECT * FROM security_reports ORDER BY scanned_at DESC LIMIT ?")
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| HyprError::DatabaseError(e.to_string()))?
+        };
+
+        rows.into_iter().map(|row| self.row_to_security_report(row)).collect()
+    }
+
+    /// Delete a security report.
+    #[instrument(skip(self), fields(report_id = %id))]
+    pub async fn delete_security_report(&self, id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM security_reports WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    fn row_to_security_report(
+        &self,
+        row: sqlx::sqlite::SqliteRow,
+    ) -> Result<crate::security::SecurityReport> {
+        use crate::security::{RiskLevel, Vulnerability, VulnerabilitySummary};
+
+        let risk_level_str: String = row.get("risk_level");
+        let risk_level = RiskLevel::parse(&risk_level_str);
+
+        let summary_json: String = row.get("summary");
+        let summary: VulnerabilitySummary = serde_json::from_str(&summary_json).map_err(|e| {
+            HyprError::DatabaseError(format!("Failed to deserialize summary: {}", e))
+        })?;
+
+        let vulns_json: String = row.get("vulnerabilities");
+        let vulnerabilities: Vec<Vulnerability> = serde_json::from_str(&vulns_json).map_err(|e| {
+            HyprError::DatabaseError(format!("Failed to deserialize vulnerabilities: {}", e))
+        })?;
+
+        let metadata_json: String = row.get("metadata");
+        let metadata: std::collections::HashMap<String, String> =
+            serde_json::from_str(&metadata_json).unwrap_or_default();
+
+        Ok(crate::security::SecurityReport {
+            id: row.get("id"),
+            image_id: row.get("image_id"),
+            image_name: row.get("image_name"),
+            scanned_at: row.get("scanned_at"),
+            scanner_version: row.get("scanner_version"),
+            risk_level,
+            summary,
+            vulnerabilities,
+            metadata,
+        })
+    }
 }

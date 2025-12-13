@@ -91,6 +91,11 @@ service HyprService {
   rpc ListVMProcesses(ListVMProcessesRequest) returns (ListVMProcessesResponse);
   rpc GetVMProcess(GetVMProcessRequest) returns (VMProcess);
   rpc SignalVMProcess(SignalVMProcessRequest) returns (SignalVMProcessResponse);
+
+  // Security Scanning (P1) - Vulnerability detection for images
+  rpc ScanImage(ScanImageRequest) returns (stream ScanEvent);
+  rpc GetSecurityReport(GetSecurityReportRequest) returns (SecurityReport);
+  rpc ListSecurityReports(ListSecurityReportsRequest) returns (ListSecurityReportsResponse);
 }
 
 // ============================================================================
@@ -1007,4 +1012,108 @@ message SignalVMProcessRequest {
 
 message SignalVMProcessResponse {
   bool success = 1;
+}
+
+// ============================================================================
+// Security Scanning Types (P1)
+// ============================================================================
+
+// Request to scan an image for vulnerabilities.
+message ScanImageRequest {
+  string image = 1;                     // Image name:tag or ID to scan
+  bool skip_db_update = 2;              // Skip vulnerability database update
+  repeated string severity_filter = 3;  // Filter: "CRITICAL", "HIGH", "MEDIUM", "LOW"
+}
+
+// Streaming events during image scan.
+message ScanEvent {
+  oneof event {
+    ScanProgress progress = 1;
+    ScanComplete complete = 2;
+    ScanError error = 3;
+  }
+}
+
+// Progress update during scanning.
+message ScanProgress {
+  string stage = 1;                     // "initializing", "updating_db", "scanning", "analyzing"
+  string message = 2;                   // Human-readable progress message
+  uint32 percent = 3;                   // Progress percentage (0-100)
+}
+
+// Scan completed successfully.
+message ScanComplete {
+  SecurityReport report = 1;
+}
+
+// Scan failed with an error.
+message ScanError {
+  string message = 1;
+  string code = 2;                      // Error code for programmatic handling
+}
+
+// Security report for a scanned image.
+message SecurityReport {
+  string id = 1;                        // Unique report ID
+  string image_id = 2;                  // Scanned image ID
+  string image_name = 3;                // Image name:tag
+  int64 scanned_at = 4;                 // Unix timestamp when scanned
+  string scanner_version = 5;           // Version of the scanner used
+  RiskLevel risk_level = 6;             // Overall risk assessment
+  VulnerabilitySummary summary = 7;     // Vulnerability counts by severity
+  repeated Vulnerability vulnerabilities = 8; // Detailed vulnerability list
+  map<string, string> metadata = 9;     // Additional metadata
+}
+
+// Overall risk level for an image.
+enum RiskLevel {
+  RISK_LEVEL_UNSPECIFIED = 0;
+  RISK_LEVEL_CRITICAL = 1;              // Critical vulnerabilities found
+  RISK_LEVEL_HIGH = 2;                  // High severity vulnerabilities
+  RISK_LEVEL_MEDIUM = 3;                // Medium severity vulnerabilities
+  RISK_LEVEL_LOW = 4;                   // Low severity vulnerabilities
+  RISK_LEVEL_NONE = 5;                  // No vulnerabilities found
+}
+
+// Summary of vulnerabilities by severity.
+message VulnerabilitySummary {
+  uint32 critical = 1;
+  uint32 high = 2;
+  uint32 medium = 3;
+  uint32 low = 4;
+  uint32 unknown = 5;
+  uint32 total = 6;
+}
+
+// A single vulnerability found in an image.
+message Vulnerability {
+  string id = 1;                        // CVE ID (e.g., "CVE-2024-12345")
+  string severity = 2;                  // "CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"
+  string package_name = 3;              // Affected package name
+  string installed_version = 4;         // Currently installed version
+  string fixed_version = 5;             // Version that fixes the vulnerability (empty if none)
+  string title = 6;                     // Short title/summary
+  string description = 7;               // Detailed description
+  repeated string references = 8;       // URLs for more information
+  double cvss_score = 9;                // CVSS score (0.0-10.0)
+  string cvss_vector = 10;              // CVSS vector string
+  int64 published_date = 11;            // When vulnerability was published
+  int64 last_modified = 12;             // When vulnerability was last updated
+}
+
+// Request to get an existing security report.
+message GetSecurityReportRequest {
+  string report_id = 1;                 // Report ID
+}
+
+// Request to list security reports.
+message ListSecurityReportsRequest {
+  optional string image_id = 1;         // Filter by image ID
+  optional string image_name = 2;       // Filter by image name (prefix match)
+  optional uint32 limit = 3;            // Max reports to return (default: 50)
+}
+
+// Response containing list of security reports.
+message ListSecurityReportsResponse {
+  repeated SecurityReport reports = 1;
 }

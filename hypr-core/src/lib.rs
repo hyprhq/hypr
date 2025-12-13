@@ -18,6 +18,7 @@ pub mod ports;
 pub mod process;
 pub mod proto_convert;
 pub mod registry;
+pub mod security;
 pub mod snapshots;
 pub mod state;
 pub mod templates;
@@ -38,6 +39,10 @@ pub use observability::{
     health::HealthChecker, init as init_observability, shutdown as shutdown_observability,
 };
 pub use process::{ProcessExplorer, ProcessSortBy, VMProcess};
+pub use security::{
+    RiskLevel, ScanOptions, ScanProgress, ScanStage, SecurityReport, SecurityScanner,
+    TrivyScanner, Vulnerability, VulnerabilitySeverity, VulnerabilitySummary,
+};
 pub use snapshots::{Snapshot, SnapshotManager, SnapshotState, SnapshotType};
 pub use state::StateManager;
 pub use templates::{Template, TemplateCategory, TemplateRegistry};

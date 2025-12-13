@@ -4,7 +4,7 @@ use crate::error::{HyprError, Result};
 use sqlx::SqlitePool;
 use tracing::{info, instrument};
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 #[instrument(skip(pool))]
 pub async fn run(pool: &SqlitePool) -> Result<()> {
@@ -59,6 +59,10 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
 
     if current_version < 6 {
         migrate_to_v6(pool).await?;
+    }
+
+    if current_version < 7 {
+        migrate_to_v7(pool).await?;
     }
 
     Ok(())
@@ -447,5 +451,67 @@ async fn migrate_to_v6(pool: &SqlitePool) -> Result<()> {
         .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
 
     info!("Migration to schema version 6 complete");
+    Ok(())
+}
+
+/// Migration to schema version 7: Add security_reports table for vulnerability scans.
+async fn migrate_to_v7(pool: &SqlitePool) -> Result<()> {
+    info!("Running migration to schema version 7");
+
+    // Security reports table for storing vulnerability scan results
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS security_reports (
+            id TEXT PRIMARY KEY,
+            image_id TEXT NOT NULL,
+            image_name TEXT NOT NULL,
+            scanned_at INTEGER NOT NULL,
+            scanner_version TEXT NOT NULL,
+            risk_level TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            vulnerabilities TEXT NOT NULL,
+            metadata TEXT NOT NULL DEFAULT '{}'
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    // Index for image lookups
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_security_reports_image ON security_reports(image_id)")
+        .execute(pool)
+        .await
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    // Index for image name lookups (prefix matching)
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_security_reports_image_name ON security_reports(image_name)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    // Index for time-based queries
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_security_reports_time ON security_reports(scanned_at)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    // Update schema version
+    sqlx::query("DELETE FROM schema_version")
+        .execute(pool)
+        .await
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    sqlx::query("INSERT INTO schema_version (version) VALUES (?)")
+        .bind(7i64)
+        .execute(pool)
+        .await
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    info!("Migration to schema version 7 complete");
     Ok(())
 }

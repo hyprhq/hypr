@@ -2237,6 +2237,199 @@ impl HyprService for HyprServiceImpl {
 
         Ok(Response::new(SignalVmProcessResponse { success: true }))
     }
+
+    // ========================
+    // Security Scanning RPCs
+    // ========================
+
+    type ScanImageStream =
+        Pin<Box<dyn Stream<Item = std::result::Result<ScanEvent, Status>> + Send>>;
+
+    async fn scan_image(
+        &self,
+        request: Request<ScanImageRequest>,
+    ) -> std::result::Result<Response<Self::ScanImageStream>, Status> {
+        info!("gRPC: ScanImage");
+
+        let req = request.into_inner();
+        let image = req.image;
+        let state = self.state.clone();
+
+        // Build scan options
+        let mut options = hypr_core::security::ScanOptions::new();
+        if req.skip_db_update {
+            options = options.skip_db_update(true);
+        }
+        if !req.severity_filter.is_empty() {
+            let severities: Vec<hypr_core::security::VulnerabilitySeverity> = req
+                .severity_filter
+                .iter()
+                .map(|s| hypr_core::security::VulnerabilitySeverity::parse(s))
+                .collect();
+            options = options.filter_severity(severities);
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+
+        // Spawn scanning task
+        tokio::spawn(async move {
+            // Create scanner with state for persistence
+            let scanner = match hypr_core::security::SecurityScanner::with_state(state.clone()) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = tx
+                        .send(Ok(ScanEvent {
+                            event: Some(scan_event::Event::Error(ScanError {
+                                message: e.to_string(),
+                                code: "SCANNER_INIT_FAILED".to_string(),
+                            })),
+                        }))
+                        .await;
+                    return;
+                }
+            };
+
+            // Check if Trivy is available
+            if !scanner.is_available().await {
+                let _ = tx
+                    .send(Ok(ScanEvent {
+                        event: Some(scan_event::Event::Error(ScanError {
+                            message: "Trivy scanner not available. Install from https://aquasecurity.github.io/trivy/".to_string(),
+                            code: "TRIVY_NOT_FOUND".to_string(),
+                        })),
+                    }))
+                    .await;
+                return;
+            }
+
+            // Send progress updates
+            let _ = tx
+                .send(Ok(ScanEvent {
+                    event: Some(scan_event::Event::Progress(ScanProgress {
+                        stage: "initializing".to_string(),
+                        message: "Initializing vulnerability scanner".to_string(),
+                        percent: 5,
+                    })),
+                }))
+                .await;
+
+            // Run the scan
+            match scanner.scan_image(&image, &options).await {
+                Ok(report) => {
+                    // Save report to database
+                    if let Err(e) = state.insert_security_report(&report).await {
+                        warn!("Failed to save security report: {}", e);
+                    }
+
+                    let _ = tx
+                        .send(Ok(ScanEvent {
+                            event: Some(scan_event::Event::Complete(ScanComplete {
+                                report: Some(security_report_to_proto(&report)),
+                            })),
+                        }))
+                        .await;
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(Ok(ScanEvent {
+                            event: Some(scan_event::Event::Error(ScanError {
+                                message: e.to_string(),
+                                code: "SCAN_FAILED".to_string(),
+                            })),
+                        }))
+                        .await;
+                }
+            }
+        });
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    async fn get_security_report(
+        &self,
+        request: Request<GetSecurityReportRequest>,
+    ) -> std::result::Result<Response<SecurityReport>, Status> {
+        info!("gRPC: GetSecurityReport");
+
+        let req = request.into_inner();
+
+        let report = self
+            .state
+            .get_security_report(&req.report_id)
+            .await
+            .map_err(|e| Status::not_found(e.to_string()))?;
+
+        Ok(Response::new(security_report_to_proto(&report)))
+    }
+
+    async fn list_security_reports(
+        &self,
+        request: Request<ListSecurityReportsRequest>,
+    ) -> std::result::Result<Response<ListSecurityReportsResponse>, Status> {
+        info!("gRPC: ListSecurityReports");
+
+        let req = request.into_inner();
+
+        let reports = self
+            .state
+            .list_security_reports(
+                req.image_id.as_deref(),
+                req.image_name.as_deref(),
+                req.limit,
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(ListSecurityReportsResponse {
+            reports: reports.iter().map(security_report_to_proto).collect(),
+        }))
+    }
+}
+
+/// Convert a security report to proto format.
+fn security_report_to_proto(report: &hypr_core::security::SecurityReport) -> SecurityReport {
+    SecurityReport {
+        id: report.id.clone(),
+        image_id: report.image_id.clone(),
+        image_name: report.image_name.clone(),
+        scanned_at: report.scanned_at,
+        scanner_version: report.scanner_version.clone(),
+        risk_level: match report.risk_level {
+            hypr_core::security::RiskLevel::Critical => RiskLevel::Critical as i32,
+            hypr_core::security::RiskLevel::High => RiskLevel::High as i32,
+            hypr_core::security::RiskLevel::Medium => RiskLevel::Medium as i32,
+            hypr_core::security::RiskLevel::Low => RiskLevel::Low as i32,
+            hypr_core::security::RiskLevel::None => RiskLevel::None as i32,
+        },
+        summary: Some(VulnerabilitySummary {
+            critical: report.summary.critical,
+            high: report.summary.high,
+            medium: report.summary.medium,
+            low: report.summary.low,
+            unknown: report.summary.unknown,
+            total: report.summary.total,
+        }),
+        vulnerabilities: report
+            .vulnerabilities
+            .iter()
+            .map(|v| Vulnerability {
+                id: v.id.clone(),
+                severity: v.severity.as_str().to_string(),
+                package_name: v.package_name.clone(),
+                installed_version: v.installed_version.clone(),
+                fixed_version: v.fixed_version.clone(),
+                title: v.title.clone(),
+                description: v.description.clone(),
+                references: v.references.clone(),
+                cvss_score: v.cvss_score,
+                cvss_vector: v.cvss_vector.clone(),
+                published_date: v.published_date,
+                last_modified: v.last_modified,
+            })
+            .collect(),
+        metadata: report.metadata.clone(),
+    }
 }
 
 /// Convert a VM process to proto format.
