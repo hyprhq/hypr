@@ -201,6 +201,16 @@ pub struct GpuConfig {
     /// GPU memory in MB (detected from hardware)
     pub gpu_memory_mb: Option<u64>,
 
+    /// Time slice duration in milliseconds for GPU time-sharing (P3 feature).
+    /// Used for multi-tenant GPU sharing.
+    #[serde(default)]
+    pub time_slice_ms: Option<u32>,
+
+    /// Fraction of GPU memory to allocate (0.0-1.0) (P3 feature).
+    /// Used for GPU memory partitioning.
+    #[serde(default)]
+    pub memory_fraction: Option<f32>,
+
     /// NVIDIA GPUDirect P2P clique ID (Turing, Ampere, Hopper, Lovelace).
     ///
     /// Enables PCIe P2P for multi-GPU setups. All GPUs in the same clique

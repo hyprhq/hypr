@@ -283,6 +283,8 @@ impl From<GpuConfig> for ProtoGpuConfig {
             model: gpu.model,
             use_sriov: gpu.use_sriov,
             gpu_memory_mb: gpu.gpu_memory_mb,
+            time_slice_ms: gpu.time_slice_ms,
+            memory_fraction: gpu.memory_fraction,
         }
     }
 }
@@ -309,6 +311,8 @@ impl TryFrom<ProtoGpuConfig> for GpuConfig {
             model: proto.model,
             use_sriov: proto.use_sriov,
             gpu_memory_mb: proto.gpu_memory_mb,
+            time_slice_ms: proto.time_slice_ms,
+            memory_fraction: proto.memory_fraction,
             gpudirect_clique: None, // Not exposed via proto yet
         })
     }

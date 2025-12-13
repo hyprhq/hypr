@@ -128,6 +128,8 @@ fn resolve_gpu_config(gpu_option: Option<String>) -> Result<Option<GpuConfig>> {
                     model: g.model.clone(),
                     use_sriov: false,
                     gpu_memory_mb: g.memory_mb,
+                    time_slice_ms: None,
+                    memory_fraction: None,
                     gpudirect_clique: None,
                 }))
             }
@@ -198,6 +200,8 @@ fn auto_detect_gpu() -> Result<Option<GpuConfig>> {
                     model: g.model.clone(),
                     use_sriov: false,
                     gpu_memory_mb: g.memory_mb,
+                    time_slice_ms: None,
+                    memory_fraction: None,
                     gpudirect_clique: None,
                 }))
             }
@@ -218,6 +222,8 @@ fn auto_detect_gpu() -> Result<Option<GpuConfig>> {
             model: gpu.model.clone(),
             use_sriov: false,
             gpu_memory_mb: gpu.memory_mb,
+            time_slice_ms: None,
+            memory_fraction: None,
             gpudirect_clique: None,
         }))
     }

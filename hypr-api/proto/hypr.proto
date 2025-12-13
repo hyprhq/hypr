@@ -113,6 +113,10 @@ service HyprService {
 
   // Rolling Updates (P2) - Stack update strategies
   rpc UpdateStack(UpdateStackRequest) returns (stream UpdateStackEvent);
+
+  // Import from Docker (P3) - Import existing Docker containers and images
+  rpc ImportDockerContainers(ImportDockerRequest) returns (stream ImportEvent);
+  rpc ImportDockerImage(ImportDockerImageRequest) returns (stream ImportEvent);
 }
 
 // ============================================================================
@@ -183,6 +187,9 @@ message GpuConfig {
   string model = 3;
   bool use_sriov = 4;
   optional uint64 gpu_memory_mb = 5;
+  // P3 GPU Time-slicing - GPU sharing configuration
+  optional uint32 time_slice_ms = 6;       // Time slice duration in milliseconds for GPU sharing
+  optional float memory_fraction = 7;      // Fraction of GPU memory to allocate (0.0-1.0)
 }
 
 // ============================================================================
@@ -1417,4 +1424,89 @@ message UpdateError {
   string service = 1;                   // Service that failed (empty if general)
   string message = 2;                   // Error message
   bool rolled_back = 3;                 // Whether rollback was attempted
+}
+
+// ============================================================================
+// Import from Docker Types (P3)
+// ============================================================================
+
+// Request to import Docker containers into HYPR.
+message ImportDockerRequest {
+  bool include_volumes = 1;             // Copy container volumes
+  bool include_networks = 2;            // Recreate networks
+  repeated string container_ids = 3;    // Specific container IDs/names (empty = all running)
+  bool stop_containers = 4;             // Stop Docker containers after import
+  bool preserve_names = 5;              // Keep original container names (may conflict)
+}
+
+// Request to import a Docker image into HYPR.
+message ImportDockerImageRequest {
+  string image = 1;                     // Docker image name:tag or ID
+  optional string new_name = 2;         // Custom name for HYPR image
+  optional string new_tag = 3;          // Custom tag for HYPR image
+}
+
+// Streaming events during Docker import.
+message ImportEvent {
+  oneof event {
+    ImportProgress progress = 1;
+    ImportContainerComplete container_complete = 2;
+    ImportImageComplete image_complete = 3;
+    ImportComplete complete = 4;
+    ImportError error = 5;
+  }
+}
+
+// Progress update during import.
+message ImportProgress {
+  string resource_name = 1;             // Container or image name being processed
+  ImportStage stage = 2;                // Current stage
+  string message = 3;                   // Human-readable progress message
+  uint32 percent = 4;                   // Progress percentage (0-100)
+  uint32 current = 5;                   // Current item index
+  uint32 total = 6;                     // Total items to process
+}
+
+// Import stage enumeration.
+enum ImportStage {
+  IMPORT_STAGE_UNSPECIFIED = 0;
+  IMPORT_STAGE_DISCOVERING = 1;         // Discovering containers/images
+  IMPORT_STAGE_EXPORTING = 2;           // Exporting from Docker
+  IMPORT_STAGE_CONVERTING = 3;          // Converting to HYPR format
+  IMPORT_STAGE_IMPORTING = 4;           // Importing into HYPR
+  IMPORT_STAGE_COPYING_VOLUMES = 5;     // Copying volume data
+  IMPORT_STAGE_CREATING_NETWORKS = 6;   // Creating networks
+  IMPORT_STAGE_STARTING = 7;            // Starting VM
+}
+
+// Single container import completed.
+message ImportContainerComplete {
+  string docker_container_id = 1;       // Original Docker container ID
+  string docker_container_name = 2;     // Original Docker container name
+  VM vm = 3;                            // Created HYPR VM
+}
+
+// Single image import completed.
+message ImportImageComplete {
+  string docker_image_id = 1;           // Original Docker image ID
+  string docker_image_name = 2;         // Original Docker image name:tag
+  Image image = 3;                      // Created HYPR image
+}
+
+// All imports completed successfully.
+message ImportComplete {
+  repeated VM vms = 1;                  // All created VMs
+  repeated Volume volumes = 2;          // All created volumes
+  repeated Network networks = 3;        // All created networks
+  repeated Image images = 4;            // All imported images
+  uint32 containers_imported = 5;       // Number of containers imported
+  uint32 images_imported = 6;           // Number of images imported
+  uint32 duration_sec = 7;              // Total import duration
+}
+
+// Import error for a specific resource.
+message ImportError {
+  string resource_name = 1;             // Container or image that failed
+  string message = 2;                   // Error message
+  bool fatal = 3;                       // Whether this stopped the entire import
 }

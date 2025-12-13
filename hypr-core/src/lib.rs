@@ -9,6 +9,7 @@ pub mod embedded;
 pub mod error;
 pub mod events;
 pub mod exec;
+pub mod import;
 pub mod manifest;
 pub mod metrics;
 pub mod network;
@@ -29,6 +30,11 @@ pub mod types;
 pub use compose::{ComposeFile, ComposeParser};
 pub use error::{HyprError, Result};
 pub use events::{Event, EventBus, EventSubscriber, EventType};
+pub use import::{
+    DockerContainerInfo, DockerImageInfo, DockerImporter, DockerMount, DockerPortMapping,
+    ImportContainersOptions, ImportImageOptions, ImportProgress, ImportStage, ImportSummary,
+    ImportedContainer, ImportedImage,
+};
 pub use metrics::{
     MetricsCollector, MetricsDataPoint, MetricsHistory, MetricsResolution, VmMetrics,
 };

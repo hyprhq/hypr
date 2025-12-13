@@ -2702,6 +2702,56 @@ impl HyprService for HyprServiceImpl {
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         Ok(Response::new(Box::pin(stream)))
     }
+
+    // ========================
+    // Import from Docker (P3)
+    // ========================
+
+    type ImportDockerContainersStream =
+        Pin<Box<dyn Stream<Item = std::result::Result<ImportEvent, Status>> + Send>>;
+
+    async fn import_docker_containers(
+        &self,
+        request: Request<ImportDockerRequest>,
+    ) -> std::result::Result<Response<Self::ImportDockerContainersStream>, Status> {
+        info!("gRPC: ImportDockerContainers");
+
+        let req = request.into_inner();
+        let state = self.state.clone();
+        let adapter = self.adapter.clone();
+        let network_mgr = self.network_mgr.clone();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+
+        tokio::spawn(async move {
+            let _ = import_docker_containers_impl(req, state, adapter, network_mgr, tx).await;
+        });
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    type ImportDockerImageStream =
+        Pin<Box<dyn Stream<Item = std::result::Result<ImportEvent, Status>> + Send>>;
+
+    async fn import_docker_image(
+        &self,
+        request: Request<ImportDockerImageRequest>,
+    ) -> std::result::Result<Response<Self::ImportDockerImageStream>, Status> {
+        info!("gRPC: ImportDockerImage");
+
+        let req = request.into_inner();
+        let state = self.state.clone();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+
+        tokio::spawn(async move {
+            let _ = import_docker_image_impl(req, state, tx).await;
+        });
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream)))
+    }
 }
 
 /// Convert a security report to proto format.
@@ -3491,6 +3541,664 @@ async fn run_vm_with_progress(
     let final_vm = state.get_vm(&vm_config.id).await?;
     let event = RunVmEvent {
         event: Some(run_vm_event::Event::Complete(RunComplete { vm: Some(final_vm.into()) })),
+    };
+    let _ = tx.send(Ok(event)).await;
+
+    Ok(())
+}
+
+// ============================================================================
+// Import from Docker Implementation (P3)
+// ============================================================================
+
+/// Send import progress event.
+async fn send_import_progress(
+    tx: &tokio::sync::mpsc::Sender<std::result::Result<ImportEvent, Status>>,
+    resource_name: &str,
+    stage: ImportStage,
+    message: &str,
+    percent: u32,
+    current: u32,
+    total: u32,
+) {
+    let event = ImportEvent {
+        event: Some(import_event::Event::Progress(ImportProgress {
+            resource_name: resource_name.to_string(),
+            stage: stage as i32,
+            message: message.to_string(),
+            percent,
+            current,
+            total,
+        })),
+    };
+    let _ = tx.send(Ok(event)).await;
+}
+
+/// Send import error event.
+async fn send_import_error(
+    tx: &tokio::sync::mpsc::Sender<std::result::Result<ImportEvent, Status>>,
+    resource_name: &str,
+    message: &str,
+    fatal: bool,
+) {
+    let event = ImportEvent {
+        event: Some(import_event::Event::Error(proto::ImportError {
+            resource_name: resource_name.to_string(),
+            message: message.to_string(),
+            fatal,
+        })),
+    };
+    let _ = tx.send(Ok(event)).await;
+}
+
+/// Implementation of ImportDockerContainers.
+async fn import_docker_containers_impl(
+    req: ImportDockerRequest,
+    state: Arc<StateManager>,
+    adapter: Arc<dyn VmmAdapter>,
+    network_mgr: Arc<NetworkManager>,
+    tx: tokio::sync::mpsc::Sender<std::result::Result<ImportEvent, Status>>,
+) -> Result<()> {
+    // Check if Docker is available
+    let docker_socket = std::path::Path::new("/var/run/docker.sock");
+    if !docker_socket.exists() {
+        send_import_error(&tx, "", "Docker socket not found at /var/run/docker.sock", true).await;
+        return Err(HyprError::Internal("Docker not available".to_string()));
+    }
+
+    send_import_progress(
+        &tx,
+        "",
+        ImportStage::Discovering,
+        "Discovering Docker containers...",
+        0,
+        0,
+        0,
+    )
+    .await;
+
+    // Run docker ps to list containers
+    let container_args = if req.container_ids.is_empty() {
+        // List all running containers
+        vec!["ps", "-q"]
+    } else {
+        // List specific containers (will be filtered later)
+        vec!["ps", "-aq"]
+    };
+
+    let output = tokio::process::Command::new("docker")
+        .args(&container_args)
+        .output()
+        .await
+        .map_err(|e| HyprError::Internal(format!("Failed to run docker ps: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        send_import_error(&tx, "", &format!("docker ps failed: {}", stderr), true).await;
+        return Err(HyprError::Internal(format!("docker ps failed: {}", stderr)));
+    }
+
+    let container_ids_raw: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // Filter to requested containers if specified
+    let container_ids: Vec<String> = if req.container_ids.is_empty() {
+        container_ids_raw
+    } else {
+        container_ids_raw
+            .into_iter()
+            .filter(|id| {
+                req.container_ids.iter().any(|req_id| id.starts_with(req_id) || req_id == id)
+            })
+            .collect()
+    };
+
+    if container_ids.is_empty() {
+        send_import_progress(
+            &tx,
+            "",
+            ImportStage::Discovering,
+            "No containers found to import",
+            100,
+            0,
+            0,
+        )
+        .await;
+
+        // Send empty complete
+        let event = ImportEvent {
+            event: Some(import_event::Event::Complete(proto::ImportComplete {
+                vms: vec![],
+                volumes: vec![],
+                networks: vec![],
+                images: vec![],
+                containers_imported: 0,
+                images_imported: 0,
+                duration_sec: 0,
+            })),
+        };
+        let _ = tx.send(Ok(event)).await;
+        return Ok(());
+    }
+
+    let total_containers = container_ids.len() as u32;
+    let mut imported_vms = vec![];
+    let start_time = std::time::Instant::now();
+
+    for (idx, container_id) in container_ids.iter().enumerate() {
+        let current = idx as u32 + 1;
+
+        // Get container info
+        send_import_progress(
+            &tx,
+            container_id,
+            ImportStage::Discovering,
+            &format!("Inspecting container {}...", &container_id[..12.min(container_id.len())]),
+            (current * 100) / (total_containers * 4),
+            current,
+            total_containers,
+        )
+        .await;
+
+        // Get container details with docker inspect
+        let inspect_output = tokio::process::Command::new("docker")
+            .args(["inspect", "--format", "{{.Config.Image}}|{{.Name}}", container_id])
+            .output()
+            .await;
+
+        let (_image_name, container_name) = match inspect_output {
+            Ok(out) if out.status.success() => {
+                let info = String::from_utf8_lossy(&out.stdout);
+                let parts: Vec<&str> = info.trim().split('|').collect();
+                if parts.len() >= 2 {
+                    (parts[0].to_string(), parts[1].trim_start_matches('/').to_string())
+                } else {
+                    (
+                        "unknown".to_string(),
+                        format!("container-{}", &container_id[..8.min(container_id.len())]),
+                    )
+                }
+            }
+            _ => (
+                "unknown".to_string(),
+                format!("container-{}", &container_id[..8.min(container_id.len())]),
+            ),
+        };
+
+        // Export container
+        send_import_progress(
+            &tx,
+            &container_name,
+            ImportStage::Exporting,
+            &format!("Exporting container {}...", container_name),
+            (current * 100) / (total_containers * 4) + 25,
+            current,
+            total_containers,
+        )
+        .await;
+
+        // Create temp file for export
+        let export_path = std::env::temp_dir().join(format!("hypr-import-{}.tar", container_id));
+        let export_output = tokio::process::Command::new("docker")
+            .args(["export", "-o", export_path.to_str().unwrap(), container_id])
+            .output()
+            .await;
+
+        if let Err(e) = export_output {
+            send_import_error(
+                &tx,
+                &container_name,
+                &format!("Failed to export container: {}", e),
+                false,
+            )
+            .await;
+            continue;
+        }
+
+        // Convert to squashfs
+        send_import_progress(
+            &tx,
+            &container_name,
+            ImportStage::Converting,
+            &format!("Converting {} to HYPR format...", container_name),
+            (current * 100) / (total_containers * 4) + 50,
+            current,
+            total_containers,
+        )
+        .await;
+
+        // Generate image ID
+        let image_id = format!("img-{}", uuid::Uuid::new_v4());
+        let images_dir = hypr_core::paths::images_dir();
+        let rootfs_path = images_dir.join(format!("{}.squashfs", image_id));
+
+        // Extract tar and create squashfs
+        let extract_dir = std::env::temp_dir().join(format!("hypr-extract-{}", container_id));
+        let _ = tokio::fs::create_dir_all(&extract_dir).await;
+
+        // Extract tar
+        let tar_result = tokio::process::Command::new("tar")
+            .args(["-xf", export_path.to_str().unwrap(), "-C", extract_dir.to_str().unwrap()])
+            .output()
+            .await;
+
+        if tar_result.is_err() || !tar_result.as_ref().unwrap().status.success() {
+            send_import_error(&tx, &container_name, "Failed to extract container tar", false).await;
+            let _ = tokio::fs::remove_file(&export_path).await;
+            let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+            continue;
+        }
+
+        // Create squashfs
+        let squashfs_result = tokio::process::Command::new("mksquashfs")
+            .args([
+                extract_dir.to_str().unwrap(),
+                rootfs_path.to_str().unwrap(),
+                "-noappend",
+                "-comp",
+                "zstd",
+            ])
+            .output()
+            .await;
+
+        // Cleanup temp files
+        let _ = tokio::fs::remove_file(&export_path).await;
+        let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+
+        if squashfs_result.is_err() || !squashfs_result.as_ref().unwrap().status.success() {
+            send_import_error(
+                &tx,
+                &container_name,
+                "Failed to create squashfs (is mksquashfs installed?)",
+                false,
+            )
+            .await;
+            continue;
+        }
+
+        // Import into HYPR
+        send_import_progress(
+            &tx,
+            &container_name,
+            ImportStage::Importing,
+            &format!("Creating HYPR image for {}...", container_name),
+            (current * 100) / (total_containers * 4) + 75,
+            current,
+            total_containers,
+        )
+        .await;
+
+        // Get squashfs size
+        let size_bytes = tokio::fs::metadata(&rootfs_path).await.map(|m| m.len()).unwrap_or(0);
+
+        // Create image entry
+        let tag = "imported".to_string();
+        let image = hypr_core::Image {
+            id: image_id.clone(),
+            name: container_name.clone(),
+            tag: tag.clone(),
+            manifest: hypr_core::ImageManifest {
+                version: "1.0".to_string(),
+                name: container_name.clone(),
+                tag: tag.clone(),
+                architecture: std::env::consts::ARCH.to_string(),
+                os: "linux".to_string(),
+                entrypoint: vec!["/bin/sh".to_string()],
+                cmd: vec![],
+                env: HashMap::new(),
+                workdir: "/".to_string(),
+                exposed_ports: vec![],
+                runtime: hypr_core::types::image::RuntimeConfig::default(),
+                health: None,
+                user: None,
+                history: vec![],
+            },
+            rootfs_path: rootfs_path.clone(),
+            size_bytes,
+            created_at: SystemTime::now(),
+        };
+
+        if let Err(e) = state.insert_image(&image).await {
+            send_import_error(&tx, &container_name, &format!("Failed to save image: {}", e), false)
+                .await;
+            continue;
+        }
+
+        // Create VM from the imported image
+        let vm_id = format!("vm-{}", uuid::Uuid::new_v4());
+        let vm_name = if req.preserve_names {
+            container_name.clone()
+        } else {
+            format!("imported-{}", &container_name)
+        };
+
+        // Allocate IP
+        let vm_ip = network_mgr
+            .allocate_ip(&vm_id)
+            .await
+            .map_err(|e| HyprError::Internal(format!("Failed to allocate IP: {}", e)))?;
+
+        let vm_config = hypr_core::VmConfig {
+            id: vm_id.clone(),
+            name: vm_name.clone(),
+            resources: hypr_core::VmResources { cpus: 1, memory_mb: 512, balloon_enabled: true },
+            kernel_path: None,
+            kernel_args: vec![],
+            initramfs_path: None,
+            disks: vec![hypr_core::types::vm::DiskConfig {
+                path: rootfs_path.clone(),
+                readonly: true,
+                format: hypr_core::types::vm::DiskFormat::Squashfs,
+            }],
+            network: hypr_core::types::network::NetworkConfig {
+                ip_address: Some(vm_ip),
+                ..Default::default()
+            },
+            ports: vec![],
+            env: HashMap::new(),
+            volumes: vec![],
+            gpu: None,
+            virtio_fs_mounts: vec![],
+            network_enabled: true,
+        };
+
+        // Create VM via adapter
+        match adapter.create(&vm_config).await {
+            Ok(handle) => {
+                let vm = Vm {
+                    id: vm_id.clone(),
+                    name: vm_name.clone(),
+                    image_id: image_id.clone(),
+                    status: VmStatus::Creating,
+                    config: vm_config,
+                    ip_address: Some(vm_ip.to_string()),
+                    pid: handle.pid,
+                    created_at: SystemTime::now(),
+                    started_at: None,
+                    stopped_at: None,
+                };
+
+                if let Err(e) = state.insert_vm(&vm).await {
+                    send_import_error(
+                        &tx,
+                        &container_name,
+                        &format!("Failed to save VM: {}", e),
+                        false,
+                    )
+                    .await;
+                    continue;
+                }
+
+                // Send container complete event
+                let event = ImportEvent {
+                    event: Some(import_event::Event::ContainerComplete(
+                        proto::ImportContainerComplete {
+                            docker_container_id: container_id.clone(),
+                            docker_container_name: container_name.clone(),
+                            vm: Some(vm.into()),
+                        },
+                    )),
+                };
+                let _ = tx.send(Ok(event)).await;
+
+                imported_vms.push(vm_id);
+            }
+            Err(e) => {
+                send_import_error(
+                    &tx,
+                    &container_name,
+                    &format!("Failed to create VM: {}", e),
+                    false,
+                )
+                .await;
+            }
+        }
+
+        // Stop Docker container if requested
+        if req.stop_containers {
+            let _ = tokio::process::Command::new("docker")
+                .args(["stop", container_id])
+                .output()
+                .await;
+        }
+    }
+
+    // Send complete event
+    let duration_sec = start_time.elapsed().as_secs() as u32;
+    let event = ImportEvent {
+        event: Some(import_event::Event::Complete(proto::ImportComplete {
+            vms: vec![], // VMs were sent individually
+            volumes: vec![],
+            networks: vec![],
+            images: vec![],
+            containers_imported: imported_vms.len() as u32,
+            images_imported: imported_vms.len() as u32,
+            duration_sec,
+        })),
+    };
+    let _ = tx.send(Ok(event)).await;
+
+    Ok(())
+}
+
+/// Implementation of ImportDockerImage.
+async fn import_docker_image_impl(
+    req: ImportDockerImageRequest,
+    state: Arc<StateManager>,
+    tx: tokio::sync::mpsc::Sender<std::result::Result<ImportEvent, Status>>,
+) -> Result<()> {
+    let image_ref = &req.image;
+
+    send_import_progress(&tx, image_ref, ImportStage::Discovering, "Checking Docker image...", 0, 1, 1)
+        .await;
+
+    // Check if image exists in Docker
+    let inspect_output = tokio::process::Command::new("docker")
+        .args(["image", "inspect", image_ref, "--format", "{{.Id}}"])
+        .output()
+        .await;
+
+    let docker_image_id = match inspect_output {
+        Ok(out) if out.status.success() => {
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+        _ => {
+            send_import_error(&tx, image_ref, "Docker image not found", true).await;
+            return Err(HyprError::Internal(format!("Docker image not found: {}", image_ref)));
+        }
+    };
+
+    send_import_progress(
+        &tx,
+        image_ref,
+        ImportStage::Exporting,
+        "Exporting Docker image...",
+        25,
+        1,
+        1,
+    )
+    .await;
+
+    // Create export path
+    let export_path = std::env::temp_dir().join(format!("hypr-img-{}.tar", uuid::Uuid::new_v4()));
+
+    // Export image
+    let export_output = tokio::process::Command::new("docker")
+        .args(["save", "-o", export_path.to_str().unwrap(), image_ref])
+        .output()
+        .await;
+
+    if export_output.is_err() || !export_output.as_ref().unwrap().status.success() {
+        send_import_error(&tx, image_ref, "Failed to export Docker image", true).await;
+        return Err(HyprError::Internal("Failed to export Docker image".to_string()));
+    }
+
+    send_import_progress(
+        &tx,
+        image_ref,
+        ImportStage::Converting,
+        "Converting to HYPR format...",
+        50,
+        1,
+        1,
+    )
+    .await;
+
+    // Generate image ID
+    let image_id = format!("img-{}", uuid::Uuid::new_v4());
+    let images_dir = hypr_core::paths::images_dir();
+    let rootfs_path = images_dir.join(format!("{}.squashfs", image_id));
+
+    // Extract image layers and create squashfs
+    let extract_dir = std::env::temp_dir().join(format!("hypr-img-extract-{}", image_id));
+    let _ = tokio::fs::create_dir_all(&extract_dir).await;
+
+    // Extract the image tar
+    let tar_result = tokio::process::Command::new("tar")
+        .args(["-xf", export_path.to_str().unwrap(), "-C", extract_dir.to_str().unwrap()])
+        .output()
+        .await;
+
+    if tar_result.is_err() || !tar_result.as_ref().unwrap().status.success() {
+        let _ = tokio::fs::remove_file(&export_path).await;
+        let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+        send_import_error(&tx, image_ref, "Failed to extract image tar", true).await;
+        return Err(HyprError::Internal("Failed to extract image tar".to_string()));
+    }
+
+    // Find and extract layer tarballs
+    let layers_dir = std::env::temp_dir().join(format!("hypr-layers-{}", image_id));
+    let _ = tokio::fs::create_dir_all(&layers_dir).await;
+
+    // Read manifest.json to find layers
+    let manifest_path = extract_dir.join("manifest.json");
+    let manifest_content = tokio::fs::read_to_string(&manifest_path).await;
+
+    if let Ok(content) = manifest_content {
+        // Parse manifest and extract layers
+        if let Ok(manifest) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+            if let Some(first) = manifest.first() {
+                if let Some(layers) = first.get("Layers").and_then(|l| l.as_array()) {
+                    for layer in layers {
+                        if let Some(layer_path) = layer.as_str() {
+                            let layer_tar = extract_dir.join(layer_path);
+                            if layer_tar.exists() {
+                                let _ = tokio::process::Command::new("tar")
+                                    .args([
+                                        "-xf",
+                                        layer_tar.to_str().unwrap(),
+                                        "-C",
+                                        layers_dir.to_str().unwrap(),
+                                    ])
+                                    .output()
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Create squashfs from layers
+    let squashfs_result = tokio::process::Command::new("mksquashfs")
+        .args([
+            layers_dir.to_str().unwrap(),
+            rootfs_path.to_str().unwrap(),
+            "-noappend",
+            "-comp",
+            "zstd",
+        ])
+        .output()
+        .await;
+
+    // Cleanup
+    let _ = tokio::fs::remove_file(&export_path).await;
+    let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+    let _ = tokio::fs::remove_dir_all(&layers_dir).await;
+
+    if squashfs_result.is_err() || !squashfs_result.as_ref().unwrap().status.success() {
+        send_import_error(
+            &tx,
+            image_ref,
+            "Failed to create squashfs (is mksquashfs installed?)",
+            true,
+        )
+        .await;
+        return Err(HyprError::Internal("Failed to create squashfs".to_string()));
+    }
+
+    send_import_progress(&tx, image_ref, ImportStage::Importing, "Creating HYPR image...", 75, 1, 1)
+        .await;
+
+    // Parse image name and tag
+    let (name, tag) = if let Some(pos) = image_ref.rfind(':') {
+        (&image_ref[..pos], &image_ref[pos + 1..])
+    } else {
+        (image_ref.as_str(), "latest")
+    };
+
+    let final_name = req.new_name.unwrap_or_else(|| name.to_string());
+    let final_tag = req.new_tag.unwrap_or_else(|| tag.to_string());
+
+    // Get size
+    let size_bytes = tokio::fs::metadata(&rootfs_path).await.map(|m| m.len()).unwrap_or(0);
+
+    // Create image
+    let image = hypr_core::Image {
+        id: image_id.clone(),
+        name: final_name.clone(),
+        tag: final_tag.clone(),
+        manifest: hypr_core::ImageManifest {
+            version: "1.0".to_string(),
+            name: final_name.clone(),
+            tag: final_tag.clone(),
+            architecture: std::env::consts::ARCH.to_string(),
+            os: "linux".to_string(),
+            entrypoint: vec![],
+            cmd: vec![],
+            env: HashMap::new(),
+            workdir: "/".to_string(),
+            exposed_ports: vec![],
+            runtime: hypr_core::types::image::RuntimeConfig::default(),
+            health: None,
+            user: None,
+            history: vec![],
+        },
+        rootfs_path,
+        size_bytes,
+        created_at: SystemTime::now(),
+    };
+
+    if let Err(e) = state.insert_image(&image).await {
+        send_import_error(&tx, image_ref, &format!("Failed to save image: {}", e), true).await;
+        return Err(HyprError::Internal(format!("Failed to save image: {}", e)));
+    }
+
+    // Send image complete event
+    let event = ImportEvent {
+        event: Some(import_event::Event::ImageComplete(proto::ImportImageComplete {
+            docker_image_id,
+            docker_image_name: image_ref.clone(),
+            image: Some(image.into()),
+        })),
+    };
+    let _ = tx.send(Ok(event)).await;
+
+    // Send complete event
+    let event = ImportEvent {
+        event: Some(import_event::Event::Complete(proto::ImportComplete {
+            vms: vec![],
+            volumes: vec![],
+            networks: vec![],
+            images: vec![],
+            containers_imported: 0,
+            images_imported: 1,
+            duration_sec: 0,
+        })),
     };
     let _ = tx.send(Ok(event)).await;
 
