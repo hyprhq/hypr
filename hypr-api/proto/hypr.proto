@@ -25,6 +25,7 @@ service HyprService {
 
   // Logging
   rpc StreamLogs(StreamLogsRequest) returns (stream LogEntry);
+  rpc SearchLogs(SearchLogsRequest) returns (SearchLogsResponse);
 
   // Interactive exec with PTY support (bidirectional streaming)
   rpc Exec(stream ExecRequest) returns (stream ExecResponse);
@@ -91,6 +92,7 @@ service HyprService {
   rpc ListVMProcesses(ListVMProcessesRequest) returns (ListVMProcessesResponse);
   rpc GetVMProcess(GetVMProcessRequest) returns (VMProcess);
   rpc SignalVMProcess(SignalVMProcessRequest) returns (SignalVMProcessResponse);
+  rpc KillVMProcess(KillVMProcessRequest) returns (KillVMProcessResponse);
 
   // Security Scanning (P1) - Vulnerability detection for images
   rpc ScanImage(ScanImageRequest) returns (stream ScanEvent);
@@ -458,6 +460,26 @@ message LogEntry {
   int64 timestamp = 1;        // Unix timestamp in milliseconds
   string line = 2;            // Log line content
   string stream = 3;          // "stdout" or "stderr"
+}
+
+// Search logs request - filter and search through VM logs.
+message SearchLogsRequest {
+  string vm_id = 1;                    // VM ID to search logs from
+  optional string pattern = 2;         // Regex pattern to match
+  optional string contains = 3;        // Simple substring match
+  optional int64 since = 4;            // Start timestamp (Unix epoch ms)
+  optional int64 until = 5;            // End timestamp (Unix epoch ms)
+  optional string stream = 6;          // Filter by stream: "stdout", "stderr", or empty for both
+  uint32 limit = 7;                    // Max results (default: 1000)
+  uint32 offset = 8;                   // Pagination offset
+  bool case_sensitive = 9;             // Case-sensitive search (default: false)
+}
+
+// Search logs response.
+message SearchLogsResponse {
+  repeated LogEntry entries = 1;       // Matching log entries
+  uint32 total_matches = 2;            // Total number of matches (for pagination)
+  bool has_more = 3;                   // Whether more results are available
 }
 
 // ============================================================================
@@ -1036,6 +1058,18 @@ message SignalVMProcessRequest {
 
 message SignalVMProcessResponse {
   bool success = 1;
+}
+
+// Request to kill a process (sends SIGKILL).
+message KillVMProcessRequest {
+  string vm_id = 1;
+  uint32 pid = 2;
+  bool force = 3;                       // If true, use SIGKILL; otherwise SIGTERM first
+}
+
+message KillVMProcessResponse {
+  bool success = 1;
+  string message = 2;                   // Status message (e.g., "process terminated")
 }
 
 // ============================================================================

@@ -624,6 +624,121 @@ impl HyprService for HyprServiceImpl {
         Ok(Response::new(Box::pin(stream) as Self::StreamLogsStream))
     }
 
+    async fn search_logs(
+        &self,
+        request: Request<SearchLogsRequest>,
+    ) -> std::result::Result<Response<SearchLogsResponse>, Status> {
+        info!("gRPC: SearchLogs");
+
+        let req = request.into_inner();
+        let vm_id = req.vm_id.clone();
+
+        // Verify VM exists
+        let _vm = self
+            .state
+            .get_vm(&vm_id)
+            .await
+            .map_err(|_| Status::not_found(format!("VM {} not found", vm_id)))?;
+
+        // Get log file path
+        let log_path = hypr_core::paths::vm_log_path(&vm_id);
+
+        if !log_path.exists() {
+            return Ok(Response::new(SearchLogsResponse {
+                entries: vec![],
+                total_matches: 0,
+                has_more: false,
+            }));
+        }
+
+        // Read log file
+        let content = tokio::fs::read_to_string(&log_path)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to read logs: {}", e)))?;
+
+        let limit = if req.limit == 0 { 1000 } else { req.limit as usize };
+        let offset = req.offset as usize;
+        let case_sensitive = req.case_sensitive;
+
+        // Build filter/search criteria
+        let pattern = req.pattern.filter(|p| !p.is_empty());
+        let contains = req.contains.filter(|c| !c.is_empty());
+        let stream_filter = req.stream.filter(|s| !s.is_empty());
+        let since = req.since;
+        let until = req.until;
+
+        // Compile regex if pattern provided
+        let regex = pattern.as_ref().map(|p| {
+            if case_sensitive {
+                regex::Regex::new(p)
+            } else {
+                regex::RegexBuilder::new(p).case_insensitive(true).build()
+            }
+        }).transpose().map_err(|e| Status::invalid_argument(format!("Invalid regex: {}", e)))?;
+
+        // Parse and filter log lines
+        let mut entries: Vec<LogEntry> = vec![];
+        let mut total_matches = 0u32;
+
+        for line in content.lines() {
+            // Parse log line (format: "timestamp stream: content" or just "content")
+            let (timestamp, stream, log_content) = parse_log_line(line);
+
+            // Apply filters
+            if let Some(since_ts) = since {
+                if timestamp < since_ts {
+                    continue;
+                }
+            }
+
+            if let Some(until_ts) = until {
+                if timestamp > until_ts {
+                    continue;
+                }
+            }
+
+            if let Some(ref sf) = stream_filter {
+                if stream != *sf {
+                    continue;
+                }
+            }
+
+            // Apply search criteria
+            let matches = if let Some(ref re) = regex {
+                re.is_match(log_content)
+            } else if let Some(ref c) = contains {
+                if case_sensitive {
+                    log_content.contains(c.as_str())
+                } else {
+                    log_content.to_lowercase().contains(&c.to_lowercase())
+                }
+            } else {
+                true // No search criteria, match all
+            };
+
+            if matches {
+                total_matches += 1;
+
+                // Apply pagination
+                if total_matches as usize > offset && entries.len() < limit {
+                    entries.push(LogEntry {
+                        timestamp,
+                        line: log_content.to_string(),
+                        stream: stream.to_string(),
+                    });
+                }
+            }
+        }
+
+        let has_more = total_matches as usize > offset + entries.len();
+
+        Ok(Response::new(SearchLogsResponse {
+            entries,
+            total_matches,
+            has_more,
+        }))
+    }
+
     #[instrument(skip(self))]
     async fn deploy_stack(
         &self,
@@ -2237,6 +2352,43 @@ impl HyprService for HyprServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         Ok(Response::new(SignalVmProcessResponse { success: true }))
+    }
+
+    async fn kill_vm_process(
+        &self,
+        request: Request<KillVmProcessRequest>,
+    ) -> std::result::Result<Response<KillVmProcessResponse>, Status> {
+        info!("gRPC: KillVMProcess");
+
+        let req = request.into_inner();
+
+        // Get VM to find vsock path
+        let vm =
+            self.state.get_vm(&req.vm_id).await.map_err(|e| Status::not_found(e.to_string()))?;
+
+        let vsock_path = self.adapter.vsock_path(&hypr_core::VmHandle {
+            id: vm.id.clone(),
+            pid: vm.pid,
+            socket_path: None,
+        });
+
+        let explorer = hypr_core::process::ProcessExplorer::new();
+
+        // Use SIGKILL (9) if force, otherwise SIGTERM (15) first
+        let signal = if req.force { 9 } else { 15 };
+
+        explorer
+            .signal_process(&vsock_path, req.pid, signal)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let message = if req.force {
+            format!("Process {} killed with SIGKILL", req.pid)
+        } else {
+            format!("Process {} terminated with SIGTERM", req.pid)
+        };
+
+        Ok(Response::new(KillVmProcessResponse { success: true, message }))
     }
 
     // ========================
@@ -4173,4 +4325,34 @@ async fn import_docker_image_impl(
     let _ = tx.send(Ok(event)).await;
 
     Ok(())
+}
+
+// ============================================================================
+// Log Parsing Helper
+// ============================================================================
+
+/// Parse a log line to extract timestamp, stream, and content.
+/// Log format: "timestamp stream: content" or just "content"
+fn parse_log_line(line: &str) -> (i64, &str, &str) {
+    // Try to parse timestamp at start of line
+    if let Some(space_idx) = line.find(' ') {
+        if let Ok(ts) = line[..space_idx].parse::<i64>() {
+            let rest = &line[space_idx + 1..];
+            // Check for stream prefix (stdout: or stderr:)
+            if rest.starts_with("stdout:") {
+                return (ts, "stdout", rest[7..].trim_start());
+            } else if rest.starts_with("stderr:") {
+                return (ts, "stderr", rest[7..].trim_start());
+            } else {
+                return (ts, "stdout", rest);
+            }
+        }
+    }
+
+    // No timestamp found, use current time and assume stdout
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    (now, "stdout", line)
 }
