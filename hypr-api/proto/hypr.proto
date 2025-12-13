@@ -96,6 +96,23 @@ service HyprService {
   rpc ScanImage(ScanImageRequest) returns (stream ScanEvent);
   rpc GetSecurityReport(GetSecurityReportRequest) returns (SecurityReport);
   rpc ListSecurityReports(ListSecurityReportsRequest) returns (ListSecurityReportsResponse);
+
+  // Cron Jobs (P2) - Scheduled VM task execution
+  rpc CreateCronJob(CreateCronJobRequest) returns (CronJob);
+  rpc GetCronJob(GetCronJobRequest) returns (CronJob);
+  rpc ListCronJobs(ListCronJobsRequest) returns (ListCronJobsResponse);
+  rpc UpdateCronJob(UpdateCronJobRequest) returns (CronJob);
+  rpc DeleteCronJob(DeleteCronJobRequest) returns (DeleteCronJobResponse);
+  rpc GetCronJobRuns(GetCronJobRunsRequest) returns (GetCronJobRunsResponse);
+
+  // Dev Environments (P2) - devcontainer.json support
+  rpc CreateDevEnvironment(CreateDevEnvRequest) returns (stream DevEnvEvent);
+  rpc GetDevEnvironment(GetDevEnvRequest) returns (DevEnvironment);
+  rpc ListDevEnvironments(ListDevEnvsRequest) returns (ListDevEnvsResponse);
+  rpc DeleteDevEnvironment(DeleteDevEnvRequest) returns (DeleteDevEnvResponse);
+
+  // Rolling Updates (P2) - Stack update strategies
+  rpc UpdateStack(UpdateStackRequest) returns (stream UpdateStackEvent);
 }
 
 // ============================================================================
@@ -1116,4 +1133,288 @@ message ListSecurityReportsRequest {
 // Response containing list of security reports.
 message ListSecurityReportsResponse {
   repeated SecurityReport reports = 1;
+}
+
+// ============================================================================
+// Cron Jobs Types (P2)
+// ============================================================================
+
+// A scheduled cron job that runs VMs on a schedule.
+message CronJob {
+  string id = 1;                        // Unique job ID
+  string name = 2;                      // Human-readable name
+  string schedule = 3;                  // Cron expression (e.g., "*/5 * * * *")
+  string image = 4;                     // Container image to run
+  repeated string command = 5;          // Command to execute
+  map<string, string> env = 6;          // Environment variables
+  VMResources resources = 7;            // Resource allocation
+  bool enabled = 8;                     // Whether the job is active
+  int64 created_at = 9;                 // Unix timestamp when created
+  optional int64 last_run = 10;         // Unix timestamp of last execution
+  optional int64 next_run = 11;         // Unix timestamp of next scheduled run
+  uint32 timeout_sec = 12;              // Max execution time in seconds (default: 3600)
+  uint32 max_retries = 13;              // Max retry attempts on failure (default: 0)
+  map<string, string> labels = 14;      // Custom labels/metadata
+}
+
+// A single run/execution of a cron job.
+message CronJobRun {
+  string id = 1;                        // Unique run ID
+  string job_id = 2;                    // Parent cron job ID
+  int64 started_at = 3;                 // Unix timestamp when started
+  optional int64 finished_at = 4;       // Unix timestamp when finished
+  int32 exit_code = 5;                  // Exit code (0 = success)
+  CronJobRunStatus status = 6;          // Current status
+  string output = 7;                    // Combined stdout/stderr output
+  optional string error_message = 8;    // Error message if failed
+  uint32 attempt = 9;                   // Attempt number (1-based)
+}
+
+// Status of a cron job run.
+enum CronJobRunStatus {
+  CRON_JOB_RUN_STATUS_UNSPECIFIED = 0;
+  CRON_JOB_RUN_STATUS_PENDING = 1;      // Scheduled but not yet started
+  CRON_JOB_RUN_STATUS_RUNNING = 2;      // Currently executing
+  CRON_JOB_RUN_STATUS_SUCCEEDED = 3;    // Completed successfully (exit code 0)
+  CRON_JOB_RUN_STATUS_FAILED = 4;       // Failed (non-zero exit code or error)
+  CRON_JOB_RUN_STATUS_CANCELLED = 5;    // Cancelled by user
+  CRON_JOB_RUN_STATUS_TIMEOUT = 6;      // Exceeded timeout limit
+}
+
+// Request to create a new cron job.
+message CreateCronJobRequest {
+  string name = 1;                      // Job name (required)
+  string schedule = 2;                  // Cron expression (required)
+  string image = 3;                     // Container image (required)
+  repeated string command = 4;          // Command to execute
+  map<string, string> env = 5;          // Environment variables
+  optional VMResources resources = 6;   // Resource allocation (uses defaults if not specified)
+  optional uint32 timeout_sec = 7;      // Max execution time (default: 3600)
+  optional uint32 max_retries = 8;      // Max retry attempts (default: 0)
+  map<string, string> labels = 9;       // Custom labels
+  bool enabled = 10;                    // Start enabled (default: true)
+}
+
+// Request to get a cron job by ID.
+message GetCronJobRequest {
+  string id = 1;                        // Job ID
+}
+
+// Request to list cron jobs.
+message ListCronJobsRequest {
+  optional bool enabled_only = 1;       // Filter to only enabled jobs
+  optional string label_selector = 2;   // Filter by labels (e.g., "env=prod")
+}
+
+// Response containing list of cron jobs.
+message ListCronJobsResponse {
+  repeated CronJob jobs = 1;
+}
+
+// Request to update a cron job.
+message UpdateCronJobRequest {
+  string id = 1;                        // Job ID to update
+  optional string name = 2;             // New name
+  optional string schedule = 3;         // New schedule
+  optional string image = 4;            // New image
+  repeated string command = 5;          // New command
+  map<string, string> env = 6;          // New environment variables
+  optional VMResources resources = 7;   // New resources
+  optional bool enabled = 8;            // Enable/disable
+  optional uint32 timeout_sec = 9;      // New timeout
+  optional uint32 max_retries = 10;     // New retry count
+}
+
+// Request to delete a cron job.
+message DeleteCronJobRequest {
+  string id = 1;                        // Job ID to delete
+  bool force = 2;                       // Force delete even if running
+}
+
+// Response for delete cron job.
+message DeleteCronJobResponse {
+  bool success = 1;
+}
+
+// Request to get runs for a cron job.
+message GetCronJobRunsRequest {
+  string job_id = 1;                    // Cron job ID
+  optional uint32 limit = 2;            // Max runs to return (default: 20)
+  optional CronJobRunStatus status = 3; // Filter by status
+}
+
+// Response containing list of cron job runs.
+message GetCronJobRunsResponse {
+  repeated CronJobRun runs = 1;
+}
+
+// ============================================================================
+// Dev Environments Types (P2)
+// ============================================================================
+
+// A development environment created from a devcontainer.json.
+message DevEnvironment {
+  string id = 1;                        // Unique environment ID
+  string name = 2;                      // Human-readable name
+  string repo_url = 3;                  // Git repository URL
+  string branch = 4;                    // Git branch
+  string vm_id = 5;                     // Associated VM ID
+  string workspace_path = 6;            // Path to workspace inside VM
+  uint32 ssh_port = 7;                  // SSH port for IDE connection
+  repeated uint32 forwarded_ports = 8;  // Additional forwarded ports
+  DevEnvStatus status = 9;              // Current status
+  int64 created_at = 10;                // Unix timestamp when created
+  optional int64 started_at = 11;       // Unix timestamp when last started
+  DevContainerConfig config = 12;       // Parsed devcontainer configuration
+  map<string, string> labels = 13;      // Custom labels/metadata
+}
+
+// Status of a dev environment.
+enum DevEnvStatus {
+  DEV_ENV_STATUS_UNSPECIFIED = 0;
+  DEV_ENV_STATUS_CREATING = 1;          // Being created (cloning, building)
+  DEV_ENV_STATUS_STARTING = 2;          // VM starting
+  DEV_ENV_STATUS_RUNNING = 3;           // Ready for use
+  DEV_ENV_STATUS_STOPPED = 4;           // VM stopped
+  DEV_ENV_STATUS_FAILED = 5;            // Creation/start failed
+}
+
+// Parsed devcontainer.json configuration.
+message DevContainerConfig {
+  optional string image = 1;            // Pre-built image to use
+  optional string dockerfile = 2;       // Dockerfile to build
+  optional string docker_compose_file = 3; // Docker Compose file
+  repeated string features = 4;         // Devcontainer features to install
+  repeated uint32 forward_ports = 5;    // Ports to forward
+  string post_create_command = 6;       // Command to run after creation
+  string post_start_command = 7;        // Command to run after each start
+  map<string, string> remote_env = 8;   // Environment variables in container
+  repeated string extensions = 9;       // VS Code extensions to install
+  string workspace_folder = 10;         // Workspace folder in container
+}
+
+// Request to create a dev environment.
+message CreateDevEnvRequest {
+  string repo_url = 1;                  // Git repository URL (required)
+  optional string branch = 2;           // Git branch (default: main/master)
+  optional string devcontainer_path = 3; // Path to devcontainer.json (default: .devcontainer)
+  optional string name = 4;             // Custom environment name
+  optional VMResources resources = 5;   // Resource allocation override
+  map<string, string> labels = 6;       // Custom labels
+}
+
+// Streaming events during dev environment creation.
+message DevEnvEvent {
+  oneof event {
+    DevEnvProgress progress = 1;
+    DevEnvReady ready = 2;
+    DevEnvError error = 3;
+  }
+}
+
+// Progress update during dev environment creation.
+message DevEnvProgress {
+  string stage = 1;                     // "cloning", "parsing", "building", "starting"
+  string message = 2;                   // Human-readable message
+  uint32 percent = 3;                   // Progress percentage (0-100)
+}
+
+// Dev environment is ready.
+message DevEnvReady {
+  DevEnvironment environment = 1;
+}
+
+// Dev environment creation failed.
+message DevEnvError {
+  string message = 1;
+  string stage = 2;                     // Stage where failure occurred
+}
+
+// Request to get a dev environment.
+message GetDevEnvRequest {
+  string id = 1;                        // Environment ID
+}
+
+// Request to list dev environments.
+message ListDevEnvsRequest {
+  optional DevEnvStatus status = 1;     // Filter by status
+  optional string label_selector = 2;   // Filter by labels
+}
+
+// Response containing list of dev environments.
+message ListDevEnvsResponse {
+  repeated DevEnvironment environments = 1;
+}
+
+// Request to delete a dev environment.
+message DeleteDevEnvRequest {
+  string id = 1;                        // Environment ID
+  bool delete_vm = 2;                   // Also delete the associated VM (default: true)
+}
+
+// Response for delete dev environment.
+message DeleteDevEnvResponse {
+  bool success = 1;
+}
+
+// ============================================================================
+// Rolling Updates Types (P2)
+// ============================================================================
+
+// Strategy for updating a stack.
+enum UpdateStrategy {
+  UPDATE_STRATEGY_UNSPECIFIED = 0;
+  UPDATE_STRATEGY_ROLLING = 1;          // One at a time, wait for healthy
+  UPDATE_STRATEGY_RECREATE = 2;         // Stop all, then start all
+  UPDATE_STRATEGY_BLUE_GREEN = 3;       // Start new, switch traffic, stop old
+}
+
+// Request to update a stack with new configuration.
+message UpdateStackRequest {
+  string stack_name = 1;                // Stack to update
+  string compose_file = 2;              // Path to new docker-compose.yml
+  UpdateStrategy strategy = 3;          // Update strategy to use
+  uint32 max_unavailable = 4;           // For rolling: max services down at once
+  uint32 health_check_timeout = 5;      // Seconds to wait for health check
+  bool auto_rollback = 6;               // Rollback on failure (default: true)
+}
+
+// Streaming events during stack update.
+message UpdateStackEvent {
+  oneof event {
+    UpdateProgress progress = 1;
+    UpdateComplete complete = 2;
+    UpdateRollback rollback = 3;
+    UpdateError error = 4;
+  }
+}
+
+// Progress update during stack update.
+message UpdateProgress {
+  string service = 1;                   // Service being updated
+  string stage = 2;                     // "pulling", "stopping_old", "starting_new", "health_check"
+  string message = 3;                   // Human-readable message
+  uint32 current = 4;                   // Current service index
+  uint32 total = 5;                     // Total services to update
+}
+
+// Update completed successfully.
+message UpdateComplete {
+  Stack stack = 1;                      // Updated stack state
+  uint32 services_updated = 2;          // Number of services updated
+  uint32 duration_sec = 3;              // Total update duration
+}
+
+// Update rolled back due to failure.
+message UpdateRollback {
+  string reason = 1;                    // Why rollback was triggered
+  string failed_service = 2;            // Service that caused rollback
+  Stack stack = 3;                      // Rolled back stack state
+}
+
+// Update failed.
+message UpdateError {
+  string service = 1;                   // Service that failed (empty if general)
+  string message = 2;                   // Error message
+  bool rolled_back = 3;                 // Whether rollback was attempted
 }

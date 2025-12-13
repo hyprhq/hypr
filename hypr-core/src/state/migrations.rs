@@ -4,7 +4,7 @@ use crate::error::{HyprError, Result};
 use sqlx::SqlitePool;
 use tracing::{info, instrument};
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 #[instrument(skip(pool))]
 pub async fn run(pool: &SqlitePool) -> Result<()> {
@@ -63,6 +63,10 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
 
     if current_version < 7 {
         migrate_to_v7(pool).await?;
+    }
+
+    if current_version < 8 {
+        migrate_to_v8(pool).await?;
     }
 
     Ok(())
@@ -513,5 +517,142 @@ async fn migrate_to_v7(pool: &SqlitePool) -> Result<()> {
         .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
 
     info!("Migration to schema version 7 complete");
+    Ok(())
+}
+
+/// Migration to schema version 8: Add cron_jobs, cron_job_runs, and dev_environments tables.
+async fn migrate_to_v8(pool: &SqlitePool) -> Result<()> {
+    info!("Running migration to schema version 8");
+
+    // Cron jobs table for scheduled tasks
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS cron_jobs (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            schedule TEXT NOT NULL,
+            image TEXT NOT NULL,
+            command TEXT NOT NULL DEFAULT '[]',
+            env TEXT NOT NULL DEFAULT '{}',
+            resources_cpus INTEGER NOT NULL DEFAULT 1,
+            resources_memory_mb INTEGER NOT NULL DEFAULT 512,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER NOT NULL,
+            last_run INTEGER,
+            next_run INTEGER,
+            timeout_sec INTEGER NOT NULL DEFAULT 3600,
+            max_retries INTEGER NOT NULL DEFAULT 0,
+            labels TEXT NOT NULL DEFAULT '{}'
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    // Index for enabled jobs (for scheduler queries)
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_cron_jobs_enabled ON cron_jobs(enabled)")
+        .execute(pool)
+        .await
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    // Index for next_run (for scheduler ordering)
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_cron_jobs_next_run ON cron_jobs(next_run)")
+        .execute(pool)
+        .await
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    // Cron job runs table for execution history
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS cron_job_runs (
+            id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL,
+            started_at INTEGER NOT NULL,
+            finished_at INTEGER,
+            exit_code INTEGER,
+            status TEXT NOT NULL DEFAULT 'pending',
+            output TEXT NOT NULL DEFAULT '',
+            error_message TEXT,
+            attempt INTEGER NOT NULL DEFAULT 1,
+            FOREIGN KEY (job_id) REFERENCES cron_jobs(id) ON DELETE CASCADE
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    // Index for job lookups (history queries)
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_cron_job_runs_job ON cron_job_runs(job_id)")
+        .execute(pool)
+        .await
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    // Index for status filtering
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_cron_job_runs_status ON cron_job_runs(status)")
+        .execute(pool)
+        .await
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    // Index for time-based cleanup queries
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_cron_job_runs_started ON cron_job_runs(started_at)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    // Dev environments table
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS dev_environments (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            repo_url TEXT NOT NULL,
+            branch TEXT NOT NULL DEFAULT 'main',
+            vm_id TEXT,
+            workspace_path TEXT NOT NULL DEFAULT '/workspace',
+            ssh_port INTEGER,
+            forwarded_ports TEXT NOT NULL DEFAULT '[]',
+            status TEXT NOT NULL DEFAULT 'creating',
+            created_at INTEGER NOT NULL,
+            started_at INTEGER,
+            config TEXT NOT NULL DEFAULT '{}',
+            labels TEXT NOT NULL DEFAULT '{}'
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    // Index for VM lookups
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_dev_environments_vm ON dev_environments(vm_id)")
+        .execute(pool)
+        .await
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    // Index for status filtering
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_dev_environments_status ON dev_environments(status)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    // Update schema version
+    sqlx::query("DELETE FROM schema_version")
+        .execute(pool)
+        .await
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    sqlx::query("INSERT INTO schema_version (version) VALUES (?)")
+        .bind(8i64)
+        .execute(pool)
+        .await
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    info!("Migration to schema version 8 complete");
     Ok(())
 }

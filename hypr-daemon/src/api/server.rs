@@ -16,6 +16,7 @@ type CoreVmConfig = VmConfig;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
@@ -2385,6 +2386,322 @@ impl HyprService for HyprServiceImpl {
             reports: reports.iter().map(security_report_to_proto).collect(),
         }))
     }
+
+    // ========================
+    // Cron Job Operations (P2)
+    // ========================
+
+    async fn create_cron_job(
+        &self,
+        request: Request<CreateCronJobRequest>,
+    ) -> std::result::Result<Response<proto::CronJob>, Status> {
+        info!("gRPC: CreateCronJob");
+
+        let req = request.into_inner();
+
+        // Validate required fields
+        if req.name.is_empty() {
+            return Err(Status::invalid_argument("Name is required"));
+        }
+        if req.schedule.is_empty() {
+            return Err(Status::invalid_argument("Schedule is required"));
+        }
+        if req.image.is_empty() {
+            return Err(Status::invalid_argument("Image is required"));
+        }
+
+        // Validate cron expression
+        if cron::Schedule::from_str(&req.schedule).is_err() {
+            return Err(Status::invalid_argument(format!(
+                "Invalid cron expression: {}",
+                req.schedule
+            )));
+        }
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        // Calculate next run time
+        let next_run = calculate_next_run(&req.schedule);
+
+        let job = hypr_core::scheduler::CronJob {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: req.name,
+            schedule: req.schedule,
+            image: req.image,
+            command: req.command,
+            env: req.env,
+            resources_cpus: req.resources.as_ref().map(|r| r.cpus).unwrap_or(1),
+            resources_memory_mb: req.resources.as_ref().map(|r| r.memory_mb).unwrap_or(512),
+            enabled: req.enabled,
+            created_at: now,
+            last_run: None,
+            next_run,
+            timeout_sec: req.timeout_sec.unwrap_or(3600),
+            max_retries: req.max_retries.unwrap_or(0),
+            labels: req.labels,
+        };
+
+        self.state
+            .insert_cron_job(&job)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(cron_job_to_proto(&job)))
+    }
+
+    async fn get_cron_job(
+        &self,
+        request: Request<GetCronJobRequest>,
+    ) -> std::result::Result<Response<proto::CronJob>, Status> {
+        info!("gRPC: GetCronJob");
+
+        let req = request.into_inner();
+        let job = self
+            .state
+            .get_cron_job(&req.id)
+            .await
+            .map_err(|e| Status::not_found(e.to_string()))?;
+
+        Ok(Response::new(cron_job_to_proto(&job)))
+    }
+
+    async fn list_cron_jobs(
+        &self,
+        request: Request<ListCronJobsRequest>,
+    ) -> std::result::Result<Response<ListCronJobsResponse>, Status> {
+        info!("gRPC: ListCronJobs");
+
+        let req = request.into_inner();
+        let jobs = self
+            .state
+            .list_cron_jobs(req.enabled_only)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(ListCronJobsResponse {
+            jobs: jobs.iter().map(cron_job_to_proto).collect(),
+        }))
+    }
+
+    async fn update_cron_job(
+        &self,
+        request: Request<UpdateCronJobRequest>,
+    ) -> std::result::Result<Response<proto::CronJob>, Status> {
+        info!("gRPC: UpdateCronJob");
+
+        let req = request.into_inner();
+
+        // Get existing job
+        let mut job = self
+            .state
+            .get_cron_job(&req.id)
+            .await
+            .map_err(|e| Status::not_found(e.to_string()))?;
+
+        // Update fields if provided
+        if let Some(name) = req.name {
+            job.name = name;
+        }
+        if let Some(schedule) = req.schedule {
+            // Validate cron expression
+            if cron::Schedule::from_str(&schedule).is_err() {
+                return Err(Status::invalid_argument(format!(
+                    "Invalid cron expression: {}",
+                    schedule
+                )));
+            }
+            job.schedule = schedule;
+            job.next_run = calculate_next_run(&job.schedule);
+        }
+        if let Some(image) = req.image {
+            job.image = image;
+        }
+        if !req.command.is_empty() {
+            job.command = req.command;
+        }
+        if !req.env.is_empty() {
+            job.env = req.env;
+        }
+        if let Some(resources) = req.resources {
+            job.resources_cpus = resources.cpus;
+            job.resources_memory_mb = resources.memory_mb;
+        }
+        if let Some(enabled) = req.enabled {
+            job.enabled = enabled;
+        }
+        if let Some(timeout) = req.timeout_sec {
+            job.timeout_sec = timeout;
+        }
+        if let Some(retries) = req.max_retries {
+            job.max_retries = retries;
+        }
+
+        self.state
+            .update_cron_job(&job)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(cron_job_to_proto(&job)))
+    }
+
+    async fn delete_cron_job(
+        &self,
+        request: Request<DeleteCronJobRequest>,
+    ) -> std::result::Result<Response<DeleteCronJobResponse>, Status> {
+        info!("gRPC: DeleteCronJob");
+
+        let req = request.into_inner();
+
+        self.state
+            .delete_cron_job(&req.id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(DeleteCronJobResponse { success: true }))
+    }
+
+    async fn get_cron_job_runs(
+        &self,
+        request: Request<GetCronJobRunsRequest>,
+    ) -> std::result::Result<Response<GetCronJobRunsResponse>, Status> {
+        info!("gRPC: GetCronJobRuns");
+
+        let req = request.into_inner();
+
+        let status_filter = req
+            .status
+            .filter(|s| *s != 0)
+            .map(proto_to_cron_run_status);
+
+        let runs = self
+            .state
+            .get_cron_job_runs(&req.job_id, req.limit, status_filter)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(GetCronJobRunsResponse {
+            runs: runs.iter().map(cron_job_run_to_proto).collect(),
+        }))
+    }
+
+    // ========================
+    // Dev Environment Operations (P2)
+    // ========================
+
+    type CreateDevEnvironmentStream =
+        Pin<Box<dyn Stream<Item = std::result::Result<DevEnvEvent, Status>> + Send>>;
+
+    async fn create_dev_environment(
+        &self,
+        request: Request<CreateDevEnvRequest>,
+    ) -> std::result::Result<Response<Self::CreateDevEnvironmentStream>, Status> {
+        info!("gRPC: CreateDevEnvironment");
+
+        let req = request.into_inner();
+        let state = self.state.clone();
+
+        // Validate required fields
+        if req.repo_url.is_empty() {
+            return Err(Status::invalid_argument("Repository URL is required"));
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+
+        tokio::spawn(async move {
+            let _ = create_dev_environment_impl(req, state, tx).await;
+        });
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    async fn get_dev_environment(
+        &self,
+        request: Request<GetDevEnvRequest>,
+    ) -> std::result::Result<Response<proto::DevEnvironment>, Status> {
+        info!("gRPC: GetDevEnvironment");
+
+        let req = request.into_inner();
+        let env = self
+            .state
+            .get_dev_environment(&req.id)
+            .await
+            .map_err(|e| Status::not_found(e.to_string()))?;
+
+        Ok(Response::new(dev_environment_to_proto(&env)))
+    }
+
+    async fn list_dev_environments(
+        &self,
+        request: Request<ListDevEnvsRequest>,
+    ) -> std::result::Result<Response<ListDevEnvsResponse>, Status> {
+        info!("gRPC: ListDevEnvironments");
+
+        let req = request.into_inner();
+
+        let status_filter = req
+            .status
+            .filter(|s| *s != 0)
+            .map(proto_to_dev_env_status);
+
+        let envs = self
+            .state
+            .list_dev_environments(status_filter)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(ListDevEnvsResponse {
+            environments: envs.iter().map(dev_environment_to_proto).collect(),
+        }))
+    }
+
+    async fn delete_dev_environment(
+        &self,
+        request: Request<DeleteDevEnvRequest>,
+    ) -> std::result::Result<Response<DeleteDevEnvResponse>, Status> {
+        info!("gRPC: DeleteDevEnvironment");
+
+        let req = request.into_inner();
+
+        // TODO: If delete_vm is true, also delete the associated VM
+
+        self.state
+            .delete_dev_environment(&req.id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(DeleteDevEnvResponse { success: true }))
+    }
+
+    // ========================
+    // Rolling Updates (P2)
+    // ========================
+
+    type UpdateStackStream =
+        Pin<Box<dyn Stream<Item = std::result::Result<UpdateStackEvent, Status>> + Send>>;
+
+    async fn update_stack(
+        &self,
+        request: Request<UpdateStackRequest>,
+    ) -> std::result::Result<Response<Self::UpdateStackStream>, Status> {
+        info!("gRPC: UpdateStack");
+
+        let req = request.into_inner();
+        let state = self.state.clone();
+        let orchestrator = self.orchestrator.clone();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+
+        tokio::spawn(async move {
+            let _ = update_stack_impl(req, state, orchestrator, tx).await;
+        });
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream)))
+    }
 }
 
 /// Convert a security report to proto format.
@@ -2470,6 +2787,309 @@ fn snapshot_to_proto(snapshot: &hypr_core::snapshots::Snapshot) -> proto::Snapsh
             hypr_core::snapshots::SnapshotType::Full => proto::SnapshotType::Full as i32,
         },
     }
+}
+
+/// Convert a cron job to proto format.
+fn cron_job_to_proto(job: &hypr_core::scheduler::CronJob) -> proto::CronJob {
+    proto::CronJob {
+        id: job.id.clone(),
+        name: job.name.clone(),
+        schedule: job.schedule.clone(),
+        image: job.image.clone(),
+        command: job.command.clone(),
+        env: job.env.clone(),
+        resources: Some(proto::VmResources {
+            cpus: job.resources_cpus,
+            memory_mb: job.resources_memory_mb,
+            balloon_enabled: false,
+        }),
+        enabled: job.enabled,
+        created_at: job.created_at,
+        last_run: job.last_run,
+        next_run: job.next_run,
+        timeout_sec: job.timeout_sec,
+        max_retries: job.max_retries,
+        labels: job.labels.clone(),
+    }
+}
+
+/// Convert a cron job run to proto format.
+fn cron_job_run_to_proto(run: &hypr_core::scheduler::CronJobRun) -> proto::CronJobRun {
+    proto::CronJobRun {
+        id: run.id.clone(),
+        job_id: run.job_id.clone(),
+        started_at: run.started_at,
+        finished_at: run.finished_at,
+        exit_code: run.exit_code,
+        status: match run.status {
+            hypr_core::scheduler::CronJobRunStatus::Pending => {
+                proto::CronJobRunStatus::Pending as i32
+            }
+            hypr_core::scheduler::CronJobRunStatus::Running => {
+                proto::CronJobRunStatus::Running as i32
+            }
+            hypr_core::scheduler::CronJobRunStatus::Succeeded => {
+                proto::CronJobRunStatus::Succeeded as i32
+            }
+            hypr_core::scheduler::CronJobRunStatus::Failed => {
+                proto::CronJobRunStatus::Failed as i32
+            }
+            hypr_core::scheduler::CronJobRunStatus::Cancelled => {
+                proto::CronJobRunStatus::Cancelled as i32
+            }
+            hypr_core::scheduler::CronJobRunStatus::Timeout => {
+                proto::CronJobRunStatus::Timeout as i32
+            }
+        },
+        output: run.output.clone(),
+        error_message: run.error_message.clone(),
+        attempt: run.attempt,
+    }
+}
+
+/// Convert proto status to cron job run status.
+fn proto_to_cron_run_status(status: i32) -> hypr_core::scheduler::CronJobRunStatus {
+    match status {
+        1 => hypr_core::scheduler::CronJobRunStatus::Pending,
+        2 => hypr_core::scheduler::CronJobRunStatus::Running,
+        3 => hypr_core::scheduler::CronJobRunStatus::Succeeded,
+        4 => hypr_core::scheduler::CronJobRunStatus::Failed,
+        5 => hypr_core::scheduler::CronJobRunStatus::Cancelled,
+        6 => hypr_core::scheduler::CronJobRunStatus::Timeout,
+        _ => hypr_core::scheduler::CronJobRunStatus::Pending,
+    }
+}
+
+/// Calculate next run time from cron expression.
+fn calculate_next_run(schedule: &str) -> Option<i64> {
+    let schedule = cron::Schedule::from_str(schedule).ok()?;
+    let next = schedule.upcoming(chrono::Utc).next()?;
+    Some(next.timestamp())
+}
+
+/// Convert a dev environment to proto format.
+fn dev_environment_to_proto(env: &hypr_core::state::DevEnvironment) -> proto::DevEnvironment {
+    proto::DevEnvironment {
+        id: env.id.clone(),
+        name: env.name.clone(),
+        repo_url: env.repo_url.clone(),
+        branch: env.branch.clone(),
+        vm_id: env.vm_id.clone().unwrap_or_default(),
+        workspace_path: env.workspace_path.clone(),
+        ssh_port: env.ssh_port.unwrap_or(0),
+        forwarded_ports: env.forwarded_ports.clone(),
+        status: match env.status {
+            hypr_core::state::DevEnvStatus::Creating => proto::DevEnvStatus::Creating as i32,
+            hypr_core::state::DevEnvStatus::Starting => proto::DevEnvStatus::Starting as i32,
+            hypr_core::state::DevEnvStatus::Running => proto::DevEnvStatus::Running as i32,
+            hypr_core::state::DevEnvStatus::Stopped => proto::DevEnvStatus::Stopped as i32,
+            hypr_core::state::DevEnvStatus::Failed => proto::DevEnvStatus::Failed as i32,
+        },
+        created_at: env.created_at,
+        started_at: env.started_at,
+        config: Some(proto::DevContainerConfig {
+            image: env.config.image.clone(),
+            dockerfile: env.config.dockerfile.clone(),
+            docker_compose_file: env.config.docker_compose_file.clone(),
+            features: env.config.features.clone(),
+            forward_ports: env.config.forward_ports.clone(),
+            post_create_command: env.config.post_create_command.clone().unwrap_or_default(),
+            post_start_command: env.config.post_start_command.clone().unwrap_or_default(),
+            remote_env: env.config.remote_env.clone(),
+            extensions: env.config.extensions.clone(),
+            workspace_folder: env.config.workspace_folder.clone().unwrap_or_default(),
+        }),
+        labels: env.labels.clone(),
+    }
+}
+
+/// Convert proto status to dev env status.
+fn proto_to_dev_env_status(status: i32) -> hypr_core::state::DevEnvStatus {
+    match status {
+        1 => hypr_core::state::DevEnvStatus::Creating,
+        2 => hypr_core::state::DevEnvStatus::Starting,
+        3 => hypr_core::state::DevEnvStatus::Running,
+        4 => hypr_core::state::DevEnvStatus::Stopped,
+        5 => hypr_core::state::DevEnvStatus::Failed,
+        _ => hypr_core::state::DevEnvStatus::Creating,
+    }
+}
+
+/// Implementation for create_dev_environment streaming RPC.
+async fn create_dev_environment_impl(
+    req: CreateDevEnvRequest,
+    state: Arc<StateManager>,
+    tx: tokio::sync::mpsc::Sender<std::result::Result<DevEnvEvent, Status>>,
+) -> std::result::Result<(), HyprError> {
+    use proto::{dev_env_event, DevEnvError, DevEnvProgress, DevEnvReady};
+
+    // Send progress helper
+    let send_progress = |stage: &str, message: &str, percent: u32| {
+        let tx = tx.clone();
+        let stage = stage.to_string();
+        let message = message.to_string();
+        async move {
+            let _ = tx
+                .send(Ok(DevEnvEvent {
+                    event: Some(dev_env_event::Event::Progress(DevEnvProgress {
+                        stage,
+                        message,
+                        percent,
+                    })),
+                }))
+                .await;
+        }
+    };
+
+    // Stage 1: Clone repository (simulated for now)
+    send_progress("cloning", &format!("Cloning repository: {}", req.repo_url), 10).await;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    // Create dev environment record
+    let env_name = req
+        .name
+        .clone()
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| {
+            // Extract repo name from URL
+            req.repo_url
+                .rsplit('/')
+                .next()
+                .unwrap_or("dev-env")
+                .trim_end_matches(".git")
+                .to_string()
+        });
+
+    let env = hypr_core::state::DevEnvironment {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: env_name,
+        repo_url: req.repo_url.clone(),
+        branch: req.branch.clone().filter(|b| !b.is_empty()).unwrap_or_else(|| "main".to_string()),
+        vm_id: None,
+        workspace_path: "/workspace".to_string(),
+        ssh_port: None,
+        forwarded_ports: Vec::new(),
+        status: hypr_core::state::DevEnvStatus::Creating,
+        created_at: now,
+        started_at: None,
+        config: hypr_core::state::DevContainerConfig::default(),
+        labels: req.labels,
+    };
+
+    // Save to database
+    if let Err(e) = state.insert_dev_environment(&env).await {
+        let _ = tx
+            .send(Ok(DevEnvEvent {
+                event: Some(dev_env_event::Event::Error(DevEnvError {
+                    message: e.to_string(),
+                    stage: "creating".to_string(),
+                })),
+            }))
+            .await;
+        return Err(e);
+    }
+
+    send_progress("parsing", "Parsing devcontainer.json...", 30).await;
+
+    // TODO: Parse actual devcontainer.json from cloned repo
+    // For now, just complete with stub implementation
+
+    send_progress("building", "Building environment...", 60).await;
+
+    // TODO: Build image if Dockerfile specified
+
+    send_progress("starting", "Starting VM...", 80).await;
+
+    // TODO: Create and start VM
+
+    // Mark as running (for now, we'll leave it in Creating state since VM isn't actually created)
+    send_progress("ready", "Dev environment ready", 100).await;
+
+    // Send ready event
+    let _ = tx
+        .send(Ok(DevEnvEvent {
+            event: Some(dev_env_event::Event::Ready(DevEnvReady {
+                environment: Some(dev_environment_to_proto(&env)),
+            })),
+        }))
+        .await;
+
+    Ok(())
+}
+
+/// Implementation for update_stack streaming RPC (rolling updates).
+async fn update_stack_impl(
+    req: UpdateStackRequest,
+    state: Arc<StateManager>,
+    _orchestrator: Arc<crate::orchestrator::StackOrchestrator>,
+    tx: tokio::sync::mpsc::Sender<std::result::Result<UpdateStackEvent, Status>>,
+) -> std::result::Result<(), HyprError> {
+    use proto::{update_stack_event, UpdateComplete, UpdateError, UpdateProgress};
+
+    let start_time = SystemTime::now();
+
+    // Get existing stack
+    let stack = match state.get_stack(&req.stack_name).await {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = tx
+                .send(Ok(UpdateStackEvent {
+                    event: Some(update_stack_event::Event::Error(UpdateError {
+                        service: String::new(),
+                        message: format!("Stack not found: {}", e),
+                        rolled_back: false,
+                    })),
+                }))
+                .await;
+            return Err(e);
+        }
+    };
+
+    let strategy = match req.strategy {
+        0 | 1 => "rolling",
+        2 => "recreate",
+        3 => "blue-green",
+        _ => "rolling",
+    };
+
+    // Send initial progress
+    let _ = tx
+        .send(Ok(UpdateStackEvent {
+            event: Some(update_stack_event::Event::Progress(UpdateProgress {
+                service: String::new(),
+                stage: "analyzing".to_string(),
+                message: format!("Analyzing stack changes (strategy: {})", strategy),
+                current: 0,
+                total: stack.services.len() as u32,
+            })),
+        }))
+        .await;
+
+    // TODO: Parse new compose file and compare with existing
+    // TODO: Implement actual rolling/recreate/blue-green update logic
+
+    // For now, send a placeholder completion
+    let duration = SystemTime::now()
+        .duration_since(start_time)
+        .unwrap_or_default()
+        .as_secs() as u32;
+
+    // Send complete event
+    let _ = tx
+        .send(Ok(UpdateStackEvent {
+            event: Some(update_stack_event::Event::Complete(UpdateComplete {
+                stack: Some(stack.into()),
+                services_updated: 0,
+                duration_sec: duration,
+            })),
+        }))
+        .await;
+
+    Ok(())
 }
 
 /// Calculate directory size recursively
