@@ -92,18 +92,14 @@ pub struct BuildResult {
 pub async fn build_image(options: BuildOptions) -> Result<BuildResult> {
     let start_time = std::time::Instant::now();
 
-    info!(
-        "Building image {}:{} from {:?}",
-        options.name, options.tag, options.context_path
-    );
+    info!("Building image {}:{} from {:?}", options.name, options.tag, options.context_path);
 
     // Validate context path
-    let context_path = options.context_path.canonicalize().map_err(|e| {
-        HyprError::FileReadError {
+    let context_path =
+        options.context_path.canonicalize().map_err(|e| HyprError::FileReadError {
             path: options.context_path.to_string_lossy().to_string(),
             source: e,
-        }
-    })?;
+        })?;
 
     // Validate Dockerfile exists
     let dockerfile_path = context_path.join(&options.dockerfile);
@@ -116,37 +112,24 @@ pub async fn build_image(options: BuildOptions) -> Result<BuildResult> {
 
     // Phase 1: Parse Dockerfile
     debug!("Parsing Dockerfile: {:?}", dockerfile_path);
-    let dockerfile_content =
-        std::fs::read_to_string(&dockerfile_path).map_err(|e| HyprError::FileReadError {
-            path: dockerfile_path.to_string_lossy().to_string(),
-            source: e,
-        })?;
+    let dockerfile_content = std::fs::read_to_string(&dockerfile_path).map_err(|e| {
+        HyprError::FileReadError { path: dockerfile_path.to_string_lossy().to_string(), source: e }
+    })?;
 
     let parsed_dockerfile = parse_dockerfile(&dockerfile_content).map_err(|e| {
-        HyprError::InvalidDockerfile {
-            path: dockerfile_path.clone(),
-            reason: e.to_string(),
-        }
+        HyprError::InvalidDockerfile { path: dockerfile_path.clone(), reason: e.to_string() }
     })?;
 
     let num_stages = parsed_dockerfile.stages.len();
-    let total_instructions: usize = parsed_dockerfile
-        .stages
-        .iter()
-        .map(|s| s.instructions.len())
-        .sum();
+    let total_instructions: usize =
+        parsed_dockerfile.stages.iter().map(|s| s.instructions.len()).sum();
 
-    info!(
-        "Parsed Dockerfile: {} stages, {} instructions",
-        num_stages, total_instructions
-    );
+    info!("Parsed Dockerfile: {} stages, {} instructions", num_stages, total_instructions);
 
     // Phase 2: Build graph
     debug!("Constructing build graph");
     let graph = BuildGraph::from_dockerfile(&parsed_dockerfile).map_err(|e| {
-        HyprError::BuildFailed {
-            reason: format!("Failed to construct build graph: {}", e),
-        }
+        HyprError::BuildFailed { reason: format!("Failed to construct build graph: {}", e) }
     })?;
 
     // Validate execution order (topological sort)
@@ -196,17 +179,11 @@ pub async fn build_image(options: BuildOptions) -> Result<BuildResult> {
     let output = builder
         .execute(&graph, &context, &mut cache)
         .await
-        .map_err(|e| HyprError::BuildFailed {
-            reason: format!("Build execution failed: {}", e),
-        })?;
+        .map_err(|e| HyprError::BuildFailed { reason: format!("Build execution failed: {}", e) })?;
 
     let duration = start_time.elapsed();
 
-    info!(
-        "Build completed in {:.1}s: image_id={}",
-        duration.as_secs_f64(),
-        output.image_id
-    );
+    info!("Build completed in {:.1}s: image_id={}", duration.as_secs_f64(), output.image_id);
 
     // Generate layer history from parsed Dockerfile
     let now_secs = std::time::SystemTime::now()
@@ -294,10 +271,8 @@ pub async fn register_image(
 
     // Copy instead of rename to handle cross-filesystem moves
     if output.rootfs_path.exists() {
-        std::fs::copy(&output.rootfs_path, &permanent_rootfs).map_err(|e| HyprError::IoError {
-            path: permanent_rootfs.clone(),
-            source: e,
-        })?;
+        std::fs::copy(&output.rootfs_path, &permanent_rootfs)
+            .map_err(|e| HyprError::IoError { path: permanent_rootfs.clone(), source: e })?;
         // Clean up the temp file
         let _ = std::fs::remove_file(&output.rootfs_path);
     }
@@ -312,12 +287,7 @@ pub async fn register_image(
         entrypoint: output.manifest.config.entrypoint.clone().unwrap_or_default(),
         cmd: output.manifest.config.cmd.clone().unwrap_or_default(),
         env: output.manifest.config.env.clone(),
-        workdir: output
-            .manifest
-            .config
-            .workdir
-            .clone()
-            .unwrap_or_else(|| "/".to_string()),
+        workdir: output.manifest.config.workdir.clone().unwrap_or_else(|| "/".to_string()),
         user: output.manifest.config.user.clone(),
         exposed_ports: output
             .manifest
@@ -430,10 +400,7 @@ fn import_local_image_cache(cache: &mut CacheManager, image_dir: &Path) -> Resul
             let path = entry.path();
 
             if path.extension().and_then(|s| s.to_str()) == Some("tar") {
-                let cache_key = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("unknown");
+                let cache_key = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
 
                 match std::fs::read(&path) {
                     Ok(data) => {

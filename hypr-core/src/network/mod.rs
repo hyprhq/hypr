@@ -41,7 +41,9 @@ pub use defaults::{
     NetworkDefaults,
 };
 pub use dns::DnsServer;
-pub use gvproxy::{defaults as gvproxy_defaults, GvproxyBackend, PortForward as GvproxyPortForward};
+pub use gvproxy::{
+    defaults as gvproxy_defaults, GvproxyBackend, PortForward as GvproxyPortForward,
+};
 pub use ipam::IpAllocator;
 pub use port::{BpfPortMap, MockBpfPortMap, PortForwarder, PortMapping};
 pub use proxy_forwarder::ProxyForwarder;

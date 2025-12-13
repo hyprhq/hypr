@@ -1320,11 +1320,8 @@ impl HyprService for HyprServiceImpl {
             (parts[1].to_string(), parts[0].to_string())
         } else if tag.is_empty() {
             // Default to context directory name
-            let name = context_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("image")
-                .to_string();
+            let name =
+                context_path.file_name().and_then(|n| n.to_str()).unwrap_or("image").to_string();
             (name, "latest".to_string())
         } else {
             (tag.clone(), "latest".to_string())
@@ -1778,6 +1775,341 @@ impl HyprService for HyprServiceImpl {
 
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         Ok(Response::new(Box::pin(stream)))
+    }
+
+    // =========================================================================
+    // Templates (P0)
+    // =========================================================================
+
+    async fn list_templates(
+        &self,
+        request: Request<ListTemplatesRequest>,
+    ) -> std::result::Result<Response<ListTemplatesResponse>, Status> {
+        info!("gRPC: ListTemplates");
+
+        let req = request.into_inner();
+        let registry = hypr_core::templates::TemplateRegistry::new();
+
+        let templates: Vec<&hypr_core::templates::Template> =
+            if let Some(ref category) = req.category {
+                if let Some(cat) = hypr_core::templates::TemplateCategory::parse(category) {
+                    registry.list_by_category(cat)
+                } else {
+                    registry.list()
+                }
+            } else if let Some(ref search) = req.search {
+                registry.search(search)
+            } else {
+                registry.list()
+            };
+
+        let proto_templates: Vec<proto::Template> = templates
+            .into_iter()
+            .map(|t| proto::Template {
+                id: t.id.clone(),
+                name: t.name.clone(),
+                description: t.description.clone(),
+                category: t.category.as_str().to_string(),
+                image: t.image.clone(),
+                default_resources: Some(proto::VmResources {
+                    cpus: t.default_resources.cpus,
+                    memory_mb: t.default_resources.memory_mb,
+                    balloon_enabled: t.default_resources.balloon_enabled,
+                }),
+                default_ports: t
+                    .default_ports
+                    .iter()
+                    .map(|p| proto::PortMapping {
+                        host_port: p.host_port as u32,
+                        guest_port: p.vm_port as u32,
+                        protocol: match p.protocol {
+                            hypr_core::types::network::Protocol::Tcp => "tcp".to_string(),
+                            hypr_core::types::network::Protocol::Udp => "udp".to_string(),
+                        },
+                    })
+                    .collect(),
+                default_env: t.default_env.clone(),
+                tags: t.tags.clone(),
+                icon_url: t.icon_url.clone().unwrap_or_default(),
+                builtin: t.builtin,
+            })
+            .collect();
+
+        Ok(Response::new(ListTemplatesResponse { templates: proto_templates }))
+    }
+
+    async fn get_template(
+        &self,
+        request: Request<GetTemplateRequest>,
+    ) -> std::result::Result<Response<GetTemplateResponse>, Status> {
+        info!("gRPC: GetTemplate");
+
+        let req = request.into_inner();
+        let registry = hypr_core::templates::TemplateRegistry::new();
+
+        let template = registry
+            .get(&req.id)
+            .ok_or_else(|| Status::not_found(format!("Template {} not found", req.id)))?;
+
+        let proto_template = proto::Template {
+            id: template.id.clone(),
+            name: template.name.clone(),
+            description: template.description.clone(),
+            category: template.category.as_str().to_string(),
+            image: template.image.clone(),
+            default_resources: Some(proto::VmResources {
+                cpus: template.default_resources.cpus,
+                memory_mb: template.default_resources.memory_mb,
+                balloon_enabled: template.default_resources.balloon_enabled,
+            }),
+            default_ports: template
+                .default_ports
+                .iter()
+                .map(|p| proto::PortMapping {
+                    host_port: p.host_port as u32,
+                    guest_port: p.vm_port as u32,
+                    protocol: match p.protocol {
+                        hypr_core::types::network::Protocol::Tcp => "tcp".to_string(),
+                        hypr_core::types::network::Protocol::Udp => "udp".to_string(),
+                    },
+                })
+                .collect(),
+            default_env: template.default_env.clone(),
+            tags: template.tags.clone(),
+            icon_url: template.icon_url.clone().unwrap_or_default(),
+            builtin: template.builtin,
+        };
+
+        Ok(Response::new(GetTemplateResponse { template: Some(proto_template) }))
+    }
+
+    type CreateFromTemplateStream =
+        Pin<Box<dyn Stream<Item = std::result::Result<RunVmEvent, Status>> + Send + 'static>>;
+
+    async fn create_from_template(
+        &self,
+        request: Request<CreateFromTemplateRequest>,
+    ) -> std::result::Result<Response<Self::CreateFromTemplateStream>, Status> {
+        info!("gRPC: CreateFromTemplate");
+
+        let req = request.into_inner();
+        let registry = hypr_core::templates::TemplateRegistry::new();
+
+        let template = registry
+            .get(&req.template_id)
+            .ok_or_else(|| Status::not_found(format!("Template {} not found", req.template_id)))?
+            .clone();
+
+        // Merge template env with request env (request overrides template)
+        let mut env = template.default_env.clone();
+        env.extend(req.env);
+
+        // Merge ports
+        let mut ports: Vec<proto::PortMapping> = template
+            .default_ports
+            .iter()
+            .map(|p| proto::PortMapping {
+                host_port: p.host_port as u32,
+                guest_port: p.vm_port as u32,
+                protocol: match p.protocol {
+                    hypr_core::types::network::Protocol::Tcp => "tcp".to_string(),
+                    hypr_core::types::network::Protocol::Udp => "udp".to_string(),
+                },
+            })
+            .collect();
+        ports.extend(req.ports);
+
+        // Build config from template
+        let resources = req.resources.unwrap_or(proto::VmResources {
+            cpus: template.default_resources.cpus,
+            memory_mb: template.default_resources.memory_mb,
+            balloon_enabled: template.default_resources.balloon_enabled,
+        });
+
+        let config = proto::VmConfig {
+            id: String::new(),
+            name: String::new(),
+            resources: Some(resources),
+            disks: vec![],
+            network: None,
+            ports,
+            env,
+            volumes: vec![],
+            kernel_args: vec![],
+            kernel_path: None,
+            gpu: None,
+            vsock_path: String::new(),
+        };
+
+        // Create channel for progress events
+        let (tx, rx) = tokio::sync::mpsc::channel::<std::result::Result<RunVmEvent, Status>>(100);
+
+        // Clone what we need for the spawned task
+        let state = self.state.clone();
+        let adapter = self.adapter.clone();
+        let network_mgr = self.network_mgr.clone();
+        let image = template.image;
+        let vm_name = req.name;
+
+        tokio::spawn(async move {
+            let result = run_vm_with_progress(
+                &state,
+                &adapter,
+                &network_mgr,
+                &image,
+                vm_name,
+                Some(config),
+                &tx,
+            )
+            .await;
+
+            if let Err(e) = result {
+                let event = RunVmEvent {
+                    event: Some(run_vm_event::Event::Error(RunError { message: e.to_string() })),
+                };
+                let _ = tx.send(Ok(event)).await;
+            }
+        });
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream) as Self::CreateFromTemplateStream))
+    }
+
+    // =========================================================================
+    // Snapshots (P0)
+    // =========================================================================
+
+    async fn create_snapshot(
+        &self,
+        request: Request<CreateSnapshotRequest>,
+    ) -> std::result::Result<Response<proto::Snapshot>, Status> {
+        info!("gRPC: CreateSnapshot");
+
+        let req = request.into_inner();
+
+        let snapshot_type = match req.snapshot_type {
+            x if x == proto::SnapshotType::Disk as i32 => hypr_core::snapshots::SnapshotType::Disk,
+            x if x == proto::SnapshotType::Full as i32 => hypr_core::snapshots::SnapshotType::Full,
+            _ => hypr_core::snapshots::SnapshotType::Disk,
+        };
+
+        let manager = hypr_core::snapshots::SnapshotManager::new(self.state.clone());
+
+        let snapshot = manager
+            .create(&req.vm_id, &req.name, snapshot_type, req.description, req.labels)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(snapshot_to_proto(&snapshot)))
+    }
+
+    async fn restore_snapshot(
+        &self,
+        request: Request<RestoreSnapshotRequest>,
+    ) -> std::result::Result<Response<proto::Vm>, Status> {
+        info!("gRPC: RestoreSnapshot");
+
+        let req = request.into_inner();
+
+        let manager = hypr_core::snapshots::SnapshotManager::new(self.state.clone());
+
+        let vm = manager
+            .restore(&req.snapshot_id, req.new_vm_name.as_deref())
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        // If start_after_restore is requested, start the VM
+        if req.start_after_restore {
+            let handle = hypr_core::VmHandle { id: vm.id.clone(), pid: vm.pid, socket_path: None };
+            self.adapter.start(&handle).await.map_err(|e| Status::internal(e.to_string()))?;
+            self.state
+                .update_vm_status(&vm.id, VmStatus::Running)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+        }
+
+        let updated_vm =
+            self.state.get_vm(&vm.id).await.map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(updated_vm.into()))
+    }
+
+    async fn list_snapshots(
+        &self,
+        request: Request<ListSnapshotsRequest>,
+    ) -> std::result::Result<Response<ListSnapshotsResponse>, Status> {
+        info!("gRPC: ListSnapshots");
+
+        let req = request.into_inner();
+
+        let snapshots = self
+            .state
+            .list_snapshots(req.vm_id.as_deref())
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Filter by name prefix if provided
+        let filtered: Vec<_> = if let Some(ref name_prefix) = req.name {
+            snapshots.into_iter().filter(|s| s.name.starts_with(name_prefix)).collect()
+        } else {
+            snapshots
+        };
+
+        let proto_snapshots: Vec<proto::Snapshot> =
+            filtered.iter().map(snapshot_to_proto).collect();
+
+        Ok(Response::new(ListSnapshotsResponse { snapshots: proto_snapshots }))
+    }
+
+    async fn get_snapshot(
+        &self,
+        request: Request<GetSnapshotRequest>,
+    ) -> std::result::Result<Response<GetSnapshotResponse>, Status> {
+        info!("gRPC: GetSnapshot");
+
+        let req = request.into_inner();
+
+        let snapshot =
+            self.state.get_snapshot(&req.id).await.map_err(|e| Status::not_found(e.to_string()))?;
+
+        Ok(Response::new(GetSnapshotResponse { snapshot: Some(snapshot_to_proto(&snapshot)) }))
+    }
+
+    async fn delete_snapshot(
+        &self,
+        request: Request<DeleteSnapshotRequest>,
+    ) -> std::result::Result<Response<DeleteSnapshotResponse>, Status> {
+        info!("gRPC: DeleteSnapshot");
+
+        let req = request.into_inner();
+
+        let manager = hypr_core::snapshots::SnapshotManager::new(self.state.clone());
+
+        manager.delete(&req.id).await.map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(DeleteSnapshotResponse { success: true }))
+    }
+}
+
+/// Convert a snapshot to proto format.
+fn snapshot_to_proto(snapshot: &hypr_core::snapshots::Snapshot) -> proto::Snapshot {
+    proto::Snapshot {
+        id: snapshot.id.clone(),
+        vm_id: snapshot.vm_id.clone(),
+        name: snapshot.name.clone(),
+        description: snapshot.description.clone().unwrap_or_default(),
+        size_bytes: snapshot.size_bytes,
+        created_at: snapshot
+            .created_at
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64,
+        state: snapshot.state.as_str().to_string(),
+        labels: snapshot.labels.clone(),
+        snapshot_type: match snapshot.snapshot_type {
+            hypr_core::snapshots::SnapshotType::Disk => proto::SnapshotType::Disk as i32,
+            hypr_core::snapshots::SnapshotType::Full => proto::SnapshotType::Full as i32,
+        },
     }
 }
 

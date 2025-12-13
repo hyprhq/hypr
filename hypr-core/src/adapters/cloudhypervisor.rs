@@ -341,7 +341,8 @@ impl CloudHypervisorAdapter {
         // Network via gvproxy (only if enabled - build VMs have this disabled for security)
         if config.network_enabled {
             if let Some(socket_path) = gvproxy_socket {
-                let mac = config.network.mac_address.clone().unwrap_or_else(Self::generate_mac_address);
+                let mac =
+                    config.network.mac_address.clone().unwrap_or_else(Self::generate_mac_address);
                 // Use gvproxy's qemu socket for virtio-net
                 args.push("--net".to_string());
                 args.push(format!("socket={},mac={}", socket_path.display(), mac));

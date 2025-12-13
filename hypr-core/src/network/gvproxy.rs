@@ -120,12 +120,10 @@ impl GvproxyBackend {
 
         // Listen sockets for VMM connection
         // vfkit mode: for libkrun (macOS) - uses unixgram
-        cmd.arg("--listen-vfkit")
-            .arg(format!("unixgram://{}", self.vfkit_socket_path.display()));
+        cmd.arg("--listen-vfkit").arg(format!("unixgram://{}", self.vfkit_socket_path.display()));
 
         // qemu mode: for cloud-hypervisor (Linux) - uses unix stream
-        cmd.arg("--listen-qemu")
-            .arg(format!("unix://{}", self.qemu_socket_path.display()));
+        cmd.arg("--listen-qemu").arg(format!("unix://{}", self.qemu_socket_path.display()));
 
         // Network configuration
         cmd.arg("--gateway").arg(gateway.to_string());
@@ -141,19 +139,15 @@ impl GvproxyBackend {
             // Format: -p <host_port>:<guest_ip>:<guest_port>/<protocol>
             // Guest IP is dynamic (DHCP), so we use the gateway subnet base + 2
             // gvproxy assigns IPs starting from .2
-            cmd.arg("-p").arg(format!(
-                "{}:192.168.127.2:{}/{}",
-                pf.host_port, pf.guest_port, pf.protocol
-            ));
+            cmd.arg("-p")
+                .arg(format!("{}:192.168.127.2:{}/{}", pf.host_port, pf.guest_port, pf.protocol));
         }
 
         // Don't forward SSH by default
         cmd.arg("--ssh-port").arg("0");
 
         // Suppress stdout, capture stderr
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
+        cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
 
         info!(
             vm_id = %self.vm_id,
@@ -205,11 +199,7 @@ impl GvproxyBackend {
                     let _ = err.read_to_string(&mut stderr);
                 }
                 return Err(HyprError::NetworkSetupFailed {
-                    reason: format!(
-                        "gvproxy exited with {}: {}",
-                        status,
-                        stderr.trim()
-                    ),
+                    reason: format!("gvproxy exited with {}: {}", status, stderr.trim()),
                 });
             }
         }

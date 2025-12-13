@@ -4,7 +4,7 @@ use crate::error::{HyprError, Result};
 use sqlx::SqlitePool;
 use tracing::{info, instrument};
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 #[instrument(skip(pool))]
 pub async fn run(pool: &SqlitePool) -> Result<()> {
@@ -51,6 +51,10 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
 
     if current_version < 4 {
         migrate_to_v4(pool).await?;
+    }
+
+    if current_version < 5 {
+        migrate_to_v5(pool).await?;
     }
 
     Ok(())
@@ -329,5 +333,58 @@ async fn migrate_to_v4(pool: &SqlitePool) -> Result<()> {
         .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
 
     info!("Migration to schema version 4 complete");
+    Ok(())
+}
+
+/// Migration to schema version 5: Add snapshots table.
+async fn migrate_to_v5(pool: &SqlitePool) -> Result<()> {
+    info!("Running migration to schema version 5");
+
+    // Snapshots table
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS snapshots (
+            id TEXT PRIMARY KEY,
+            vm_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT,
+            size_bytes INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            state TEXT NOT NULL DEFAULT 'creating',
+            snapshot_type TEXT NOT NULL DEFAULT 'disk',
+            path TEXT NOT NULL,
+            labels TEXT NOT NULL DEFAULT '{}'
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    // Index for VM lookups
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_snapshots_vm ON snapshots(vm_id)")
+        .execute(pool)
+        .await
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    // Index for state filtering
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_snapshots_state ON snapshots(state)")
+        .execute(pool)
+        .await
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    // Update schema version
+    sqlx::query("DELETE FROM schema_version")
+        .execute(pool)
+        .await
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    sqlx::query("INSERT INTO schema_version (version) VALUES (?)")
+        .bind(5i64)
+        .execute(pool)
+        .await
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    info!("Migration to schema version 5 complete");
     Ok(())
 }

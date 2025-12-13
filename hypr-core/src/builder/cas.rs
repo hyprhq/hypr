@@ -204,9 +204,9 @@ impl CasStore {
         for entry in fs::read_dir(&self.manifests_dir)? {
             let entry = entry?;
             if entry.path().extension().map(|e| e == "json").unwrap_or(false) {
-                if let Ok(manifest) = self.get_manifest(
-                    entry.path().file_stem().and_then(|s| s.to_str()).unwrap_or(""),
-                ) {
+                if let Ok(manifest) = self
+                    .get_manifest(entry.path().file_stem().and_then(|s| s.to_str()).unwrap_or(""))
+                {
                     for file_entry in &manifest.entries {
                         referenced.insert(file_entry.blob_digest.clone());
                     }

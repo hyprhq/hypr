@@ -31,7 +31,7 @@ static KESTREL_INITRAMFS: &[u8] =
 static KESTREL_INITRAMFS: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/embedded/initramfs-linux-arm64.cpio"));
 
-use crate::network::{GvproxyBackend, GvproxyPortForward, gvproxy};
+use crate::network::{gvproxy, GvproxyBackend, GvproxyPortForward};
 
 /// VM context state tracked by the adapter.
 struct VmContext {
@@ -269,8 +269,8 @@ impl LibkrunAdapter {
                 // Use add_net_unixgram for gvproxy/vfkit mode
                 self.libkrun.add_net_unixgram(
                     ctx_id,
-                    &vm_socket_path,  // Our socket
-                    socket_path,      // gvproxy's socket
+                    &vm_socket_path, // Our socket
+                    socket_path,     // gvproxy's socket
                     &mac,
                     net_features::COMPAT,
                     net_flags::VFKIT, // vfkit compatibility mode for gvproxy
@@ -568,10 +568,7 @@ impl VmmAdapter for LibkrunAdapter {
 
         let (ctx_id, mut gvproxy) = {
             let mut contexts = self.contexts.lock().await;
-            contexts
-                .remove(&handle.id)
-                .map(|c| (Some(c.ctx_id), c.gvproxy))
-                .unwrap_or((None, None))
+            contexts.remove(&handle.id).map(|c| (Some(c.ctx_id), c.gvproxy)).unwrap_or((None, None))
         };
 
         // Free libkrun context

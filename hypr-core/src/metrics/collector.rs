@@ -49,7 +49,8 @@ impl VmMetricsPacket {
         }
 
         // SAFETY: VmMetricsPacket is repr(C, packed) with only primitive types
-        let packet: VmMetricsPacket = unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const _) };
+        let packet: VmMetricsPacket =
+            unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const _) };
 
         // Validate magic and version
         if packet.magic != METRICS_MAGIC {
@@ -208,10 +209,10 @@ impl MetricsCollector {
                     };
 
                     // Network rates
-                    let net_rx = (packet.net_rx_bytes.saturating_sub(prev.net_rx_bytes)) as f64
-                        / elapsed;
-                    let net_tx = (packet.net_tx_bytes.saturating_sub(prev.net_tx_bytes)) as f64
-                        / elapsed;
+                    let net_rx =
+                        (packet.net_rx_bytes.saturating_sub(prev.net_rx_bytes)) as f64 / elapsed;
+                    let net_tx =
+                        (packet.net_tx_bytes.saturating_sub(prev.net_tx_bytes)) as f64 / elapsed;
 
                     // Disk rates
                     let disk_rd = (packet.disk_read_bytes.saturating_sub(prev.disk_read_bytes))

@@ -384,10 +384,7 @@ impl HyprClient {
                     });
                 }
                 Some(build_event::Event::Output(output)) => {
-                    on_event(BuildEventKind::Output {
-                        line: output.line,
-                        stream: output.stream,
-                    });
+                    on_event(BuildEventKind::Output { line: output.line, stream: output.stream });
                 }
                 Some(build_event::Event::Complete(complete)) => {
                     if let Some(img) = complete.image {

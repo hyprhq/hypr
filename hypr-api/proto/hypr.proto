@@ -71,6 +71,18 @@ service HyprService {
 
   // Real-time event subscription
   rpc SubscribeEvents(SubscribeEventsRequest) returns (stream HyprEvent);
+
+  // Templates (P0) - Pre-configured VM templates for common workloads
+  rpc ListTemplates(ListTemplatesRequest) returns (ListTemplatesResponse);
+  rpc GetTemplate(GetTemplateRequest) returns (GetTemplateResponse);
+  rpc CreateFromTemplate(CreateFromTemplateRequest) returns (stream RunVMEvent);
+
+  // Snapshots (P0) - VM state snapshots for backup and restore
+  rpc CreateSnapshot(CreateSnapshotRequest) returns (Snapshot);
+  rpc RestoreSnapshot(RestoreSnapshotRequest) returns (VM);
+  rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
+  rpc GetSnapshot(GetSnapshotRequest) returns (GetSnapshotResponse);
+  rpc DeleteSnapshot(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
 }
 
 // ============================================================================
@@ -787,4 +799,111 @@ message HyprEvent {
   string action = 5;            // "created", "started", "stopped", "deleted", "failed"
   string message = 6;           // Human-readable description
   map<string, string> metadata = 7;
+}
+
+// ============================================================================
+// Templates Types (P0)
+// ============================================================================
+
+// Template represents a pre-configured VM template for common workloads.
+message Template {
+  string id = 1;                    // Unique template ID (e.g., "postgres-16")
+  string name = 2;                  // Human-readable name (e.g., "PostgreSQL 16")
+  string description = 3;           // Detailed description
+  string category = 4;              // Category: "database", "web", "cache", "queue", "monitoring"
+  string image = 5;                 // Base image (e.g., "postgres:16-alpine")
+  VMResources default_resources = 6; // Default CPU/memory allocation
+  repeated PortMapping default_ports = 7; // Default port mappings
+  map<string, string> default_env = 8;    // Default environment variables
+  repeated string tags = 9;         // Searchable tags
+  string icon_url = 10;             // Optional icon URL for UI
+  bool builtin = 11;                // True if this is a built-in template
+}
+
+message ListTemplatesRequest {
+  optional string category = 1;     // Filter by category
+  optional string search = 2;       // Search in name, description, tags
+}
+
+message ListTemplatesResponse {
+  repeated Template templates = 1;
+}
+
+message GetTemplateRequest {
+  string id = 1;                    // Template ID
+}
+
+message GetTemplateResponse {
+  Template template = 1;
+}
+
+message CreateFromTemplateRequest {
+  string template_id = 1;           // Template to create from
+  optional string name = 2;         // Custom VM name (auto-generated if not provided)
+  optional VMResources resources = 3; // Override default resources
+  map<string, string> env = 4;      // Additional/override environment variables
+  repeated PortMapping ports = 5;   // Additional/override port mappings
+}
+
+// ============================================================================
+// Snapshots Types (P0)
+// ============================================================================
+
+// Snapshot represents a point-in-time capture of a VM's state.
+message Snapshot {
+  string id = 1;                    // Unique snapshot ID
+  string vm_id = 2;                 // ID of the VM this snapshot belongs to
+  string name = 3;                  // Human-readable name
+  string description = 4;           // Optional description
+  uint64 size_bytes = 5;            // Size of snapshot data
+  int64 created_at = 6;             // Unix timestamp when created
+  string state = 7;                 // "creating", "ready", "failed", "deleting"
+  map<string, string> labels = 8;   // Custom labels/metadata
+  SnapshotType snapshot_type = 9;   // Type of snapshot
+}
+
+// Type of snapshot captured.
+enum SnapshotType {
+  SNAPSHOT_TYPE_UNSPECIFIED = 0;
+  SNAPSHOT_TYPE_DISK = 1;           // Disk-only snapshot (fast, VM can be running)
+  SNAPSHOT_TYPE_FULL = 2;           // Full VM state including memory (VM must be paused)
+}
+
+message CreateSnapshotRequest {
+  string vm_id = 1;                 // VM to snapshot
+  string name = 2;                  // Snapshot name
+  optional string description = 3;  // Optional description
+  SnapshotType snapshot_type = 4;   // Type of snapshot (default: DISK)
+  map<string, string> labels = 5;   // Custom labels
+}
+
+message RestoreSnapshotRequest {
+  string snapshot_id = 1;           // Snapshot to restore from
+  optional string new_vm_name = 2;  // If provided, creates a new VM; otherwise restores in-place
+  bool start_after_restore = 3;     // Start the VM after restoring (default: false)
+}
+
+message ListSnapshotsRequest {
+  optional string vm_id = 1;        // Filter by VM ID
+  optional string name = 2;         // Filter by name (prefix match)
+}
+
+message ListSnapshotsResponse {
+  repeated Snapshot snapshots = 1;
+}
+
+message GetSnapshotRequest {
+  string id = 1;                    // Snapshot ID
+}
+
+message GetSnapshotResponse {
+  Snapshot snapshot = 1;
+}
+
+message DeleteSnapshotRequest {
+  string id = 1;                    // Snapshot ID to delete
+}
+
+message DeleteSnapshotResponse {
+  bool success = 1;
 }

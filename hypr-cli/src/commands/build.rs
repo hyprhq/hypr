@@ -169,12 +169,7 @@ pub async fn build(
     println!();
     println!("  {}  {}", style("⏱️").bold(), style("Performance").bold());
     println!("  {} Duration: {}", style("│").dim(), style(&duration_str).yellow());
-    println!(
-        "  {} Layers:   {} total, {} cached",
-        style("│").dim(),
-        total_layers,
-        cached_layers
-    );
+    println!("  {} Layers:   {} total, {} cached", style("│").dim(), total_layers, cached_layers);
 
     if cached_layers > 0 && total_layers > 0 {
         let cache_pct = (cached_layers as f64 / total_layers as f64) * 100.0;

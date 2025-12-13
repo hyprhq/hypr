@@ -101,10 +101,9 @@ impl ExecClient {
         if send_handshake {
             use tokio::io::AsyncWriteExt;
             debug!("Sending vsock CONNECT handshake for port {}", EXEC_VSOCK_PORT);
-            stream
-                .write_all(format!("CONNECT {}\n", EXEC_VSOCK_PORT).as_bytes())
-                .await
-                .map_err(|e| HyprError::Internal(format!("Failed to send vsock handshake: {}", e)))?;
+            stream.write_all(format!("CONNECT {}\n", EXEC_VSOCK_PORT).as_bytes()).await.map_err(
+                |e| HyprError::Internal(format!("Failed to send vsock handshake: {}", e)),
+            )?;
         }
 
         // Send exec request
@@ -160,10 +159,9 @@ impl ExecClient {
         // libkrun handles port routing internally via separate sockets per port.
         if Self::needs_vsock_handshake() {
             debug!("Sending vsock CONNECT handshake for port {}", EXEC_VSOCK_PORT);
-            stream
-                .write_all(format!("CONNECT {}\n", EXEC_VSOCK_PORT).as_bytes())
-                .await
-                .map_err(|e| HyprError::Internal(format!("Failed to send vsock handshake: {}", e)))?;
+            stream.write_all(format!("CONNECT {}\n", EXEC_VSOCK_PORT).as_bytes()).await.map_err(
+                |e| HyprError::Internal(format!("Failed to send vsock handshake: {}", e)),
+            )?;
         }
 
         // Get terminal size

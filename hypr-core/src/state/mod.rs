@@ -764,4 +764,144 @@ impl StateManager {
     pub async fn delete_vm_port_mappings(&self, _vm_id: &str) -> Result<()> {
         Err(HyprError::NotImplemented { feature: "Port mapping persistence (Phase 2)".into() })
     }
+
+    // ========================
+    // Snapshot Operations
+    // ========================
+
+    /// Insert a new snapshot.
+    #[instrument(skip(self), fields(snapshot_id = %snapshot.id))]
+    pub async fn insert_snapshot(&self, snapshot: &crate::snapshots::Snapshot) -> Result<()> {
+        let created_at =
+            snapshot.created_at.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as i64;
+
+        let labels_json = serde_json::to_string(&snapshot.labels)
+            .map_err(|e| HyprError::DatabaseError(format!("Failed to serialize labels: {}", e)))?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO snapshots (id, vm_id, name, description, size_bytes, created_at, state, snapshot_type, path, labels)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&snapshot.id)
+        .bind(&snapshot.vm_id)
+        .bind(&snapshot.name)
+        .bind(&snapshot.description)
+        .bind(snapshot.size_bytes as i64)
+        .bind(created_at)
+        .bind(snapshot.state.as_str())
+        .bind(snapshot.snapshot_type.as_str())
+        .bind(snapshot.path.to_str())
+        .bind(labels_json)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Get a snapshot by ID.
+    #[instrument(skip(self), fields(snapshot_id = %id))]
+    pub async fn get_snapshot(&self, id: &str) -> Result<crate::snapshots::Snapshot> {
+        let row = sqlx::query("SELECT * FROM snapshots WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| HyprError::DatabaseError(e.to_string()))?
+            .ok_or_else(|| HyprError::DatabaseError(format!("Snapshot not found: {}", id)))?;
+
+        self.row_to_snapshot(row)
+    }
+
+    /// List all snapshots, optionally filtered by VM ID.
+    #[instrument(skip(self))]
+    pub async fn list_snapshots(
+        &self,
+        vm_id: Option<&str>,
+    ) -> Result<Vec<crate::snapshots::Snapshot>> {
+        let rows = if let Some(vm_id) = vm_id {
+            sqlx::query("SELECT * FROM snapshots WHERE vm_id = ? ORDER BY created_at DESC")
+                .bind(vm_id)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| HyprError::DatabaseError(e.to_string()))?
+        } else {
+            sqlx::query("SELECT * FROM snapshots ORDER BY created_at DESC")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| HyprError::DatabaseError(e.to_string()))?
+        };
+
+        rows.into_iter().map(|row| self.row_to_snapshot(row)).collect()
+    }
+
+    /// Update a snapshot.
+    #[instrument(skip(self), fields(snapshot_id = %snapshot.id))]
+    pub async fn update_snapshot(&self, snapshot: &crate::snapshots::Snapshot) -> Result<()> {
+        let labels_json = serde_json::to_string(&snapshot.labels)
+            .map_err(|e| HyprError::DatabaseError(format!("Failed to serialize labels: {}", e)))?;
+
+        sqlx::query(
+            r#"
+            UPDATE snapshots
+            SET size_bytes = ?, state = ?, labels = ?
+            WHERE id = ?
+            "#,
+        )
+        .bind(snapshot.size_bytes as i64)
+        .bind(snapshot.state.as_str())
+        .bind(labels_json)
+        .bind(&snapshot.id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Delete a snapshot.
+    #[instrument(skip(self), fields(snapshot_id = %id))]
+    pub async fn delete_snapshot(&self, id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM snapshots WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    fn row_to_snapshot(&self, row: sqlx::sqlite::SqliteRow) -> Result<crate::snapshots::Snapshot> {
+        use crate::snapshots::{SnapshotState, SnapshotType};
+
+        let created_at_secs: i64 = row.get("created_at");
+        let created_at =
+            SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(created_at_secs as u64);
+
+        let state_str: String = row.get("state");
+        let state = SnapshotState::parse(&state_str).unwrap_or(SnapshotState::Failed);
+
+        let snapshot_type_str: String = row.get("snapshot_type");
+        let snapshot_type = SnapshotType::parse(&snapshot_type_str).unwrap_or(SnapshotType::Disk);
+
+        let labels_json: String = row.get("labels");
+        let labels: std::collections::HashMap<String, String> =
+            serde_json::from_str(&labels_json).unwrap_or_default();
+
+        let size_bytes: i64 = row.get("size_bytes");
+
+        Ok(crate::snapshots::Snapshot {
+            id: row.get("id"),
+            vm_id: row.get("vm_id"),
+            name: row.get("name"),
+            description: row.get("description"),
+            size_bytes: size_bytes as u64,
+            created_at,
+            state,
+            snapshot_type,
+            path: row.get::<String, _>("path").into(),
+            labels,
+        })
+    }
 }

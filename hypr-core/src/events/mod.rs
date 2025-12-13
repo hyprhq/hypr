@@ -158,16 +158,10 @@ pub struct Event {
 
 impl Event {
     /// Create a new event.
-    pub fn new(
-        event_type: EventType,
-        resource_id: &str,
-        message: &str,
-    ) -> Self {
+    pub fn new(event_type: EventType, resource_id: &str, message: &str) -> Self {
         Self {
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as i64,
+            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()
+                as i64,
             event_type: event_type.as_str().to_string(),
             resource_type: event_type.resource_type().to_string(),
             resource_id: resource_id.to_string(),
