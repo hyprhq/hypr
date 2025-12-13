@@ -1,6 +1,7 @@
-//! VM metrics collection module.
+//! VM metrics collection and history module.
 //!
-//! Receives metrics pushed from Kestrel (guest agent) via vsock.
+//! Receives metrics pushed from Kestrel (guest agent) via vsock and stores
+//! historical data for querying.
 //!
 //! # Architecture
 //!
@@ -12,9 +13,14 @@
 //! │  └─ metrics_push│                    │  ├─ listen()    │
 //! │                 │                    │  ├─ parse()     │
 //! │                 │                    │  └─ cache       │
-//! └─────────────────┘                    └─────────────────┘
+//! └─────────────────┘                    │                 │
+//!                                        │  MetricsHistory │
+//!                                        │  └─ SQLite      │
+//!                                        └─────────────────┘
 //! ```
 
 mod collector;
+mod history;
 
 pub use collector::{MetricsCollector, VmMetrics, VmMetricsPacket};
+pub use history::{MetricsDataPoint, MetricsHistory, MetricsResolution};

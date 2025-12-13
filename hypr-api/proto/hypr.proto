@@ -83,6 +83,14 @@ service HyprService {
   rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
   rpc GetSnapshot(GetSnapshotRequest) returns (GetSnapshotResponse);
   rpc DeleteSnapshot(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
+
+  // Metrics History (P1) - Historical VM metrics
+  rpc GetMetricsHistory(GetMetricsHistoryRequest) returns (GetMetricsHistoryResponse);
+
+  // Process Explorer (P1) - VM process inspection
+  rpc ListVMProcesses(ListVMProcessesRequest) returns (ListVMProcessesResponse);
+  rpc GetVMProcess(GetVMProcessRequest) returns (VMProcess);
+  rpc SignalVMProcess(SignalVMProcessRequest) returns (SignalVMProcessResponse);
 }
 
 // ============================================================================
@@ -905,5 +913,98 @@ message DeleteSnapshotRequest {
 }
 
 message DeleteSnapshotResponse {
+  bool success = 1;
+}
+
+// ============================================================================
+// Metrics History Types (P1)
+// ============================================================================
+
+// Request to get historical metrics for a VM.
+message GetMetricsHistoryRequest {
+  string vm_id = 1;                   // VM to get metrics for
+  int64 start_time = 2;               // Start of time range (Unix timestamp, seconds)
+  int64 end_time = 3;                 // End of time range (Unix timestamp, seconds)
+  MetricsResolution resolution = 4;   // Time resolution for aggregation
+  repeated string metrics = 5;        // Which metrics to include (empty = all)
+}
+
+// Resolution for metrics aggregation.
+enum MetricsResolution {
+  METRICS_RESOLUTION_UNSPECIFIED = 0;
+  METRICS_RESOLUTION_RAW = 1;         // No aggregation, raw data points
+  METRICS_RESOLUTION_MINUTE = 2;      // 1-minute buckets
+  METRICS_RESOLUTION_HOUR = 3;        // 1-hour buckets
+  METRICS_RESOLUTION_DAY = 4;         // 1-day buckets
+}
+
+// Response containing historical metrics.
+message GetMetricsHistoryResponse {
+  string vm_id = 1;
+  repeated MetricsDataPoint data_points = 2;
+  MetricsResolution resolution = 3;
+}
+
+// A single metrics data point (possibly aggregated).
+message MetricsDataPoint {
+  int64 timestamp = 1;                // Unix timestamp (seconds)
+  double cpu_percent = 2;             // CPU usage (0-100)
+  double memory_percent = 3;          // Memory usage (0-100)
+  uint64 memory_used_bytes = 4;       // Memory used in bytes
+  double net_rx_rate = 5;             // Network receive rate (bytes/sec)
+  double net_tx_rate = 6;             // Network transmit rate (bytes/sec)
+  double disk_read_rate = 7;          // Disk read rate (bytes/sec)
+  double disk_write_rate = 8;         // Disk write rate (bytes/sec)
+}
+
+// ============================================================================
+// Process Explorer Types (P1)
+// ============================================================================
+
+// Request to list processes running in a VM.
+message ListVMProcessesRequest {
+  string vm_id = 1;                   // VM to list processes for
+  optional string sort_by = 2;        // Sort by: "cpu", "memory", "pid", "name"
+  optional bool descending = 3;       // Sort direction (default: true for cpu/memory)
+  optional uint32 limit = 4;          // Max processes to return (default: 50)
+}
+
+// Response containing list of processes.
+message ListVMProcessesResponse {
+  string vm_id = 1;
+  repeated VMProcess processes = 2;
+  int64 timestamp = 3;                // When this snapshot was taken
+}
+
+// A process running inside a VM.
+message VMProcess {
+  uint32 pid = 1;                     // Process ID
+  uint32 ppid = 2;                    // Parent process ID
+  string name = 3;                    // Process name
+  string command = 4;                 // Full command line
+  string user = 5;                    // User running the process
+  double cpu_percent = 6;             // CPU usage (0-100)
+  double memory_percent = 7;          // Memory usage (0-100)
+  uint64 memory_rss = 8;              // Resident set size in bytes
+  uint64 memory_vsz = 9;              // Virtual memory size in bytes
+  string state = 10;                  // Process state (R, S, D, Z, etc.)
+  int64 start_time = 11;              // Process start time (Unix timestamp)
+  uint64 cpu_time_ms = 12;            // Total CPU time used (milliseconds)
+}
+
+// Request to get details of a specific process.
+message GetVMProcessRequest {
+  string vm_id = 1;
+  uint32 pid = 2;
+}
+
+// Request to send a signal to a process.
+message SignalVMProcessRequest {
+  string vm_id = 1;
+  uint32 pid = 2;
+  int32 signal = 3;                   // Signal number (e.g., 9 for SIGKILL, 15 for SIGTERM)
+}
+
+message SignalVMProcessResponse {
   bool success = 1;
 }

@@ -4,7 +4,7 @@ use crate::error::{HyprError, Result};
 use sqlx::SqlitePool;
 use tracing::{info, instrument};
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 #[instrument(skip(pool))]
 pub async fn run(pool: &SqlitePool) -> Result<()> {
@@ -55,6 +55,10 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
 
     if current_version < 5 {
         migrate_to_v5(pool).await?;
+    }
+
+    if current_version < 6 {
+        migrate_to_v6(pool).await?;
     }
 
     Ok(())
@@ -386,5 +390,62 @@ async fn migrate_to_v5(pool: &SqlitePool) -> Result<()> {
         .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
 
     info!("Migration to schema version 5 complete");
+    Ok(())
+}
+
+/// Migration to schema version 6: Add metrics_history table for time-series data.
+async fn migrate_to_v6(pool: &SqlitePool) -> Result<()> {
+    info!("Running migration to schema version 6");
+
+    // Metrics history table for time-series data
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS metrics_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            vm_id TEXT NOT NULL,
+            timestamp INTEGER NOT NULL,
+            cpu_percent REAL NOT NULL DEFAULT 0,
+            memory_percent REAL NOT NULL DEFAULT 0,
+            memory_used_bytes INTEGER NOT NULL DEFAULT 0,
+            net_rx_rate REAL NOT NULL DEFAULT 0,
+            net_tx_rate REAL NOT NULL DEFAULT 0,
+            disk_read_rate REAL NOT NULL DEFAULT 0,
+            disk_write_rate REAL NOT NULL DEFAULT 0
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    // Index for efficient time-range queries
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_metrics_history_vm_time ON metrics_history(vm_id, timestamp)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    // Index for cleanup queries
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_metrics_history_time ON metrics_history(timestamp)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    // Update schema version
+    sqlx::query("DELETE FROM schema_version")
+        .execute(pool)
+        .await
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    sqlx::query("INSERT INTO schema_version (version) VALUES (?)")
+        .bind(6i64)
+        .execute(pool)
+        .await
+        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+
+    info!("Migration to schema version 6 complete");
     Ok(())
 }

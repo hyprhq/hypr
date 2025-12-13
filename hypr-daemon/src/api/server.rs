@@ -2089,6 +2089,172 @@ impl HyprService for HyprServiceImpl {
 
         Ok(Response::new(DeleteSnapshotResponse { success: true }))
     }
+
+    // =========================================================================
+    // Metrics History (P1)
+    // =========================================================================
+
+    async fn get_metrics_history(
+        &self,
+        request: Request<GetMetricsHistoryRequest>,
+    ) -> std::result::Result<Response<GetMetricsHistoryResponse>, Status> {
+        info!("gRPC: GetMetricsHistory");
+
+        let req = request.into_inner();
+
+        let resolution = hypr_core::metrics::MetricsResolution::from_i32(req.resolution)
+            .unwrap_or(hypr_core::metrics::MetricsResolution::Raw);
+
+        let history = hypr_core::metrics::MetricsHistory::new(self.state.clone());
+
+        let data_points = history
+            .query(&req.vm_id, req.start_time, req.end_time, resolution)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let proto_points: Vec<proto::MetricsDataPoint> = data_points
+            .into_iter()
+            .map(|p| proto::MetricsDataPoint {
+                timestamp: p.timestamp,
+                cpu_percent: p.cpu_percent,
+                memory_percent: p.memory_percent,
+                memory_used_bytes: p.memory_used_bytes,
+                net_rx_rate: p.net_rx_rate,
+                net_tx_rate: p.net_tx_rate,
+                disk_read_rate: p.disk_read_rate,
+                disk_write_rate: p.disk_write_rate,
+            })
+            .collect();
+
+        Ok(Response::new(GetMetricsHistoryResponse {
+            vm_id: req.vm_id,
+            data_points: proto_points,
+            resolution: resolution.to_i32(),
+        }))
+    }
+
+    // =========================================================================
+    // Process Explorer (P1)
+    // =========================================================================
+
+    async fn list_vm_processes(
+        &self,
+        request: Request<ListVmProcessesRequest>,
+    ) -> std::result::Result<Response<ListVmProcessesResponse>, Status> {
+        info!("gRPC: ListVMProcesses");
+
+        let req = request.into_inner();
+
+        // Get VM to find vsock path
+        let vm =
+            self.state.get_vm(&req.vm_id).await.map_err(|e| Status::not_found(e.to_string()))?;
+
+        let vsock_path = self.adapter.vsock_path(&hypr_core::VmHandle {
+            id: vm.id.clone(),
+            pid: vm.pid,
+            socket_path: None,
+        });
+
+        let sort_by = req
+            .sort_by
+            .as_deref()
+            .and_then(hypr_core::process::ProcessSortBy::parse)
+            .unwrap_or_default();
+
+        let descending = req.descending.unwrap_or(true);
+        let limit = req.limit.map(|l| l as usize);
+
+        let explorer = hypr_core::process::ProcessExplorer::new();
+
+        let processes = explorer
+            .list_processes(&vsock_path, sort_by, descending, limit)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let proto_processes: Vec<proto::VmProcess> =
+            processes.into_iter().map(vm_process_to_proto).collect();
+
+        Ok(Response::new(ListVmProcessesResponse {
+            vm_id: req.vm_id,
+            processes: proto_processes,
+            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+                as i64,
+        }))
+    }
+
+    async fn get_vm_process(
+        &self,
+        request: Request<GetVmProcessRequest>,
+    ) -> std::result::Result<Response<proto::VmProcess>, Status> {
+        info!("gRPC: GetVMProcess");
+
+        let req = request.into_inner();
+
+        // Get VM to find vsock path
+        let vm =
+            self.state.get_vm(&req.vm_id).await.map_err(|e| Status::not_found(e.to_string()))?;
+
+        let vsock_path = self.adapter.vsock_path(&hypr_core::VmHandle {
+            id: vm.id.clone(),
+            pid: vm.pid,
+            socket_path: None,
+        });
+
+        let explorer = hypr_core::process::ProcessExplorer::new();
+
+        let process = explorer
+            .get_process(&vsock_path, req.pid)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(vm_process_to_proto(process)))
+    }
+
+    async fn signal_vm_process(
+        &self,
+        request: Request<SignalVmProcessRequest>,
+    ) -> std::result::Result<Response<SignalVmProcessResponse>, Status> {
+        info!("gRPC: SignalVMProcess");
+
+        let req = request.into_inner();
+
+        // Get VM to find vsock path
+        let vm =
+            self.state.get_vm(&req.vm_id).await.map_err(|e| Status::not_found(e.to_string()))?;
+
+        let vsock_path = self.adapter.vsock_path(&hypr_core::VmHandle {
+            id: vm.id.clone(),
+            pid: vm.pid,
+            socket_path: None,
+        });
+
+        let explorer = hypr_core::process::ProcessExplorer::new();
+
+        explorer
+            .signal_process(&vsock_path, req.pid, req.signal)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(SignalVmProcessResponse { success: true }))
+    }
+}
+
+/// Convert a VM process to proto format.
+fn vm_process_to_proto(p: hypr_core::process::VMProcess) -> proto::VmProcess {
+    proto::VmProcess {
+        pid: p.pid,
+        ppid: p.ppid,
+        name: p.name,
+        command: p.command,
+        user: p.user,
+        cpu_percent: p.cpu_percent,
+        memory_percent: p.memory_percent,
+        memory_rss: p.memory_rss,
+        memory_vsz: p.memory_vsz,
+        state: p.state,
+        start_time: p.start_time,
+        cpu_time_ms: p.cpu_time_ms,
+    }
 }
 
 /// Convert a snapshot to proto format.

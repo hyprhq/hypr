@@ -15,6 +15,7 @@ pub mod network;
 pub mod observability;
 pub mod paths;
 pub mod ports;
+pub mod process;
 pub mod proto_convert;
 pub mod registry;
 pub mod snapshots;
@@ -26,7 +27,9 @@ pub mod types;
 pub use compose::{ComposeFile, ComposeParser};
 pub use error::{HyprError, Result};
 pub use events::{Event, EventBus, EventSubscriber, EventType};
-pub use metrics::{MetricsCollector, VmMetrics};
+pub use metrics::{
+    MetricsCollector, MetricsDataPoint, MetricsHistory, MetricsResolution, VmMetrics,
+};
 pub use network::{
     gateway, gvproxy, netmask, netmask_str, network_cidr, network_defaults, GvproxyBackend,
     GvproxyPortForward, IpAllocator, NetworkDefaults,
@@ -34,6 +37,7 @@ pub use network::{
 pub use observability::{
     health::HealthChecker, init as init_observability, shutdown as shutdown_observability,
 };
+pub use process::{ProcessExplorer, ProcessSortBy, VMProcess};
 pub use snapshots::{Snapshot, SnapshotManager, SnapshotState, SnapshotType};
 pub use state::StateManager;
 pub use templates::{Template, TemplateCategory, TemplateRegistry};
