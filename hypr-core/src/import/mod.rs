@@ -126,6 +126,12 @@ pub struct ImportImageOptions {
     pub new_tag: Option<String>,
 }
 
+impl Default for ImportImageOptions {
+    fn default() -> Self {
+        Self { image: String::new(), new_name: None, new_tag: None }
+    }
+}
+
 /// Information about a Docker container discovered for import.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DockerContainerInfo {
