@@ -64,11 +64,48 @@ impl ExecClient {
     /// This is a simple blocking execution - the command runs and we wait
     /// for it to complete. For interactive sessions, use `exec_interactive`.
     pub async fn exec(&mut self, cmd: &str, env: Vec<(String, String)>) -> Result<i32> {
+        self.exec_with_handshake(cmd, env, Self::needs_vsock_handshake()).await
+    }
+
+    /// Check if vsock handshake is needed.
+    ///
+    /// Cloud-hypervisor (Linux) uses a single vsock Unix socket that requires
+    /// `CONNECT <port>\n` handshake before communication.
+    /// libkrun (macOS) creates per-port sockets, so no handshake is needed.
+    fn needs_vsock_handshake() -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            true
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+
+    /// Execute with explicit handshake control.
+    async fn exec_with_handshake(
+        &mut self,
+        cmd: &str,
+        env: Vec<(String, String)>,
+        send_handshake: bool,
+    ) -> Result<i32> {
         debug!("Connecting to VM via vsock: {}", self.socket_path.display());
 
         let mut stream = UnixStream::connect(&self.socket_path)
             .await
             .map_err(|e| HyprError::Internal(format!("Failed to connect to VM vsock: {}", e)))?;
+
+        // Cloud-hypervisor requires CONNECT <port>\n handshake before vsock communication.
+        // libkrun handles port routing internally via separate sockets per port.
+        if send_handshake {
+            use tokio::io::AsyncWriteExt;
+            debug!("Sending vsock CONNECT handshake for port {}", EXEC_VSOCK_PORT);
+            stream
+                .write_all(format!("CONNECT {}\n", EXEC_VSOCK_PORT).as_bytes())
+                .await
+                .map_err(|e| HyprError::Internal(format!("Failed to send vsock handshake: {}", e)))?;
+        }
 
         // Send exec request
         let request = ExecRequest {
@@ -118,6 +155,16 @@ impl ExecClient {
         let mut stream = UnixStream::connect(&self.socket_path)
             .await
             .map_err(|e| HyprError::Internal(format!("Failed to connect to VM vsock: {}", e)))?;
+
+        // Cloud-hypervisor requires CONNECT <port>\n handshake before vsock communication.
+        // libkrun handles port routing internally via separate sockets per port.
+        if Self::needs_vsock_handshake() {
+            debug!("Sending vsock CONNECT handshake for port {}", EXEC_VSOCK_PORT);
+            stream
+                .write_all(format!("CONNECT {}\n", EXEC_VSOCK_PORT).as_bytes())
+                .await
+                .map_err(|e| HyprError::Internal(format!("Failed to send vsock handshake: {}", e)))?;
+        }
 
         // Get terminal size
         let (rows, cols) = terminal_size().unwrap_or((24, 80));

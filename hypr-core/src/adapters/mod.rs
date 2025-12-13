@@ -65,8 +65,11 @@ pub trait VmmAdapter: Send + Sync {
     /// Attach GPU (VFIO on Linux, Metal on macOS).
     async fn attach_gpu(&self, handle: &VmHandle, gpu: &GpuConfig) -> Result<()>;
 
-    /// Get vsock path for guest communication.
+    /// Get vsock path for guest communication (exec, port 1024).
     fn vsock_path(&self, handle: &VmHandle) -> PathBuf;
+
+    /// Get vsock path for metrics push from guest (port 1025).
+    fn metrics_vsock_path(&self, handle: &VmHandle) -> PathBuf;
 
     /// Get adapter capabilities (for feature detection).
     fn capabilities(&self) -> AdapterCapabilities;

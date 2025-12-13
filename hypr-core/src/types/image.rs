@@ -72,6 +72,34 @@ pub struct ImageManifest {
 
     /// Health check configuration
     pub health: Option<HealthCheckConfig>,
+
+    /// Layer history (for image history command)
+    #[serde(default)]
+    pub history: Vec<LayerHistory>,
+}
+
+/// Layer history entry (similar to Docker history).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerHistory {
+    /// Layer ID (digest or short hash)
+    pub id: String,
+
+    /// Dockerfile instruction that created this layer
+    pub created_by: String,
+
+    /// Layer size in bytes (0 for empty layers)
+    pub size_bytes: u64,
+
+    /// Creation timestamp (Unix epoch seconds)
+    pub created_at: i64,
+
+    /// Comment (optional)
+    #[serde(default)]
+    pub comment: String,
+
+    /// True if this layer adds no files (e.g., ENV, LABEL)
+    #[serde(default)]
+    pub empty_layer: bool,
 }
 
 /// Runtime configuration.

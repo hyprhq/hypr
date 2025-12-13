@@ -196,6 +196,12 @@ impl LibkrunAdapter {
         // Not running - try to spawn it ourselves
         info!("socket_vmnet not running, attempting to start it");
 
+        // Remove stale socket file if it exists
+        if Path::new(socket_path).exists() {
+            debug!("Removing stale socket file: {}", socket_path);
+            let _ = std::fs::remove_file(socket_path);
+        }
+
         // Find socket_vmnet binary
         let binary_paths = [
             "/opt/homebrew/opt/socket_vmnet/bin/socket_vmnet", // Homebrew ARM
@@ -217,28 +223,61 @@ impl LibkrunAdapter {
         };
 
         // Spawn socket_vmnet daemon
-        // It needs --vmnet-gateway to set the gateway IP for the vmnet network
+        // --vmnet-gateway sets the gateway IP for the vmnet network
+        // --vmnet-dhcp-end=192.168.64.2 effectively disables DHCP (only 1 IP: .2)
+        // Our IPAM allocates static IPs starting from .10 to avoid any conflict
+        info!("Starting socket_vmnet: {}", binary);
         match std::process::Command::new(binary)
-            .args(["--vmnet-gateway=192.168.64.1", socket_path])
+            .args([
+                "--vmnet-gateway=192.168.64.1",
+                "--vmnet-dhcp-end=192.168.64.2",
+                socket_path,
+            ])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .spawn()
         {
-            Ok(_child) => {
-                info!("Started socket_vmnet daemon");
+            Ok(mut child) => {
+                info!("Started socket_vmnet daemon (pid: {:?})", child.id());
 
-                // Wait for socket to become available (up to 2 seconds)
-                for _ in 0..20 {
+                // Wait for socket to become available (up to 3 seconds)
+                for i in 0..30 {
                     std::thread::sleep(std::time::Duration::from_millis(100));
                     if let Ok(stream) = UnixStream::connect(socket_path) {
-                        info!("Connected to socket_vmnet");
+                        info!("Connected to socket_vmnet after {}ms", (i + 1) * 100);
                         return Ok(stream.into_raw_fd());
+                    }
+
+                    // Check if child exited with error
+                    if let Ok(Some(status)) = child.try_wait() {
+                        let mut stderr_output = String::new();
+                        if let Some(mut stderr) = child.stderr.take() {
+                            use std::io::Read;
+                            let _ = stderr.read_to_string(&mut stderr_output);
+                        }
+                        return Err(HyprError::NetworkSetupFailed {
+                            reason: format!(
+                                "socket_vmnet exited with {}: {}",
+                                status,
+                                stderr_output.trim()
+                            ),
+                        });
                     }
                 }
 
+                // Still not available, get any error output
+                let mut stderr_output = String::new();
+                if let Some(mut stderr) = child.stderr.take() {
+                    use std::io::Read;
+                    let _ = stderr.read_to_string(&mut stderr_output);
+                }
+
                 Err(HyprError::NetworkSetupFailed {
-                    reason: "socket_vmnet started but socket not available".to_string(),
+                    reason: format!(
+                        "socket_vmnet started but socket not available after 3s. stderr: {}",
+                        stderr_output.trim()
+                    ),
                 })
             }
             Err(e) => Err(HyprError::NetworkSetupFailed {
@@ -368,6 +407,10 @@ impl LibkrunAdapter {
 
     fn vsock_path_for_id(&self, vm_id: &str) -> PathBuf {
         crate::paths::runtime_dir().join("krun").join(format!("{}.vsock", vm_id))
+    }
+
+    fn metrics_vsock_path_for_id(&self, vm_id: &str) -> PathBuf {
+        crate::paths::runtime_dir().join("krun").join(format!("{}.metrics.vsock", vm_id))
     }
 }
 
@@ -631,6 +674,10 @@ impl VmmAdapter for LibkrunAdapter {
 
     fn vsock_path(&self, handle: &VmHandle) -> PathBuf {
         self.vsock_path_for_id(&handle.id)
+    }
+
+    fn metrics_vsock_path(&self, handle: &VmHandle) -> PathBuf {
+        self.metrics_vsock_path_for_id(&handle.id)
     }
 
     fn capabilities(&self) -> AdapterCapabilities {

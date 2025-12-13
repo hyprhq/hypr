@@ -6,6 +6,8 @@ use base64::Engine;
 use hypr_api::hypr::v1::hypr_service_server::{HyprService, HyprServiceServer};
 use hypr_api::hypr::v1::{self as proto, *};
 use hypr_core::adapters::VmmAdapter;
+use hypr_core::events::{Event, EventBus, EventType};
+use hypr_core::metrics::MetricsCollector;
 use hypr_core::registry::ImagePuller;
 use hypr_core::{HyprError, Result, StateManager, Vm, VmConfig, VmHandle, VmStatus};
 
@@ -31,6 +33,8 @@ pub struct HyprServiceImpl {
     adapter: Arc<dyn VmmAdapter>,
     network_mgr: Arc<NetworkManager>,
     orchestrator: Arc<StackOrchestrator>,
+    metrics_collector: Arc<MetricsCollector>,
+    event_bus: Arc<EventBus>,
 }
 
 impl HyprServiceImpl {
@@ -41,7 +45,9 @@ impl HyprServiceImpl {
     ) -> Self {
         let orchestrator =
             Arc::new(StackOrchestrator::new(state.clone(), adapter.clone(), network_mgr.clone()));
-        Self { state, adapter, network_mgr, orchestrator }
+        let metrics_collector = Arc::new(MetricsCollector::new());
+        let event_bus = Arc::new(EventBus::new());
+        Self { state, adapter, network_mgr, orchestrator, metrics_collector, event_bus }
     }
 }
 
@@ -232,11 +238,21 @@ impl HyprService for HyprServiceImpl {
         // Start via adapter
         self.adapter.start(&handle).await.map_err(|e| Status::internal(e.to_string()))?;
 
+        // Start metrics collection for this VM
+        let metrics_vsock_path = self.adapter.metrics_vsock_path(&handle);
+        self.metrics_collector.start_vm_metrics(vm.id.clone(), metrics_vsock_path);
+
         // Update state
         self.state
             .update_vm_status(&req.id, VmStatus::Running)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Publish VM started event
+        self.event_bus.publish(
+            Event::new(EventType::VmStarted, &vm.id, &format!("VM {} started", vm.name))
+                .with_metadata("name", &vm.name),
+        );
 
         // Fetch updated VM
         let vm = self.state.get_vm(&req.id).await.map_err(|e| Status::internal(e.to_string()))?;
@@ -265,11 +281,20 @@ impl HyprService for HyprServiceImpl {
         // Stop via adapter
         self.adapter.stop(&handle, timeout).await.map_err(|e| Status::internal(e.to_string()))?;
 
+        // Stop metrics collection for this VM
+        self.metrics_collector.stop_vm_metrics(&req.id).await;
+
         // Update state
         self.state
             .update_vm_status(&req.id, VmStatus::Stopped)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Publish VM stopped event
+        self.event_bus.publish(
+            Event::new(EventType::VmStopped, &vm.id, &format!("VM {} stopped", vm.name))
+                .with_metadata("name", &vm.name),
+        );
 
         // Fetch updated VM
         let vm = self.state.get_vm(&req.id).await.map_err(|e| Status::internal(e.to_string()))?;
@@ -954,7 +979,7 @@ impl HyprService for HyprServiceImpl {
         request: Request<StreamVmMetricsRequest>,
     ) -> std::result::Result<Response<Self::StreamVMMetricsStream>, Status> {
         let req = request.into_inner();
-        let vm_id = req.vm_id;
+        let vm_id = req.vm_id.clone();
         let interval_ms = if req.interval_ms == 0 { 1000 } else { req.interval_ms };
 
         // Verify VM exists
@@ -964,28 +989,47 @@ impl HyprService for HyprServiceImpl {
             .map_err(|_| Status::not_found(format!("VM {} not found", vm_id)))?;
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let metrics_collector = self.metrics_collector.clone();
 
-        // Spawn metrics collection task
+        // Spawn metrics streaming task
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(interval_ms as u64));
             loop {
                 interval.tick().await;
 
-                // TODO: Collect real metrics from VM via vsock or /proc
-                // For now, send placeholder metrics
-                let metrics = VmMetrics {
-                    timestamp: SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as i64,
-                    cpu_percent: 0.0,
-                    memory_used_bytes: 0,
-                    memory_total_bytes: 0,
-                    disk_read_bytes: 0,
-                    disk_write_bytes: 0,
-                    network_rx_bytes: 0,
-                    network_tx_bytes: 0,
-                    pids: 0,
+                // Get real metrics from collector
+                let metrics = if let Some(vm_metrics) = metrics_collector.get_metrics(&vm_id).await
+                {
+                    VmMetrics {
+                        timestamp: SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as i64,
+                        cpu_percent: vm_metrics.cpu_percent,
+                        memory_used_bytes: vm_metrics.raw.memory_used_kb * 1024,
+                        memory_total_bytes: vm_metrics.raw.memory_total_kb * 1024,
+                        disk_read_bytes: vm_metrics.raw.disk_read_bytes,
+                        disk_write_bytes: vm_metrics.raw.disk_write_bytes,
+                        network_rx_bytes: vm_metrics.raw.net_rx_bytes,
+                        network_tx_bytes: vm_metrics.raw.net_tx_bytes,
+                        pids: vm_metrics.raw.process_count,
+                    }
+                } else {
+                    // No metrics yet, send zeros
+                    VmMetrics {
+                        timestamp: SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as i64,
+                        cpu_percent: 0.0,
+                        memory_used_bytes: 0,
+                        memory_total_bytes: 0,
+                        disk_read_bytes: 0,
+                        disk_write_bytes: 0,
+                        network_rx_bytes: 0,
+                        network_tx_bytes: 0,
+                        pids: 0,
+                    }
                 };
 
                 if tx.send(Ok(metrics)).await.is_err() {
@@ -1137,14 +1181,27 @@ impl HyprService for HyprServiceImpl {
         // Get the image
         let images = self.state.list_images().await.map_err(|e| Status::internal(e.to_string()))?;
 
-        let _image = images
+        let image = images
             .into_iter()
             .find(|i| i.id == req.image_id)
             .ok_or_else(|| Status::not_found("Image not found"))?;
 
-        // TODO: Parse actual layer history from OCI manifest
-        // For now, return empty history
-        Ok(Response::new(GetImageHistoryResponse { layers: vec![] }))
+        // Convert stored history to proto format
+        let layers: Vec<ImageLayer> = image
+            .manifest
+            .history
+            .iter()
+            .map(|h| ImageLayer {
+                id: h.id.clone(),
+                created_by: h.created_by.clone(),
+                size_bytes: h.size_bytes,
+                created_at: h.created_at,
+                comment: h.comment.clone(),
+                empty_layer: h.empty_layer,
+            })
+            .collect();
+
+        Ok(Response::new(GetImageHistoryResponse { layers }))
     }
 
     // =========================================================================
@@ -1242,21 +1299,37 @@ impl HyprService for HyprServiceImpl {
         &self,
         request: Request<BuildImageRequest>,
     ) -> std::result::Result<Response<Self::BuildImageStream>, Status> {
+        use hypr_core::builder::{build_image as core_build_image, register_image, BuildOptions};
+
         let req = request.into_inner();
         let (tx, rx) = tokio::sync::mpsc::channel(32);
 
         let context_path = PathBuf::from(&req.context_path);
         let dockerfile =
             if req.dockerfile.is_empty() { "Dockerfile".to_string() } else { req.dockerfile };
-        let tag = req.tag;
-        let _build_args = req.build_args;
-        let _target = req.target;
-        let _no_cache = req.no_cache;
-        let _state = self.state.clone();
+        let tag = req.tag.clone();
+        let build_args = req.build_args.clone();
+        let target = req.target.clone().filter(|t| !t.is_empty());
+        let no_cache = req.no_cache;
+        let cache_from = req.cache_from.clone();
+        let state = self.state.clone();
 
-        // TODO: Integrate with the builder infrastructure
-        // The current builder uses CLI `hypr build`, which should be refactored
-        // to use gRPC streaming. For now, return an error indicating to use CLI.
+        // Parse tag into name and version
+        let (image_name, image_tag) = if tag.contains(':') {
+            let parts: Vec<&str> = tag.rsplitn(2, ':').collect();
+            (parts[1].to_string(), parts[0].to_string())
+        } else if tag.is_empty() {
+            // Default to context directory name
+            let name = context_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("image")
+                .to_string();
+            (name, "latest".to_string())
+        } else {
+            (tag.clone(), "latest".to_string())
+        };
+
         tokio::spawn(async move {
             // Validate context exists
             if !context_path.exists() {
@@ -1287,17 +1360,93 @@ impl HyprService for HyprServiceImpl {
                 return;
             }
 
-            // For now, indicate to use CLI for building
-            // TODO: Integrate with build executor properly
-            let _ = tx.send(Ok(BuildEvent {
-                event: Some(build_event::Event::Error(BuildError {
-                    step_number: 0,
-                    message: format!(
-                        "Build via gRPC is not yet implemented. Please use CLI: hypr build -t {} {}",
-                        tag, context_path.display()
-                    ),
-                })),
-            })).await;
+            // Send build started event
+            let _ = tx
+                .send(Ok(BuildEvent {
+                    event: Some(build_event::Event::Step(BuildStep {
+                        step_number: 0,
+                        total_steps: 0,
+                        instruction: format!("Starting build for {}:{}", image_name, image_tag),
+                        cached: false,
+                    })),
+                }))
+                .await;
+
+            // Build options from request
+            let options = BuildOptions {
+                context_path: context_path.clone(),
+                dockerfile,
+                name: image_name.clone(),
+                tag: image_tag.clone(),
+                build_args,
+                target,
+                no_cache,
+                cache_from,
+            };
+
+            // Execute the build using centralized API
+            let build_result = match core_build_image(options).await {
+                Ok(result) => result,
+                Err(e) => {
+                    let _ = tx
+                        .send(Ok(BuildEvent {
+                            event: Some(build_event::Event::Error(BuildError {
+                                step_number: 0,
+                                message: format!("Build failed: {}", e),
+                            })),
+                        }))
+                        .await;
+                    return;
+                }
+            };
+
+            // Send build output event
+            let _ = tx
+                .send(Ok(BuildEvent {
+                    event: Some(build_event::Event::Output(BuildOutput {
+                        line: format!(
+                            "Build completed in {:.1}s ({} layers, {} cached)",
+                            build_result.duration_secs,
+                            build_result.total_layers,
+                            build_result.cached_layers
+                        ),
+                        stream: "stdout".to_string(),
+                    })),
+                }))
+                .await;
+
+            // Register the image in the database
+            let image = match register_image(
+                &build_result,
+                &image_name,
+                &image_tag,
+                true, // overwrite existing
+                &state,
+            )
+            .await
+            {
+                Ok(img) => img,
+                Err(e) => {
+                    let _ = tx
+                        .send(Ok(BuildEvent {
+                            event: Some(build_event::Event::Error(BuildError {
+                                step_number: 0,
+                                message: format!("Failed to register image: {}", e),
+                            })),
+                        }))
+                        .await;
+                    return;
+                }
+            };
+
+            // Send completion event with image details
+            let _ = tx
+                .send(Ok(BuildEvent {
+                    event: Some(build_event::Event::Complete(BuildComplete {
+                        image: Some(image.into()),
+                    })),
+                }))
+                .await;
         });
 
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -1599,18 +1748,30 @@ impl HyprService for HyprServiceImpl {
 
     async fn subscribe_events(
         &self,
-        _request: Request<SubscribeEventsRequest>,
+        request: Request<SubscribeEventsRequest>,
     ) -> std::result::Result<Response<Self::SubscribeEventsStream>, Status> {
+        let req = request.into_inner();
         let (tx, rx) = tokio::sync::mpsc::channel(32);
 
-        // TODO: Implement actual event bus
-        // For now, just keep the connection open
+        // Subscribe to event bus with filters
+        let mut subscriber = self.event_bus.subscribe(req.event_types);
+
+        // Spawn task to forward events
         tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                // Send heartbeat to keep connection alive
-                if tx.is_closed() {
-                    break;
+            while let Some(event) = subscriber.recv().await {
+                // Convert internal Event to proto HyprEvent
+                let hypr_event = HyprEvent {
+                    timestamp: event.timestamp,
+                    r#type: event.event_type,
+                    resource_type: event.resource_type,
+                    resource_id: event.resource_id,
+                    action: event.action,
+                    message: event.message,
+                    metadata: event.metadata,
+                };
+
+                if tx.send(Ok(hypr_event)).await.is_err() {
+                    break; // Client disconnected
                 }
             }
         });
@@ -1637,7 +1798,7 @@ async fn dir_size(path: &std::path::Path) -> u64 {
     size
 }
 
-/// Start the gRPC API server on Unix socket
+/// Start the gRPC API server on the default Unix socket (/tmp/hypr.sock)
 #[allow(dead_code)]
 #[instrument(skip(state, adapter, network_mgr))]
 pub async fn start_api_server(
@@ -1645,15 +1806,25 @@ pub async fn start_api_server(
     adapter: Arc<dyn VmmAdapter>,
     network_mgr: Arc<NetworkManager>,
 ) -> Result<()> {
-    let socket_path = "/tmp/hypr.sock";
+    start_api_server_at(state, adapter, network_mgr, "/tmp/hypr.sock".to_string()).await
+}
 
+/// Start the gRPC API server on a custom Unix socket path
+#[allow(dead_code)]
+#[instrument(skip(state, adapter, network_mgr))]
+pub async fn start_api_server_at(
+    state: Arc<StateManager>,
+    adapter: Arc<dyn VmmAdapter>,
+    network_mgr: Arc<NetworkManager>,
+    socket_path: String,
+) -> Result<()> {
     info!("Starting gRPC API server on {}", socket_path);
 
     // Remove old socket if exists
-    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_file(&socket_path);
 
     // Bind Unix socket
-    let uds = UnixListener::bind(socket_path)
+    let uds = UnixListener::bind(&socket_path)
         .map_err(|e| HyprError::Internal(format!("Failed to bind socket: {}", e)))?;
 
     // SECURITY: Socket permissions control who can communicate with the daemon.
@@ -1664,14 +1835,14 @@ pub async fn start_api_server(
     // Note: 0o666 (world-writable) was previously used but is a security risk because
     // anyone on the system could control VMs or mount host directories.
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))
+    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o660))
         .map_err(|e| HyprError::Internal(format!("Failed to set socket permissions: {}", e)))?;
 
     // Try to set group ownership to 'hypr' group if it exists
     // This allows non-root users in the hypr group to use the CLI
     {
         use std::ffi::CString;
-        if let Ok(socket_cstr) = CString::new(socket_path) {
+        if let Ok(socket_cstr) = CString::new(socket_path.as_str()) {
             // Try to get the 'hypr' group ID, create it if it doesn't exist
             let hypr_group = CString::new("hypr").unwrap();
             unsafe {

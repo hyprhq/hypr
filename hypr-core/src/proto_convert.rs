@@ -400,6 +400,7 @@ impl TryFrom<ProtoImageManifest> for ImageManifest {
             exposed_ports: proto.exposed_ports.into_iter().map(|p| p as u16).collect(),
             runtime,
             health: proto.health.map(|h| h.try_into()).transpose()?,
+            history: Vec::new(), // History not stored in proto, use GetImageHistory API
         })
     }
 }

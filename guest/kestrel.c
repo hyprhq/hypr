@@ -50,6 +50,8 @@
 #include <sys/select.h>
 #include <termios.h>
 #include <pty.h>      // For forkpty()
+#include <stdint.h>   // For uint64_t, uint32_t
+#include <time.h>     // For clock_gettime
 
 // jsmn - lightweight JSON parser (MIT license, https://github.com/zserge/jsmn)
 #define JSMN_STATIC
@@ -90,6 +92,39 @@ struct sockaddr_vm {
 #define MSG_SIGNAL        0x06
 #define MSG_RESIZE        0x07
 #define MSG_CLOSE         0x08
+
+// ===== METRICS PUSH (vsock port 1025) =====
+#define METRICS_VSOCK_PORT 1025
+#define METRICS_MAGIC 0x4D545243  // "MTRC" in little-endian
+#define METRICS_VERSION 1
+#define METRICS_PUSH_INTERVAL_MS 1000  // Push every 1 second
+
+// Metrics binary struct (matches daemon's VmMetricsPacket in Rust)
+// All values in little-endian, packed struct
+#pragma pack(push, 1)
+typedef struct {
+    uint32_t magic;           // METRICS_MAGIC
+    uint8_t  version;         // METRICS_VERSION
+    uint8_t  reserved[3];     // Padding for alignment
+    uint64_t timestamp_ns;    // Nanoseconds since boot (from /proc/uptime)
+    uint64_t cpu_user_ms;     // User CPU time in milliseconds
+    uint64_t cpu_system_ms;   // System CPU time in milliseconds
+    uint64_t cpu_idle_ms;     // Idle CPU time in milliseconds
+    uint64_t memory_total_kb; // Total memory in KB
+    uint64_t memory_used_kb;  // Used memory in KB (total - available)
+    uint64_t memory_cached_kb;// Cached memory in KB
+    uint64_t disk_read_bytes; // Total disk bytes read
+    uint64_t disk_write_bytes;// Total disk bytes written
+    uint64_t net_rx_bytes;    // Total network bytes received
+    uint64_t net_tx_bytes;    // Total network bytes transmitted
+    uint32_t process_count;   // Number of running processes
+    uint32_t uptime_secs;     // Uptime in seconds
+} VmMetricsPacket;
+#pragma pack(pop)
+
+// Global metrics state
+static int g_metrics_fd = -1;  // vsock connection to host
+static uint64_t g_last_metrics_push_ms = 0;
 
 // ===== MAKEDEV (self-contained) =====
 #ifndef makedev
@@ -1970,6 +2005,235 @@ static void exec_server_poll(void) {
 }
 
 // ============================================================================
+// METRICS PUSH - Push VM metrics to host via vsock
+// ============================================================================
+
+// Get current time in milliseconds (since boot)
+static uint64_t get_time_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
+// Get uptime in seconds
+static uint32_t get_uptime_secs(void) {
+    FILE *f = fopen("/proc/uptime", "r");
+    if (!f) return 0;
+
+    double uptime;
+    if (fscanf(f, "%lf", &uptime) != 1) {
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    return (uint32_t)uptime;
+}
+
+// Read memory info from /proc/meminfo
+static void read_memory_info(uint64_t *total_kb, uint64_t *used_kb, uint64_t *cached_kb) {
+    *total_kb = 0;
+    *used_kb = 0;
+    *cached_kb = 0;
+
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (!f) return;
+
+    char line[256];
+    uint64_t mem_total = 0, mem_available = 0, cached = 0, buffers = 0;
+
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "MemTotal:", 9) == 0) {
+            sscanf(line + 9, " %llu", (unsigned long long*)&mem_total);
+        } else if (strncmp(line, "MemAvailable:", 13) == 0) {
+            sscanf(line + 13, " %llu", (unsigned long long*)&mem_available);
+        } else if (strncmp(line, "Cached:", 7) == 0) {
+            sscanf(line + 7, " %llu", (unsigned long long*)&cached);
+        } else if (strncmp(line, "Buffers:", 8) == 0) {
+            sscanf(line + 8, " %llu", (unsigned long long*)&buffers);
+        }
+    }
+    fclose(f);
+
+    *total_kb = mem_total;
+    *used_kb = mem_total - mem_available;
+    *cached_kb = cached + buffers;
+}
+
+// Read CPU stats from /proc/stat (returns time in jiffies, ~100 per second)
+static void read_cpu_info(uint64_t *user_ms, uint64_t *system_ms, uint64_t *idle_ms) {
+    *user_ms = 0;
+    *system_ms = 0;
+    *idle_ms = 0;
+
+    FILE *f = fopen("/proc/stat", "r");
+    if (!f) return;
+
+    char line[256];
+    if (fgets(line, sizeof(line), f) && strncmp(line, "cpu ", 4) == 0) {
+        unsigned long long user, nice, system, idle, iowait, irq, softirq;
+        if (sscanf(line + 4, "%llu %llu %llu %llu %llu %llu %llu",
+                   &user, &nice, &system, &idle, &iowait, &irq, &softirq) >= 4) {
+            // Convert jiffies to milliseconds (assuming HZ=100)
+            *user_ms = (user + nice) * 10;
+            *system_ms = (system + irq + softirq) * 10;
+            *idle_ms = (idle + iowait) * 10;
+        }
+    }
+    fclose(f);
+}
+
+// Read disk I/O stats from /proc/diskstats
+static void read_disk_info(uint64_t *read_bytes, uint64_t *write_bytes) {
+    *read_bytes = 0;
+    *write_bytes = 0;
+
+    FILE *f = fopen("/proc/diskstats", "r");
+    if (!f) return;
+
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        unsigned int major, minor;
+        char dev[32];
+        unsigned long long rd_ios, rd_merges, rd_sectors, rd_ticks;
+        unsigned long long wr_ios, wr_merges, wr_sectors, wr_ticks;
+
+        if (sscanf(line, " %u %u %31s %llu %llu %llu %llu %llu %llu %llu %llu",
+                   &major, &minor, dev,
+                   &rd_ios, &rd_merges, &rd_sectors, &rd_ticks,
+                   &wr_ios, &wr_merges, &wr_sectors, &wr_ticks) >= 11) {
+            // Only count main block devices (vda, sda, etc.), not partitions
+            if ((strncmp(dev, "vd", 2) == 0 || strncmp(dev, "sd", 2) == 0) &&
+                strlen(dev) == 3) {
+                *read_bytes += rd_sectors * 512;
+                *write_bytes += wr_sectors * 512;
+            }
+        }
+    }
+    fclose(f);
+}
+
+// Read network I/O from /proc/net/dev
+static void read_network_info(uint64_t *rx_bytes, uint64_t *tx_bytes) {
+    *rx_bytes = 0;
+    *tx_bytes = 0;
+
+    FILE *f = fopen("/proc/net/dev", "r");
+    if (!f) return;
+
+    char line[512];
+    // Skip header lines
+    fgets(line, sizeof(line), f);
+    fgets(line, sizeof(line), f);
+
+    while (fgets(line, sizeof(line), f)) {
+        char iface[32];
+        unsigned long long r_bytes, r_packets, r_errs, r_drop;
+        unsigned long long t_bytes, t_packets, t_errs, t_drop;
+
+        // Parse: iface: rx_bytes rx_packets rx_errs rx_drop ... tx_bytes tx_packets tx_errs tx_drop ...
+        if (sscanf(line, " %31[^:]: %llu %llu %llu %llu %*u %*u %*u %*u %llu %llu %llu %llu",
+                   iface, &r_bytes, &r_packets, &r_errs, &r_drop,
+                   &t_bytes, &t_packets, &t_errs, &t_drop) >= 9) {
+            // Skip loopback
+            if (strcmp(iface, "lo") != 0) {
+                *rx_bytes += r_bytes;
+                *tx_bytes += t_bytes;
+            }
+        }
+    }
+    fclose(f);
+}
+
+// Count running processes
+static uint32_t count_processes(void) {
+    uint32_t count = 0;
+    DIR *dir = opendir("/proc");
+    if (!dir) return 0;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir))) {
+        // Count numeric directories (PIDs)
+        if (entry->d_type == DT_DIR && entry->d_name[0] >= '0' && entry->d_name[0] <= '9') {
+            count++;
+        }
+    }
+    closedir(dir);
+    return count;
+}
+
+// Connect to host metrics collector
+static int metrics_connect(void) {
+    if (g_metrics_fd >= 0) {
+        return 0;  // Already connected
+    }
+
+    g_metrics_fd = socket(AF_VSOCK, SOCK_STREAM, 0);
+    if (g_metrics_fd < 0) {
+        return -1;
+    }
+
+    struct sockaddr_vm addr = {0};
+    addr.svm_family = AF_VSOCK;
+    addr.svm_cid = VMADDR_CID_HOST;  // Connect to host
+    addr.svm_port = METRICS_VSOCK_PORT;
+
+    if (connect(g_metrics_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(g_metrics_fd);
+        g_metrics_fd = -1;
+        return -1;
+    }
+
+    // Set non-blocking for the send
+    int fl = fcntl(g_metrics_fd, F_GETFL);
+    fcntl(g_metrics_fd, F_SETFL, fl | O_NONBLOCK);
+
+    LOG("Metrics: connected to host on vsock port %d", METRICS_VSOCK_PORT);
+    return 0;
+}
+
+// Collect and send metrics to host
+static void metrics_push(void) {
+    uint64_t now_ms = get_time_ms();
+
+    // Rate limit to METRICS_PUSH_INTERVAL_MS
+    if (now_ms - g_last_metrics_push_ms < METRICS_PUSH_INTERVAL_MS) {
+        return;
+    }
+    g_last_metrics_push_ms = now_ms;
+
+    // Try to connect if not connected
+    if (g_metrics_fd < 0) {
+        if (metrics_connect() < 0) {
+            // Connection failed, try again next interval
+            return;
+        }
+    }
+
+    // Collect metrics
+    VmMetricsPacket pkt = {0};
+    pkt.magic = METRICS_MAGIC;
+    pkt.version = METRICS_VERSION;
+    pkt.timestamp_ns = now_ms * 1000000ULL;  // Convert ms to ns
+    pkt.uptime_secs = get_uptime_secs();
+
+    read_cpu_info(&pkt.cpu_user_ms, &pkt.cpu_system_ms, &pkt.cpu_idle_ms);
+    read_memory_info(&pkt.memory_total_kb, &pkt.memory_used_kb, &pkt.memory_cached_kb);
+    read_disk_info(&pkt.disk_read_bytes, &pkt.disk_write_bytes);
+    read_network_info(&pkt.net_rx_bytes, &pkt.net_tx_bytes);
+    pkt.process_count = count_processes();
+
+    // Send metrics packet
+    ssize_t n = write(g_metrics_fd, &pkt, sizeof(pkt));
+    if (n < 0) {
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            // Connection lost, close and retry next interval
+            close(g_metrics_fd);
+            g_metrics_fd = -1;
+        }
+    }
+}
+
+// ============================================================================
 // RUNTIME MODE - NETWORK CONFIGURATION
 // ============================================================================
 
@@ -2592,6 +2856,9 @@ static void run_runtime_mode(void) {
 
         // Poll exec server for incoming commands and relay I/O
         exec_server_poll();
+
+        // Push metrics to host (rate-limited internally)
+        metrics_push();
 
         // Short sleep for responsiveness (exec I/O needs frequent polling)
         usleep(10000);  // 10ms

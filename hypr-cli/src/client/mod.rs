@@ -4,6 +4,9 @@ use anyhow::{Context, Result};
 use hypr_api::hypr::v1::hypr_service_client::HyprServiceClient;
 use hypr_api::hypr::v1::{self as proto, *};
 use hypr_core::{Stack, Vm, VmConfig};
+use std::collections::HashMap;
+use std::path::Path;
+use std::time::Duration;
 use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
@@ -21,13 +24,21 @@ pub struct HyprClient {
 }
 
 impl HyprClient {
-    /// Connect to the HYPR daemon via Unix socket
+    /// Connect to the HYPR daemon via Unix socket at default path
     pub async fn connect() -> Result<Self> {
-        let socket_path = "/tmp/hypr.sock";
+        Self::connect_at("/tmp/hypr.sock").await
+    }
+
+    /// Connect to the HYPR daemon via Unix socket at a custom path
+    pub async fn connect_at(socket_path: &str) -> Result<Self> {
+        let path = socket_path.to_string();
 
         // Create a dummy URI (required by tonic but not used for Unix sockets)
         let channel = Endpoint::try_from("http://[::]:50051")?
-            .connect_with_connector(service_fn(move |_: Uri| UnixStream::connect(socket_path)))
+            .connect_with_connector(service_fn(move |_: Uri| {
+                let path = path.clone();
+                async move { UnixStream::connect(path).await }
+            }))
             .await
             .context("Failed to connect to hyprd. Is the daemon running?")?;
 
@@ -331,4 +342,153 @@ impl HyprClient {
         let response = self.client.get_network(request).await?;
         response.into_inner().network.ok_or_else(|| anyhow::anyhow!("Network not found"))
     }
+
+    /// Build an image with streaming progress
+    #[allow(clippy::too_many_arguments)]
+    pub async fn build_image<F>(
+        &mut self,
+        context_path: &str,
+        dockerfile: &str,
+        tag: &str,
+        build_args: HashMap<String, String>,
+        target: Option<String>,
+        no_cache: bool,
+        cache_from: Vec<String>,
+        mut on_event: F,
+    ) -> Result<hypr_core::Image>
+    where
+        F: FnMut(BuildEventKind) + Send,
+    {
+        let request = tonic::Request::new(BuildImageRequest {
+            context_path: context_path.to_string(),
+            dockerfile: dockerfile.to_string(),
+            tag: tag.to_string(),
+            build_args,
+            target,
+            no_cache,
+            pull: false,
+            cache_from,
+        });
+
+        let mut stream = self.client.build_image(request).await?.into_inner();
+        let mut final_image: Option<hypr_core::Image> = None;
+
+        while let Some(event) = stream.message().await? {
+            match event.event {
+                Some(build_event::Event::Step(step)) => {
+                    on_event(BuildEventKind::Step {
+                        step_number: step.step_number,
+                        total_steps: step.total_steps,
+                        instruction: step.instruction,
+                        cached: step.cached,
+                    });
+                }
+                Some(build_event::Event::Output(output)) => {
+                    on_event(BuildEventKind::Output {
+                        line: output.line,
+                        stream: output.stream,
+                    });
+                }
+                Some(build_event::Event::Complete(complete)) => {
+                    if let Some(img) = complete.image {
+                        final_image = Some(img.try_into()?);
+                    }
+                }
+                Some(build_event::Event::Error(error)) => {
+                    return Err(anyhow::anyhow!(
+                        "Build failed at step {}: {}",
+                        error.step_number,
+                        error.message
+                    ));
+                }
+                None => {}
+            }
+        }
+
+        final_image.ok_or_else(|| anyhow::anyhow!("No image returned from build"))
+    }
+}
+
+/// Build event kinds for streaming UI updates
+#[derive(Debug)]
+pub enum BuildEventKind {
+    Step {
+        step_number: u32,
+        total_steps: u32,
+        instruction: String,
+        cached: bool,
+    },
+    Output {
+        line: String,
+        #[allow(dead_code)] // Reserved for future use (stdout vs stderr)
+        stream: String,
+    },
+}
+
+/// Ensure the daemon is running, spawning an ephemeral instance if needed.
+/// Returns the socket path to connect to.
+pub async fn ensure_daemon() -> Result<String> {
+    let default_socket = "/tmp/hypr.sock";
+
+    // Try to connect to existing daemon
+    if Path::new(default_socket).exists() {
+        if let Ok(mut client) = HyprClient::connect().await {
+            // Verify it's responsive
+            if client.health().await.is_ok() {
+                return Ok(default_socket.to_string());
+            }
+        }
+    }
+
+    // No daemon running - spawn ephemeral instance
+    let pid = std::process::id();
+    let ephemeral_socket = format!("/tmp/hypr-{}.sock", pid);
+
+    // Find hyprd binary (same directory as hypr CLI)
+    let hyprd_path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("hyprd")))
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| std::path::PathBuf::from("hyprd"));
+
+    // Spawn ephemeral daemon
+    let mut child = std::process::Command::new(&hyprd_path)
+        .args([
+            "--ephemeral",
+            "--socket",
+            &ephemeral_socket,
+            "--idle-timeout",
+            "60",
+            "--skip-dns",
+            "--skip-reconcile",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| format!("Failed to spawn ephemeral daemon: {}", hyprd_path.display()))?;
+
+    // Wait for socket to appear (up to 5 seconds)
+    for _ in 0..50 {
+        if Path::new(&ephemeral_socket).exists() {
+            // Give it a moment to start accepting connections
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            // Verify it's responsive
+            if let Ok(mut client) = HyprClient::connect_at(&ephemeral_socket).await {
+                if client.health().await.is_ok() {
+                    // Detach the child process so it continues after CLI exits
+                    std::mem::forget(child);
+                    return Ok(ephemeral_socket);
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Clean up failed spawn
+    let _ = child.kill();
+    Err(anyhow::anyhow!(
+        "Failed to start ephemeral daemon (socket {} not created)",
+        ephemeral_socket
+    ))
 }

@@ -55,12 +55,14 @@ pub const fn defaults() -> NetworkDefaults {
 
     #[cfg(target_os = "macos")]
     {
+        // DHCP is limited to .2 only (effectively disabled)
+        // Static IPs start from .10 to leave a buffer
         NetworkDefaults {
             gateway: Ipv4Addr::new(192, 168, 64, 1),
             netmask: Ipv4Addr::new(255, 255, 255, 0),
             netmask_str: "255.255.255.0",
             cidr_suffix: "/24",
-            pool_start: Ipv4Addr::new(192, 168, 64, 2),
+            pool_start: Ipv4Addr::new(192, 168, 64, 10),
             pool_end: Ipv4Addr::new(192, 168, 64, 254),
             dns_servers: &["8.8.8.8", "1.1.1.1"],
         }
@@ -143,8 +145,8 @@ pub const fn pool_size() -> usize {
     #[cfg(target_os = "macos")]
     {
         // 192.168.64.0/24 = 256 addresses
-        // Minus network (.0), gateway (.1), and broadcast (.255) = 253 available
-        253
+        // Pool is .10 to .254 = 245 available (leaving .2-.9 as buffer)
+        245
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -195,6 +197,8 @@ mod tests {
             assert_eq!(d.netmask, Ipv4Addr::new(255, 255, 255, 0));
             assert_eq!(d.netmask_str, "255.255.255.0");
             assert_eq!(d.cidr_suffix, "/24");
+            // Pool starts at .10 to avoid DHCP conflict
+            assert_eq!(d.pool_start, Ipv4Addr::new(192, 168, 64, 10));
         }
     }
 
@@ -207,6 +211,6 @@ mod tests {
         assert_eq!(size, 65_533);
 
         #[cfg(target_os = "macos")]
-        assert_eq!(size, 253);
+        assert_eq!(size, 245);
     }
 }

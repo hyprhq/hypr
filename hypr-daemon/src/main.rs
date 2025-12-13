@@ -1,12 +1,28 @@
 //! HYPR Daemon (hyprd)
 //!
 //! The background service that manages VMs, networking, and state.
+//!
+//! ## Modes of Operation
+//!
+//! - **Normal mode** (default): Long-running daemon managed by launchd/systemd
+//! - **Ephemeral mode**: Starts for a single operation, exits after idle timeout
+//!
+//! ```bash
+//! # Normal mode
+//! hyprd
+//!
+//! # Ephemeral mode (for daemonless builds)
+//! hyprd --ephemeral --socket /tmp/hypr-$$.sock --idle-timeout 30
+//! ```
 
+use clap::Parser;
 use hypr_core::{
     adapters::AdapterFactory, init_observability, shutdown_observability, HealthChecker,
     StateManager,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{error, info, warn};
 
 #[allow(unused_imports)]
@@ -17,19 +33,87 @@ mod proto_convert;
 mod reconcile;
 mod shutdown;
 
+/// HYPR Daemon - manages VMs, networking, and state
+#[derive(Parser, Debug)]
+#[command(name = "hyprd", version, about)]
+struct Args {
+    /// Run in ephemeral mode (exits after idle timeout)
+    #[arg(long)]
+    ephemeral: bool,
+
+    /// Custom socket path (default: /tmp/hypr.sock)
+    #[arg(long)]
+    socket: Option<String>,
+
+    /// Idle timeout in seconds for ephemeral mode (default: 30)
+    #[arg(long, default_value = "30")]
+    idle_timeout: u64,
+
+    /// Skip DNS resolver setup
+    #[arg(long)]
+    skip_dns: bool,
+
+    /// Skip state reconciliation
+    #[arg(long)]
+    skip_reconcile: bool,
+}
+
+/// Tracks the last activity time for ephemeral mode idle detection
+pub static LAST_ACTIVITY: AtomicU64 = AtomicU64::new(0);
+
+/// Update the last activity timestamp (called on each gRPC request)
+pub fn touch_activity() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    LAST_ACTIVITY.store(now, Ordering::Relaxed);
+}
+
+/// Get seconds since last activity
+fn secs_since_activity() -> u64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let last = LAST_ACTIVITY.load(Ordering::Relaxed);
+    if last == 0 {
+        0 // Never had activity, treat as just started
+    } else {
+        now.saturating_sub(last)
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+
     // Initialize observability FIRST
     init_observability()?;
 
-    info!("HYPR daemon starting");
+    if args.ephemeral {
+        info!("HYPR daemon starting in EPHEMERAL mode (idle timeout: {}s)", args.idle_timeout);
+    } else {
+        info!("HYPR daemon starting");
+    }
+
+    // Initialize activity tracker
+    touch_activity();
 
     // Ensure data directory exists with proper permissions (adds ACL on macOS)
     hypr_core::paths::ensure_data_dir()?;
 
-    // Write PID file for single-instance enforcement
-    let pid_path = hypr_core::paths::runtime_dir().join("hyprd.pid");
-    write_pid_file(&pid_path)?;
+    // Write PID file for single-instance enforcement (skip in ephemeral mode)
+    let pid_path = if args.ephemeral {
+        // Use unique PID file for ephemeral instances
+        hypr_core::paths::runtime_dir().join(format!("hyprd-{}.pid", std::process::id()))
+    } else {
+        hypr_core::paths::runtime_dir().join("hyprd.pid")
+    };
+
+    if !args.ephemeral {
+        write_pid_file(&pid_path)?;
+    }
 
     // Initialize health checker
     let health_checker = HealthChecker::new();
@@ -81,52 +165,68 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(format!("Network manager initialization failed: {}", e).into());
         }
     };
+
+    // Determine socket path
+    let socket_path = args.socket.clone().unwrap_or_else(|| "/tmp/hypr.sock".to_string());
     health_checker.register_subsystem("networking".to_string()).await;
 
-    // Start DNS server for service discovery (*.hypr domains)
-    network_mgr.start_dns_server();
+    // Start DNS server for service discovery (*.hypr domains) - skip in ephemeral mode
+    if !args.ephemeral {
+        network_mgr.start_dns_server();
+    }
 
-    // Reconcile state from previous run
-    info!("Reconciling state from previous session...");
-    let reconciler =
-        reconcile::StateReconciler::new(state.clone(), adapter.clone(), network_mgr.clone());
+    // Reconcile state from previous run (skip in ephemeral mode or if requested)
+    if !args.ephemeral && !args.skip_reconcile {
+        info!("Reconciling state from previous session...");
+        let reconciler =
+            reconcile::StateReconciler::new(state.clone(), adapter.clone(), network_mgr.clone());
 
-    match reconciler.reconcile().await {
-        Ok(report) => {
-            if report.orphaned > 0
-                || report.orphaned_taps > 0
-                || report.orphaned_vfio > 0
-                || report.orphaned_virtiofsd > 0
-            {
-                info!(
-                    "Reconciliation cleaned up orphaned resources: {} VMs, {} TAPs, {} VFIO, {} virtiofsd",
-                    report.orphaned, report.orphaned_taps, report.orphaned_vfio, report.orphaned_virtiofsd
-                );
+        match reconciler.reconcile().await {
+            Ok(report) => {
+                if report.orphaned > 0
+                    || report.orphaned_taps > 0
+                    || report.orphaned_vfio > 0
+                    || report.orphaned_virtiofsd > 0
+                {
+                    info!(
+                        "Reconciliation cleaned up orphaned resources: {} VMs, {} TAPs, {} VFIO, {} virtiofsd",
+                        report.orphaned, report.orphaned_taps, report.orphaned_vfio, report.orphaned_virtiofsd
+                    );
+                }
+                info!("State reconciliation complete: {} running VMs", report.running);
             }
-            info!("State reconciliation complete: {} running VMs", report.running);
-        }
-        Err(e) => {
-            warn!("State reconciliation failed (continuing anyway): {}", e);
+            Err(e) => {
+                warn!("State reconciliation failed (continuing anyway): {}", e);
+            }
         }
     }
 
-    // Setup host DNS resolver
-    if let Err(e) = setup_host_dns_resolver().await {
-        warn!("Failed to setup host DNS resolver: {} (host cannot resolve *.hypr domains)", e);
+    // Setup host DNS resolver (skip in ephemeral mode or if requested)
+    if !args.ephemeral && !args.skip_dns {
+        if let Err(e) = setup_host_dns_resolver().await {
+            warn!("Failed to setup host DNS resolver: {} (host cannot resolve *.hypr domains)", e);
+        }
     }
 
-    info!("HYPR daemon ready");
+    info!("HYPR daemon ready (socket: {})", socket_path);
 
     // Create shutdown manager
     let shutdown_mgr =
         shutdown::ShutdownManager::new(state.clone(), adapter.clone(), network_mgr.clone());
 
-    // Start gRPC API server
-    let api_handle =
-        tokio::spawn(api::start_api_server(state.clone(), adapter.clone(), network_mgr.clone()));
+    // Start gRPC API server with custom socket path
+    let api_handle = tokio::spawn(api::start_api_server_at(
+        state.clone(),
+        adapter.clone(),
+        network_mgr.clone(),
+        socket_path.clone(),
+    ));
 
-    // Wait for shutdown signal
+    // Wait for shutdown signal or idle timeout (in ephemeral mode)
     let mut shutdown_rx = shutdown::shutdown_signal();
+    let idle_timeout = args.idle_timeout;
+    let is_ephemeral = args.ephemeral;
+
     tokio::select! {
         _ = shutdown_rx.recv() => {
             info!("Received shutdown signal, initiating graceful shutdown...");
@@ -138,15 +238,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => error!("API server task panicked: {}", e),
             }
         }
+        _ = async {
+            if is_ephemeral {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    let idle_secs = secs_since_activity();
+                    if idle_secs >= idle_timeout {
+                        info!("Ephemeral daemon idle for {}s, shutting down", idle_secs);
+                        break;
+                    }
+                }
+            } else {
+                // In non-ephemeral mode, this future never completes
+                std::future::pending::<()>().await;
+            }
+        } => {
+            info!("Idle timeout reached, initiating graceful shutdown...");
+        }
     }
 
-    // Perform graceful shutdown
-    if let Err(e) = shutdown_mgr.shutdown().await {
-        error!("Error during shutdown: {}", e);
+    // Perform graceful shutdown (skip in ephemeral mode for faster exit)
+    if !is_ephemeral {
+        if let Err(e) = shutdown_mgr.shutdown().await {
+            error!("Error during shutdown: {}", e);
+        }
     }
 
     // Clean up PID file
     let _ = std::fs::remove_file(&pid_path);
+
+    // Clean up ephemeral socket
+    if is_ephemeral {
+        let _ = std::fs::remove_file(&socket_path);
+    }
 
     info!("HYPR daemon shut down");
     shutdown_observability();

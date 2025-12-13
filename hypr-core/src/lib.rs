@@ -7,8 +7,10 @@ pub mod builder;
 pub mod compose;
 pub mod embedded;
 pub mod error;
+pub mod events;
 pub mod exec;
 pub mod manifest;
+pub mod metrics;
 pub mod network;
 pub mod observability;
 pub mod paths;
@@ -21,6 +23,8 @@ pub mod types;
 // Re-export commonly used items
 pub use compose::{ComposeFile, ComposeParser};
 pub use error::{HyprError, Result};
+pub use events::{Event, EventBus, EventSubscriber, EventType};
+pub use metrics::{MetricsCollector, VmMetrics};
 pub use network::{
     create_bridge_manager, gateway, netmask, netmask_str, network_cidr, network_defaults,
     BridgeConfig, BridgeManager, IpAllocator, NetworkDefaults,

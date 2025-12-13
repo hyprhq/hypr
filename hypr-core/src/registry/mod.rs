@@ -416,6 +416,7 @@ fn build_manifest(name: &str, tag: &str, config: &OciContainerConfig) -> ImageMa
         exposed_ports,
         runtime: RuntimeConfig::default(),
         health: None,
+        history: Vec::new(), // Pulled images don't have local history
     }
 }
 

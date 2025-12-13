@@ -4,8 +4,7 @@
 //! handling service-to-VM mapping, dependency ordering, and resource allocation.
 
 use super::types::*;
-use crate::builder::parser::parse_dockerfile;
-use crate::builder::{create_builder, BuildContext, BuildGraph, CacheManager};
+use crate::builder::{build_image as core_build_image, BuildOptions};
 use crate::error::{HyprError, Result};
 use crate::network::defaults as net_defaults;
 use crate::types::{
@@ -266,7 +265,9 @@ impl ComposeConverter {
         }
     }
 
-    /// Build a single image using the hypr build system.
+    /// Build a single image using the centralized hypr build system.
+    ///
+    /// Uses `crate::builder::build_image` which provides the unified build API.
     #[instrument(skip(build_args, cache_from))]
     async fn build_image(
         service_name: &str,
@@ -278,184 +279,40 @@ impl ComposeConverter {
     ) -> Result<PathBuf> {
         info!("Building image for service {} from {:?}", service_name, context_path);
 
-        // Read the Dockerfile
-        let dockerfile_path = context_path.join(dockerfile);
-        let dockerfile_content =
-            std::fs::read_to_string(&dockerfile_path).map_err(|e| HyprError::FileReadError {
-                path: dockerfile_path.to_string_lossy().to_string(),
-                source: e,
-            })?;
-
-        // Parse the Dockerfile
-        let parsed_dockerfile = parse_dockerfile(&dockerfile_content).map_err(|e| {
-            HyprError::InvalidDockerfile { path: dockerfile_path.clone(), reason: e.to_string() }
-        })?;
-
-        // Build the graph
-        let graph = BuildGraph::from_dockerfile(&parsed_dockerfile).map_err(|e| {
-            HyprError::BuildFailed { reason: format!("Failed to construct build graph: {}", e) }
-        })?;
-
-        // Create build context
-        let context = BuildContext {
+        // Use the centralized build API
+        let options = BuildOptions {
             context_path: context_path.clone(),
-            dockerfile_path: PathBuf::from(dockerfile),
+            dockerfile: dockerfile.to_string(),
+            name: service_name.to_string(),
+            tag: "latest".to_string(),
             build_args,
             target,
             no_cache: false,
+            cache_from,
         };
 
-        // Initialize cache manager
-        let mut cache = CacheManager::new().map_err(|e| HyprError::BuildFailed {
-            reason: format!("Failed to initialize cache: {}", e),
-        })?;
+        let result = core_build_image(options).await?;
 
-        // Handle cache_from: import layers from specified images as cache sources
-        if !cache_from.is_empty() {
-            info!("Processing cache_from sources: {:?}", cache_from);
-            for cache_image in &cache_from {
-                match Self::import_cache_from_image(&mut cache, cache_image).await {
-                    Ok(layers) => {
-                        info!("Imported {} cached layers from {}", layers, cache_image);
-                    }
-                    Err(e) => {
-                        // cache_from failures are non-fatal - just log and continue
-                        warn!("Failed to import cache from {}: {}", cache_image, e);
-                    }
-                }
-            }
-        }
-
-        // Create and run the builder
-        let mut builder = create_builder().map_err(|e| HyprError::BuildFailed {
-            reason: format!("Failed to create builder: {}", e),
-        })?;
-
-        let output = builder
-            .execute(&graph, &context, &mut cache)
-            .await
-            .map_err(|e| HyprError::BuildFailed { reason: format!("Build failed: {}", e) })?;
-
-        // Move the rootfs to the images directory (similar to CLI)
+        // Move the rootfs to the images directory
         let images_dir = crate::paths::images_dir();
-        let image_dir = images_dir.join(&output.image_id);
+        let image_dir = images_dir.join(&result.output.image_id);
 
         std::fs::create_dir_all(&image_dir)
             .map_err(|e| HyprError::IoError { path: image_dir.clone(), source: e })?;
 
         let permanent_rootfs = image_dir.join("rootfs.squashfs");
 
-        std::fs::rename(&output.rootfs_path, &permanent_rootfs)
-            .map_err(|e| HyprError::IoError { path: permanent_rootfs.clone(), source: e })?;
+        // Copy instead of rename to handle cross-filesystem moves
+        if result.output.rootfs_path.exists() {
+            std::fs::copy(&result.output.rootfs_path, &permanent_rootfs)
+                .map_err(|e| HyprError::IoError { path: permanent_rootfs.clone(), source: e })?;
+            let _ = std::fs::remove_file(&result.output.rootfs_path);
+        }
 
-        info!("Built image {} for service {}", output.image_id, service_name);
+        info!("Built image {} for service {}", result.output.image_id, service_name);
 
         // Return the path to the squashfs image
         Ok(permanent_rootfs)
-    }
-
-    /// Import layers from a cache_from image into the cache manager.
-    /// This allows reusing layers from previously built images.
-    ///
-    /// Returns the number of layers imported.
-    #[instrument(skip(cache))]
-    async fn import_cache_from_image(cache: &mut CacheManager, image_ref: &str) -> Result<usize> {
-        use crate::builder::oci::OciClient;
-
-        info!("Attempting to import cache from image: {}", image_ref);
-
-        // Check if it's a local image first (in our images directory)
-        let images_dir = crate::paths::images_dir();
-
-        // Try to find a local image with this name
-        // Format could be "name:tag" or just "name" (defaults to latest)
-        let name = if image_ref.contains(':') {
-            image_ref.split(':').next().unwrap_or(image_ref)
-        } else {
-            image_ref
-        };
-
-        // Look for the image in the local images directory
-        // First check if there's a directory matching the image name
-        let local_image_dir = images_dir.join(name);
-        if local_image_dir.exists() {
-            // Found local image - import its layers into cache
-            let layers_imported = Self::import_local_image_cache(cache, &local_image_dir)?;
-            return Ok(layers_imported);
-        }
-
-        // Try to pull the image and extract layers
-        // Create a temporary directory for the pulled image in cache
-        let cache_dir = crate::paths::cache_dir();
-        let temp_dir = cache_dir.join(format!("cache-from-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&temp_dir)
-            .map_err(|e| HyprError::IoError { path: temp_dir.clone(), source: e })?;
-
-        // Pull the image
-        let mut oci_client = OciClient::new().map_err(|e| HyprError::BuildFailed {
-            reason: format!("Failed to create OCI client: {}", e),
-        })?;
-
-        match oci_client.pull_image(image_ref, &temp_dir).await {
-            Ok(_) => {
-                let layers_imported = Self::import_local_image_cache(cache, &temp_dir)?;
-                // Clean up temp directory
-                let _ = std::fs::remove_dir_all(&temp_dir);
-                Ok(layers_imported)
-            }
-            Err(e) => {
-                // Clean up temp directory
-                let _ = std::fs::remove_dir_all(&temp_dir);
-                Err(HyprError::BuildFailed {
-                    reason: format!("Failed to pull cache_from image {}: {}", image_ref, e),
-                })
-            }
-        }
-    }
-
-    /// Import layers from a local image directory into the cache.
-    fn import_local_image_cache(cache: &mut CacheManager, image_dir: &Path) -> Result<usize> {
-        let mut layers_imported = 0;
-
-        // Look for layer files in the image directory
-        // Typically these would be .tar files or a layers/ subdirectory
-        let layers_dir = image_dir.join("layers");
-
-        if layers_dir.exists() {
-            for entry in std::fs::read_dir(&layers_dir)
-                .map_err(|e| HyprError::IoError { path: layers_dir.clone(), source: e })?
-            {
-                let entry = entry
-                    .map_err(|e| HyprError::IoError { path: layers_dir.clone(), source: e })?;
-                let path = entry.path();
-
-                if path.extension().and_then(|s| s.to_str()) == Some("tar") {
-                    // Generate a cache key from the layer filename
-                    let cache_key = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
-
-                    // Read the layer data
-                    match std::fs::read(&path) {
-                        Ok(data) => {
-                            let description =
-                                format!("Imported from cache_from: {}", path.display());
-                            if cache.insert(cache_key, &data, description, 0).is_ok() {
-                                layers_imported += 1;
-                            }
-                        }
-                        Err(_) => continue, // Skip unreadable layers
-                    }
-                }
-            }
-        }
-
-        // Also check for a manifest that might list layer digests
-        let manifest_path = image_dir.join("manifest.json");
-        if manifest_path.exists() {
-            // Could parse manifest and import layers based on digests
-            // For now, this is handled by the layers directory approach above
-        }
-
-        Ok(layers_imported)
     }
 
     /// Convert compose services to service configurations.

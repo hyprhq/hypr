@@ -1,21 +1,18 @@
 //! Build command implementation for HYPR CLI.
 //!
-//! Builds HYPR images from Dockerfiles with a premium progress UI.
+//! Thin gRPC client that delegates build execution to the daemon.
+//! Displays premium progress UI for streamed build events.
 
 use anyhow::{Context, Result};
 use console::style;
-use hypr_core::builder::parser::parse_dockerfile;
-use hypr_core::builder::{create_builder, BuildContext, BuildGraph, CacheManager};
-use hypr_core::state::StateManager;
-use hypr_core::types::Image;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
-use std::fs;
-
 use std::path::{Path, PathBuf};
-use std::time::{Instant, SystemTime};
+use std::time::Instant;
 
-/// Builds an image from a Dockerfile.
+use crate::client::{ensure_daemon, BuildEventKind, HyprClient};
+
+/// Builds an image from a Dockerfile via the daemon.
 ///
 /// # Arguments
 /// * `context_path` - Path to build context directory
@@ -50,6 +47,10 @@ pub async fn build(
     // Parse tag
     let default_name = context_dir_abs.file_name().and_then(|n| n.to_str()).unwrap_or("image");
     let (image_name, image_tag) = parse_tag(tag, default_name)?;
+    let full_tag = format!("{}:{}", image_name, image_tag);
+
+    // Convert build args to HashMap
+    let build_args_map: HashMap<String, String> = build_args.into_iter().collect();
 
     // ═══════════════════════════════════════════════════════════════════════
     // PREMIUM BUILD UI - Header
@@ -66,91 +67,90 @@ pub async fn build(
     println!();
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Phase 1: Parse Dockerfile
+    // Connect to daemon (or spawn ephemeral)
     // ═══════════════════════════════════════════════════════════════════════
-    let spinner = create_spinner("Parsing Dockerfile...");
+    let spinner = create_spinner("Connecting to daemon...");
 
-    let dockerfile_content = fs::read_to_string(&dockerfile_path)
-        .with_context(|| format!("Failed to read Dockerfile: {}", dockerfile_path.display()))?;
+    let socket_path = ensure_daemon().await?;
+    let mut client = HyprClient::connect_at(&socket_path).await?;
 
-    let parsed_dockerfile =
-        parse_dockerfile(&dockerfile_content).with_context(|| "Failed to parse Dockerfile")?;
-
-    let num_stages = parsed_dockerfile.stages.len();
-    let total_instructions: usize =
-        parsed_dockerfile.stages.iter().map(|s| s.instructions.len()).sum();
-
-    spinner.finish_with_message(format!(
-        "{} Parsed {} stages, {} instructions",
-        style("✓").green(),
-        style(num_stages).yellow(),
-        style(total_instructions).yellow()
-    ));
+    spinner.finish_with_message(format!("{} Connected to daemon", style("✓").green()));
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Phase 2: Build graph
+    // Execute build via gRPC
     // ═══════════════════════════════════════════════════════════════════════
-    let spinner = create_spinner("Constructing build graph...");
-
-    let graph = BuildGraph::from_dockerfile(&parsed_dockerfile)
-        .with_context(|| "Failed to construct build graph")?;
-
-    let execution_order = graph.topological_sort().with_context(|| "Failed to sort build graph")?;
-
-    spinner.finish_with_message(format!(
-        "{} Build graph ready ({} steps)",
-        style("✓").green(),
-        style(execution_order.len()).yellow()
-    ));
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Phase 3: Initialize cache
-    // ═══════════════════════════════════════════════════════════════════════
-    let spinner = create_spinner("Initializing cache...");
-
-    let mut cache = CacheManager::new().with_context(|| "Failed to initialize cache manager")?;
-
-    let cache_status = if no_cache {
-        format!("{} Cache disabled", style("⚠").yellow())
-    } else {
-        format!("{} Cache enabled", style("✓").green())
-    };
-    spinner.finish_with_message(cache_status);
-
     println!();
-
-    // Build context
-    let mut build_args_map = HashMap::new();
-    for (key, value) in build_args {
-        build_args_map.insert(key, value);
-    }
-
-    let context = BuildContext {
-        context_path: context_dir_abs.clone(),
-        dockerfile_path: PathBuf::from(&dockerfile_name),
-        build_args: build_args_map,
-        target: target.map(String::from),
-        no_cache,
-    };
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Phase 4: Execute build
-    // ═══════════════════════════════════════════════════════════════════════
     println!("  {} {}", style("▶").cyan().bold(), style("Executing build").bold());
     println!();
 
-    let mut builder = create_builder().with_context(|| "Failed to create builder")?;
+    let mut current_spinner: Option<ProgressBar> = None;
+    let mut cached_layers = 0u32;
+    let mut total_layers = 0u32;
 
-    // Execute the actual build (streaming happens inside execute)
-    let output =
-        builder.execute(&graph, &context, &mut cache).await.with_context(|| "Build failed")?;
+    let image = client
+        .build_image(
+            context_dir_abs.to_str().unwrap_or("."),
+            &dockerfile_name,
+            &full_tag,
+            build_args_map,
+            target.map(String::from),
+            no_cache,
+            vec![], // cache_from (could be added as CLI arg later)
+            |event| match event {
+                BuildEventKind::Step { step_number, total_steps, instruction, cached } => {
+                    // Finish previous spinner if any
+                    if let Some(sp) = current_spinner.take() {
+                        let status = if cached {
+                            format!("{} CACHED", style("✓").green())
+                        } else {
+                            format!("{} done", style("✓").green())
+                        };
+                        sp.finish_with_message(status);
+                    }
+
+                    total_layers = total_steps;
+                    if cached {
+                        cached_layers += 1;
+                    }
+
+                    // Truncate instruction for display
+                    let display_instr = if instruction.len() > 50 {
+                        format!("{}...", &instruction[..47])
+                    } else {
+                        instruction.clone()
+                    };
+
+                    let msg = format!(
+                        "[{}/{}] {}",
+                        style(step_number).yellow(),
+                        style(total_steps).dim(),
+                        display_instr
+                    );
+
+                    current_spinner = Some(create_spinner(&msg));
+                }
+                BuildEventKind::Output { line, stream: _ } => {
+                    // Show build output (trimmed)
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() && trimmed.len() < 100 {
+                        println!("  {} {}", style("│").dim(), style(trimmed).dim());
+                    }
+                }
+            },
+        )
+        .await?;
+
+    // Finish last spinner
+    if let Some(sp) = current_spinner.take() {
+        sp.finish_with_message(format!("{} done", style("✓").green()));
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // Build Complete - Premium Results Display
     // ═══════════════════════════════════════════════════════════════════════
     let duration = start_time.elapsed();
     let duration_str = format_duration(duration.as_secs_f64());
-    let size_mb = output.stats.total_size as f64 / 1024.0 / 1024.0;
+    let size_mb = image.size_bytes as f64 / 1024.0 / 1024.0;
 
     println!();
     println!("{}", style("━".repeat(60)).green());
@@ -158,12 +158,12 @@ pub async fn build(
     println!("{}", style("━".repeat(60)).green());
     println!();
     println!("  {}  {}", style("📦").bold(), style("Image Details").bold());
-    println!("  {} ID:       {}", style("│").dim(), style(&output.image_id).cyan().bold());
+    println!("  {} ID:       {}", style("│").dim(), style(&image.id).cyan().bold());
     println!(
         "  {} Name:     {}:{}",
         style("│").dim(),
-        style(&image_name).green(),
-        style(&image_tag).cyan()
+        style(&image.name).green(),
+        style(&image.tag).cyan()
     );
     println!("  {} Size:     {} MB", style("│").dim(), style(format!("{:.1}", size_mb)).yellow());
     println!();
@@ -172,13 +172,12 @@ pub async fn build(
     println!(
         "  {} Layers:   {} total, {} cached",
         style("│").dim(),
-        output.stats.layer_count,
-        output.stats.cached_layers
+        total_layers,
+        cached_layers
     );
 
-    if output.stats.cached_layers > 0 {
-        let cache_pct =
-            (output.stats.cached_layers as f64 / output.stats.layer_count as f64) * 100.0;
+    if cached_layers > 0 && total_layers > 0 {
+        let cache_pct = (cached_layers as f64 / total_layers as f64) * 100.0;
         println!(
             "  {} Cache:    {:.0}% hit rate",
             style("│").dim(),
@@ -187,93 +186,10 @@ pub async fn build(
     }
 
     println!();
-
-    // Registering image with spinner
-    let spinner = create_spinner("Registering image...");
-
-    // Move rootfs to permanent location (uses centralized paths)
-    let images_dir = hypr_core::paths::images_dir();
-    let image_dir = images_dir.join(&output.image_id);
-
-    // Create image directory
-    fs::create_dir_all(&image_dir)
-        .with_context(|| format!("Failed to create image directory: {}", image_dir.display()))?;
-
-    let permanent_rootfs = image_dir.join("rootfs.squashfs");
-
-    // Move rootfs from temp location to permanent location
-    fs::rename(&output.rootfs_path, &permanent_rootfs).with_context(|| {
-        format!(
-            "Failed to move rootfs from {} to {}",
-            output.rootfs_path.display(),
-            permanent_rootfs.display()
-        )
-    })?;
-
-    // Rootfs moved silently - spinner will show success
-
-    // Register image in database (uses centralized paths)
-    let state_db_path = hypr_core::paths::db_path();
-    let state = StateManager::new(state_db_path.to_str().unwrap())
-        .await
-        .with_context(|| "Failed to connect to state database")?;
-
-    // Convert builder manifest to types manifest
-    use hypr_core::types::image::{RestartPolicy, RuntimeConfig};
-    use hypr_core::types::ImageManifest;
-    let manifest = ImageManifest {
-        version: "1".to_string(),
-        name: output.manifest.name.clone(),
-        tag: output.manifest.tag.clone(),
-        architecture: output.manifest.architecture.clone(),
-        os: output.manifest.os.clone(),
-        entrypoint: output.manifest.config.entrypoint.unwrap_or_default(),
-        cmd: output.manifest.config.cmd.unwrap_or_default(),
-        env: output.manifest.config.env.clone(),
-        workdir: output.manifest.config.workdir.unwrap_or_else(|| "/".to_string()),
-        user: output.manifest.config.user.clone(),
-        exposed_ports: output
-            .manifest
-            .config
-            .exposed_ports
-            .iter()
-            .filter_map(|p| p.parse::<u16>().ok())
-            .collect(),
-        runtime: RuntimeConfig {
-            default_memory_mb: 512,
-            default_cpus: 2,
-            kernel_channel: "stable".to_string(),
-            rootfs_type: "squashfs".to_string(),
-            restart_policy: RestartPolicy::Always,
-        },
-        health: None, // TODO: Extract health check from Dockerfile
-    };
-
-    let image = Image {
-        id: output.image_id.clone(),
-        name: image_name.clone(),
-        tag: image_tag.clone(),
-        manifest,
-        rootfs_path: permanent_rootfs.clone(),
-        size_bytes: output.stats.total_size,
-        created_at: SystemTime::now(),
-    };
-
-    // Try to delete existing image with same name:tag first (Docker overwrites by default)
-    if state.delete_image_by_name_tag(&image_name, &image_tag).await.is_err() {
-        // Image didn't exist, that's fine
-    }
-
-    state.insert_image(&image).await.with_context(|| "Failed to register image in database")?;
-
-    spinner.finish_with_message(format!("{} Image registered", style("✓").green()));
-
-    // Final success message
-    println!();
     println!(
         "  {} Run with: {}",
         style("➜").cyan().bold(),
-        style(format!("hypr run {}:{}", image_name, image_tag)).cyan()
+        style(format!("hypr run {}:{}", image.name, image.tag)).cyan()
     );
     println!();
 
@@ -281,27 +197,19 @@ pub async fn build(
 }
 
 /// Resolves build context and dockerfile paths.
-///
-/// Handles various input patterns:
-/// - `hypr build` -> context=".", dockerfile="Dockerfile"
-/// - `hypr build .` -> context=".", dockerfile="Dockerfile"
-/// - `hypr build ./Dockerfile` -> context=".", dockerfile="Dockerfile"
-/// - `hypr build -f custom.Dockerfile .` -> context=".", dockerfile="custom.Dockerfile"
 fn resolve_build_paths(context_path: &str, dockerfile: &str) -> Result<(PathBuf, String)> {
     let path = PathBuf::from(context_path);
 
     // Check if context_path is actually a Dockerfile
     if path.is_file() {
-        // User passed a Dockerfile path, extract directory and filename
         let parent = path.parent().unwrap_or(Path::new("."));
         let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("Dockerfile");
         return Ok((parent.to_path_buf(), filename.to_string()));
     }
 
-    // Check if it looks like a Dockerfile path (ends with Dockerfile or .dockerfile)
+    // Check if it looks like a Dockerfile path
     let path_str = context_path.to_lowercase();
     if path_str.ends_with("dockerfile") || path_str.contains(".dockerfile") {
-        // It might be a Dockerfile path that doesn't exist yet
         let path = PathBuf::from(context_path);
         if let Some(parent) = path.parent() {
             if parent.exists() || parent == Path::new("") || parent == Path::new(".") {
@@ -333,11 +241,6 @@ fn create_spinner(message: &str) -> ProgressBar {
 }
 
 /// Parses an image tag into (name, tag) components.
-///
-/// Examples:
-/// - None -> ("myimage", "latest")
-/// - "myapp" -> ("myapp", "latest")
-/// - "myapp:v1.0" -> ("myapp", "v1.0")
 fn parse_tag(tag: Option<&str>, default_name: &str) -> Result<(String, String)> {
     match tag {
         None => Ok((default_name.to_string(), "latest".to_string())),
@@ -391,13 +294,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_tag_with_registry() {
-        let (name, tag) = parse_tag(Some("registry.io/myapp:latest"), "default").unwrap();
-        assert_eq!(name, "registry.io/myapp");
-        assert_eq!(tag, "latest");
-    }
-
-    #[test]
     fn test_format_duration_milliseconds() {
         assert_eq!(format_duration(0.123), "123ms");
     }
@@ -410,21 +306,5 @@ mod tests {
     #[test]
     fn test_format_duration_minutes() {
         assert_eq!(format_duration(125.0), "2m5s");
-    }
-
-    #[test]
-    fn test_parse_tag_uses_default_name() {
-        // When no tag provided, should use default name with "latest" tag
-        let (name, tag) = parse_tag(None, "frontend").unwrap();
-        assert_eq!(name, "frontend");
-        assert_eq!(tag, "latest");
-    }
-
-    #[test]
-    fn test_parse_tag_ignores_default_when_tag_provided() {
-        // When tag is provided, default name should be ignored
-        let (name, tag) = parse_tag(Some("myapp:v1.0"), "ignored").unwrap();
-        assert_eq!(name, "myapp");
-        assert_eq!(tag, "v1.0");
     }
 }

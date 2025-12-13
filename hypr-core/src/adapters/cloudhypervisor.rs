@@ -913,6 +913,14 @@ impl VmmAdapter for CloudHypervisorAdapter {
         self.runtime_dir.join(format!("ch/{}.vsock", handle.id))
     }
 
+    fn metrics_vsock_path(&self, handle: &VmHandle) -> PathBuf {
+        // Cloud-hypervisor multiplexes all vsock ports through a single socket.
+        // The vsock protocol handles port differentiation internally.
+        // For metrics (guest pushes to host port 1025), we use the same socket
+        // as exec (host connects to guest port 1024).
+        self.vsock_path(handle)
+    }
+
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterCapabilities {
             gpu_passthrough: true, // VFIO passthrough supported

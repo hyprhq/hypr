@@ -542,6 +542,7 @@ message BuildImageRequest {
   optional string target = 5;   // Target build stage for multi-stage builds
   bool no_cache = 6;            // Disable build cache
   bool pull = 7;                // Always pull base images
+  repeated string cache_from = 8; // Images to use as cache sources
 }
 
 message BuildEvent {
