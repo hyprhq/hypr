@@ -291,11 +291,7 @@ pub struct ScanProgress {
 impl ScanProgress {
     /// Create a new progress update.
     pub fn new(stage: ScanStage, message: impl Into<String>, percent: u32) -> Self {
-        Self {
-            stage,
-            message: message.into(),
-            percent: percent.min(100),
-        }
+        Self { stage, message: message.into(), percent: percent.min(100) }
     }
 }
 
@@ -353,10 +349,7 @@ impl SecurityScanner {
     /// Create a new security scanner with state persistence.
     pub fn with_state(state: Arc<StateManager>) -> Result<Self> {
         let trivy = TrivyScanner::new()?;
-        Ok(Self {
-            trivy,
-            state: Some(state),
-        })
+        Ok(Self { trivy, state: Some(state) })
     }
 
     /// Create a new security scanner with custom Trivy binary path.
@@ -378,11 +371,7 @@ impl SecurityScanner {
     /// Scan an image for vulnerabilities.
     ///
     /// Returns a channel that receives progress updates and eventually the final report.
-    pub async fn scan_image(
-        &self,
-        image: &str,
-        options: &ScanOptions,
-    ) -> Result<SecurityReport> {
+    pub async fn scan_image(&self, image: &str, options: &ScanOptions) -> Result<SecurityReport> {
         self.trivy.scan_image(image, options).await
     }
 
@@ -400,9 +389,8 @@ impl SecurityScanner {
         let image = image.to_string();
         let options = options.clone();
 
-        let handle = tokio::spawn(async move {
-            trivy.scan_image_with_progress(&image, &options, tx).await
-        });
+        let handle =
+            tokio::spawn(async move { trivy.scan_image_with_progress(&image, &options, tx).await });
 
         Ok((rx, handle))
     }
@@ -429,9 +417,7 @@ impl SecurityScanner {
             .as_ref()
             .ok_or_else(|| HyprError::Internal("State manager not configured".into()))?;
 
-        state
-            .list_security_reports(image_id, image_name, limit)
-            .await
+        state.list_security_reports(image_id, image_name, limit).await
     }
 
     /// Save a security report.
@@ -470,43 +456,19 @@ mod tests {
 
     #[test]
     fn test_vulnerability_severity_parse() {
-        assert_eq!(
-            VulnerabilitySeverity::parse("CRITICAL"),
-            VulnerabilitySeverity::Critical
-        );
-        assert_eq!(
-            VulnerabilitySeverity::parse("high"),
-            VulnerabilitySeverity::High
-        );
-        assert_eq!(
-            VulnerabilitySeverity::parse("invalid"),
-            VulnerabilitySeverity::Unknown
-        );
+        assert_eq!(VulnerabilitySeverity::parse("CRITICAL"), VulnerabilitySeverity::Critical);
+        assert_eq!(VulnerabilitySeverity::parse("high"), VulnerabilitySeverity::High);
+        assert_eq!(VulnerabilitySeverity::parse("invalid"), VulnerabilitySeverity::Unknown);
     }
 
     #[test]
     fn test_vulnerability_summary() {
         let vulns = vec![
-            Vulnerability {
-                severity: VulnerabilitySeverity::Critical,
-                ..Default::default()
-            },
-            Vulnerability {
-                severity: VulnerabilitySeverity::Critical,
-                ..Default::default()
-            },
-            Vulnerability {
-                severity: VulnerabilitySeverity::High,
-                ..Default::default()
-            },
-            Vulnerability {
-                severity: VulnerabilitySeverity::Medium,
-                ..Default::default()
-            },
-            Vulnerability {
-                severity: VulnerabilitySeverity::Low,
-                ..Default::default()
-            },
+            Vulnerability { severity: VulnerabilitySeverity::Critical, ..Default::default() },
+            Vulnerability { severity: VulnerabilitySeverity::Critical, ..Default::default() },
+            Vulnerability { severity: VulnerabilitySeverity::High, ..Default::default() },
+            Vulnerability { severity: VulnerabilitySeverity::Medium, ..Default::default() },
+            Vulnerability { severity: VulnerabilitySeverity::Low, ..Default::default() },
         ];
 
         let summary = VulnerabilitySummary::from_vulnerabilities(&vulns);
@@ -522,10 +484,7 @@ mod tests {
     fn test_scan_options_builder() {
         let options = ScanOptions::new()
             .skip_db_update(true)
-            .filter_severity(vec![
-                VulnerabilitySeverity::Critical,
-                VulnerabilitySeverity::High,
-            ])
+            .filter_severity(vec![VulnerabilitySeverity::Critical, VulnerabilitySeverity::High])
             .timeout(600);
 
         assert!(options.skip_db_update);

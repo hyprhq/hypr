@@ -48,8 +48,8 @@ pub use observability::{
 pub use process::{ProcessExplorer, ProcessSortBy, VMProcess};
 pub use scheduler::{CronJob, CronJobRun, CronJobRunStatus};
 pub use security::{
-    RiskLevel, ScanOptions, ScanProgress, ScanStage, SecurityReport, SecurityScanner,
-    TrivyScanner, Vulnerability, VulnerabilitySeverity, VulnerabilitySummary,
+    RiskLevel, ScanOptions, ScanProgress, ScanStage, SecurityReport, SecurityScanner, TrivyScanner,
+    Vulnerability, VulnerabilitySeverity, VulnerabilitySummary,
 };
 pub use snapshots::{Snapshot, SnapshotManager, SnapshotState, SnapshotType};
 pub use state::{DevContainerConfig, DevEnvStatus, DevEnvironment, StateManager};

@@ -922,8 +922,9 @@ impl StateManager {
             HyprError::DatabaseError(format!("Failed to serialize vulnerabilities: {}", e))
         })?;
 
-        let metadata_json = serde_json::to_string(&report.metadata)
-            .map_err(|e| HyprError::DatabaseError(format!("Failed to serialize metadata: {}", e)))?;
+        let metadata_json = serde_json::to_string(&report.metadata).map_err(|e| {
+            HyprError::DatabaseError(format!("Failed to serialize metadata: {}", e))
+        })?;
 
         sqlx::query(
             r#"
@@ -1027,9 +1028,10 @@ impl StateManager {
         })?;
 
         let vulns_json: String = row.get("vulnerabilities");
-        let vulnerabilities: Vec<Vulnerability> = serde_json::from_str(&vulns_json).map_err(|e| {
-            HyprError::DatabaseError(format!("Failed to deserialize vulnerabilities: {}", e))
-        })?;
+        let vulnerabilities: Vec<Vulnerability> =
+            serde_json::from_str(&vulns_json).map_err(|e| {
+                HyprError::DatabaseError(format!("Failed to deserialize vulnerabilities: {}", e))
+            })?;
 
         let metadata_json: String = row.get("metadata");
         let metadata: std::collections::HashMap<String, String> =

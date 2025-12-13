@@ -128,11 +128,7 @@ pub struct ImportImageOptions {
 
 impl Default for ImportImageOptions {
     fn default() -> Self {
-        Self {
-            image: String::new(),
-            new_name: None,
-            new_tag: None,
-        }
+        Self { image: String::new(), new_name: None, new_tag: None }
     }
 }
 
@@ -301,9 +297,7 @@ pub struct DockerImporter {
 impl DockerImporter {
     /// Create a new Docker importer with the default socket.
     pub fn new() -> Self {
-        Self {
-            socket_path: std::path::PathBuf::from("/var/run/docker.sock"),
-        }
+        Self { socket_path: std::path::PathBuf::from("/var/run/docker.sock") }
     }
 
     /// Create a new Docker importer with a custom socket path.
@@ -338,10 +332,7 @@ mod tests {
         assert_eq!(ImportStage::parse("EXPORTING"), ImportStage::Exporting);
         assert_eq!(ImportStage::parse("converting"), ImportStage::Converting);
         assert_eq!(ImportStage::parse("importing"), ImportStage::Importing);
-        assert_eq!(
-            ImportStage::parse("copying_volumes"),
-            ImportStage::CopyingVolumes
-        );
+        assert_eq!(ImportStage::parse("copying_volumes"), ImportStage::CopyingVolumes);
         assert_eq!(ImportStage::parse("unknown"), ImportStage::Discovering);
     }
 
@@ -366,9 +357,6 @@ mod tests {
     #[test]
     fn test_docker_importer() {
         let importer = DockerImporter::new();
-        assert_eq!(
-            importer.socket_path(),
-            std::path::Path::new("/var/run/docker.sock")
-        );
+        assert_eq!(importer.socket_path(), std::path::Path::new("/var/run/docker.sock"));
     }
 }
