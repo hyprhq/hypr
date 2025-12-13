@@ -4,7 +4,6 @@
 set -e
 
 # --- Styles & Helpers ---
-# We use tput if available for safer color handling, falling back to raw codes
 BOLD="$(tput bold 2>/dev/null || printf '\033[1m')"
 DIM="$(tput dim 2>/dev/null || printf '\033[2m')"
 RED="$(tput setaf 1 2>/dev/null || printf '\033[0;31m')"
@@ -68,7 +67,7 @@ get_download_url() {
 
 install_binaries() {
     fmt_header "Installing Core Binaries"
-    
+
     HYPR_URL=$(get_download_url "hypr")
     HYPRD_URL=$(get_download_url "hyprd")
 
@@ -84,7 +83,7 @@ install_binaries() {
     chmod +x "$TMP_DIR/hypr" "$TMP_DIR/hyprd"
 
     fmt_info "Moving to $INSTALL_DIR (may require password)"
-    
+
     # Check write access
     if [ -w "$INSTALL_DIR" ]; then
         mv "$TMP_DIR/hypr" "$INSTALL_DIR/"
@@ -101,18 +100,138 @@ install_binaries() {
 install_linux_deps() {
     fmt_header "Linux Dependencies"
 
-    if command -v apt-get >/dev/null 2>&1; then
-        fmt_info "Using apt-get..."
-        sudo apt-get update -qq >/dev/null
-        sudo apt-get install -y virtiofsd >/dev/null 2>&1 || fmt_warn "virtiofsd install failed, please install manually"
-    elif command -v dnf >/dev/null 2>&1; then
-        fmt_info "Using dnf..."
-        sudo dnf install -y virtiofsd >/dev/null 2>&1
-    elif command -v pacman >/dev/null 2>&1; then
-        fmt_info "Using pacman..."
-        sudo pacman -Sy --noconfirm virtiofsd >/dev/null 2>&1
-    else
-        fmt_warn "Could not detect package manager. Ensure 'virtiofsd' is installed."
+    MISSING_DEPS=""
+
+    # Check for gvproxy (comes with podman)
+    if ! command -v gvproxy >/dev/null 2>&1; then
+        if [ ! -f /usr/libexec/podman/gvproxy ]; then
+            MISSING_DEPS="$MISSING_DEPS gvproxy"
+        fi
+    fi
+
+    # Check for mksquashfs
+    if ! command -v mksquashfs >/dev/null 2>&1; then
+        MISSING_DEPS="$MISSING_DEPS squashfs-tools"
+    fi
+
+    # Check for virtiofsd
+    if ! command -v virtiofsd >/dev/null 2>&1; then
+        MISSING_DEPS="$MISSING_DEPS virtiofsd"
+    fi
+
+    if [ -n "$MISSING_DEPS" ]; then
+        fmt_info "Installing dependencies:$MISSING_DEPS"
+
+        if command -v apt-get >/dev/null 2>&1; then
+            fmt_info "Using apt-get..."
+            sudo apt-get update -qq >/dev/null
+
+            # gvproxy comes with podman
+            if echo "$MISSING_DEPS" | grep -q "gvproxy"; then
+                sudo apt-get install -y podman >/dev/null 2>&1 || fmt_warn "podman install failed (for gvproxy)"
+            fi
+
+            if echo "$MISSING_DEPS" | grep -q "squashfs-tools"; then
+                sudo apt-get install -y squashfs-tools >/dev/null 2>&1 || fmt_warn "squashfs-tools install failed"
+            fi
+
+            if echo "$MISSING_DEPS" | grep -q "virtiofsd"; then
+                sudo apt-get install -y virtiofsd >/dev/null 2>&1 || fmt_warn "virtiofsd install failed"
+            fi
+
+        elif command -v dnf >/dev/null 2>&1; then
+            fmt_info "Using dnf..."
+
+            if echo "$MISSING_DEPS" | grep -q "gvproxy"; then
+                sudo dnf install -y podman >/dev/null 2>&1 || fmt_warn "podman install failed (for gvproxy)"
+            fi
+
+            if echo "$MISSING_DEPS" | grep -q "squashfs-tools"; then
+                sudo dnf install -y squashfs-tools >/dev/null 2>&1 || fmt_warn "squashfs-tools install failed"
+            fi
+
+            if echo "$MISSING_DEPS" | grep -q "virtiofsd"; then
+                sudo dnf install -y virtiofsd >/dev/null 2>&1 || fmt_warn "virtiofsd install failed"
+            fi
+
+        elif command -v pacman >/dev/null 2>&1; then
+            fmt_info "Using pacman..."
+
+            if echo "$MISSING_DEPS" | grep -q "gvproxy"; then
+                sudo pacman -Sy --noconfirm podman >/dev/null 2>&1 || fmt_warn "podman install failed (for gvproxy)"
+            fi
+
+            if echo "$MISSING_DEPS" | grep -q "squashfs-tools"; then
+                sudo pacman -Sy --noconfirm squashfs-tools >/dev/null 2>&1 || fmt_warn "squashfs-tools install failed"
+            fi
+
+            if echo "$MISSING_DEPS" | grep -q "virtiofsd"; then
+                sudo pacman -Sy --noconfirm virtiofsd >/dev/null 2>&1 || fmt_warn "virtiofsd install failed"
+            fi
+
+        else
+            fmt_warn "Could not detect package manager."
+            fmt_warn "Please install manually: podman squashfs-tools virtiofsd"
+        fi
+    fi
+
+    # Verify KVM access
+    if [ ! -e /dev/kvm ]; then
+        fmt_warn "/dev/kvm not found. Ensure KVM is enabled in your kernel."
+    elif [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+        fmt_info "Adding user to kvm group for KVM access..."
+        sudo usermod -aG kvm "$(whoami)" 2>/dev/null || true
+        fmt_warn "You may need to log out and back in for KVM access."
+    fi
+
+    fmt_success "Dependencies checked"
+}
+
+install_macos_deps() {
+    fmt_header "macOS Dependencies"
+
+    MISSING_DEPS=""
+
+    # Check for Homebrew
+    if ! command -v brew >/dev/null 2>&1; then
+        fmt_warn "Homebrew not found. Installing dependencies requires Homebrew."
+        fmt_info "Install Homebrew: https://brew.sh"
+        return
+    fi
+
+    # Check for gvproxy (comes with podman)
+    if ! command -v gvproxy >/dev/null 2>&1; then
+        # Also check podman libexec path
+        GVPROXY_FOUND=""
+        for path in /opt/homebrew/Cellar/podman/*/libexec/podman/gvproxy /usr/local/Cellar/podman/*/libexec/podman/gvproxy; do
+            if ls $path 2>/dev/null | head -1 >/dev/null 2>&1; then
+                GVPROXY_FOUND="yes"
+                break
+            fi
+        done
+        if [ -z "$GVPROXY_FOUND" ]; then
+            MISSING_DEPS="$MISSING_DEPS podman"
+        fi
+    fi
+
+    # Check for mksquashfs
+    if ! command -v mksquashfs >/dev/null 2>&1; then
+        MISSING_DEPS="$MISSING_DEPS squashfs"
+    fi
+
+    if [ -n "$MISSING_DEPS" ]; then
+        fmt_info "Installing dependencies via Homebrew:$MISSING_DEPS"
+
+        for dep in $MISSING_DEPS; do
+            fmt_info "Installing $dep..."
+            brew install "$dep" >/dev/null 2>&1 || fmt_warn "$dep install failed"
+        done
+    fi
+
+    # Check macOS version for Virtualization framework support
+    MACOS_VERSION=$(sw_vers -productVersion 2>/dev/null | cut -d. -f1)
+    if [ -n "$MACOS_VERSION" ] && [ "$MACOS_VERSION" -lt 13 ]; then
+        fmt_warn "macOS 13+ recommended for best VM support."
     fi
 
     fmt_success "Dependencies checked"
@@ -120,15 +239,11 @@ install_linux_deps() {
 
 setup_systemd() {
     fmt_header "System Integration (systemd)"
-    
+
     # Create dirs
-    sudo mkdir -p /var/lib/hypr/{logs,images,cache} /var/log/hypr /run/hypr
+    sudo mkdir -p /var/lib/hypr/{logs,images,cache,volumes} /var/log/hypr /run/hypr
 
     # Service file
-    # Note: hyprd needs broad system access for:
-    # - /dev/kvm, /dev/vhost-*, /dev/net/tun (virtualization)
-    # - /sys (network config, VFIO)
-    # - Network namespace and bridge management
     sudo tee /etc/systemd/system/hyprd.service >/dev/null << 'EOF'
 [Unit]
 Description=HYPR Daemon
@@ -162,7 +277,7 @@ setup_launchdaemon() {
     HYPR_DATA_DIR="/var/lib/hypr"
 
     # Dirs
-    sudo mkdir -p "$HYPR_DATA_DIR"/{logs,images,cache} /var/log/hypr
+    sudo mkdir -p "$HYPR_DATA_DIR"/{logs,images,cache,volumes} /var/log/hypr
 
     # Group creation logic
     if ! dscl . -read /Groups/hypr >/dev/null 2>&1; then
@@ -187,7 +302,7 @@ setup_launchdaemon() {
 
     # Permissions
     sudo chown -R root:hypr "$HYPR_DATA_DIR" /var/log/hypr
-    sudo chmod 770 "$HYPR_DATA_DIR" "$HYPR_DATA_DIR"/{logs,images,cache} /var/log/hypr
+    sudo chmod 770 "$HYPR_DATA_DIR" "$HYPR_DATA_DIR"/{logs,images,cache,volumes} /var/log/hypr
 
     # Plist content
     sudo tee "$PLIST_PATH" >/dev/null << 'EOF'
@@ -214,7 +329,7 @@ setup_launchdaemon() {
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>/opt/homebrew/bin:/opt/homebrew/Cellar/podman/5.4.2/libexec/podman:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>RUST_LOG</key>
         <string>info</string>
         <key>HOME</key>
@@ -241,7 +356,8 @@ print_success() {
     printf "  ${BOLD}Commands:${RESET}\n"
     printf "    ${CYAN}hypr ps${RESET}           List VMs\n"
     printf "    ${CYAN}hypr logs <vm>${RESET}    Stream logs\n"
-    printf "    ${CYAN}hypr exec <vm>${RESET}    Shell access\n\n"
+    printf "    ${CYAN}hypr exec <vm>${RESET}    Shell access\n"
+    printf "    ${CYAN}hypr build .${RESET}      Build from Dockerfile\n\n"
 
     printf "  ${BOLD}Service Status:${RESET}\n"
     if [ "$OS" = "darwin" ]; then
@@ -251,18 +367,19 @@ print_success() {
         printf "    Logs:   ${DIM}journalctl -u hyprd -f${RESET}\n"
         printf "    Restart:${DIM}sudo systemctl restart hyprd${RESET}\n"
     fi
-    
-    printf "\n  ${DIM}✨ containers are cute. hypr is inevitable.${RESET}\n"
+
+    printf "\n  ${DIM}Embedded: libkrun (macOS), cloud-hypervisor (Linux), initramfs${RESET}\n"
+    printf "  ${DIM}External: gvproxy (networking), mksquashfs (image building)${RESET}\n"
+    printf "\n"
 }
 
-# --- Intro Joke ---
+# --- Intro ---
 run_intro() {
     clear
     printf "${BLUE}"
-    # Slightly tighter ASCII art
     cat << "EOF"
 
- ██╗  ██╗██╗   ██╗██████╗ ██████╗ 
+ ██╗  ██╗██╗   ██╗██████╗ ██████╗
  ██║  ██║╚██╗ ██╔╝██╔══██╗██╔══██╗
  ███████║ ╚████╔╝ ██████╔╝██████╔╝
  ██╔══██║  ╚██╔╝  ██╔═══╝ ██╔══██╗
@@ -270,27 +387,10 @@ run_intro() {
  ╚═╝  ╚═╝   ╚═╝   ╚═╝     ╚═╝  ╚═╝
 EOF
     printf "${RESET}"
-    
-    # The Joke: Use DIM color to make it look like a background process
-    printf "\n${DIM}🐳 docker pull hypr/runtime:latest${RESET}"
-    sleep 0.4
-    printf "\n${DIM}latest: Pulling from hypr/runtime${RESET}"
-    sleep 0.2
-    printf "\n${DIM}Digest: sha256:9a2156bf77bcd236800f4ddb${RESET}"
-    sleep 0.1
-    printf "\n${DIM}Status: Downloaded newer hypervisor in 0.14s${RESET}"
-    sleep 0.4
-    printf "\n\n${DIM}🐳 docker run hypr/runtime${RESET}"
-    sleep 0.6
-    printf "\n${DIM}Error: Unable to find image 'hypr/runtime:latest' locally${RESET}"
-    sleep 0.8
-    printf "\n${DIM}Status: Booting nested VM to run container to run hypr...${RESET}"
-    sleep 1.2
-    
-    # The Punchline: Clear the line and print neatly
-    printf "\n\n${BOLD}${RED}Wait, no.${RESET} ${BOLD}HYPR boots faster than Docker prints that line.${RESET}\n"
+
+    printf "\n${DIM}Booting in 3... 2... 1...${RESET}"
     sleep 0.5
-    printf "Let's do this the real way.\n"
+    printf "\n${BOLD}Done.${RESET} (That's faster than Docker prints its welcome message.)\n"
     sleep 0.5
 }
 
@@ -307,6 +407,7 @@ main() {
             setup_systemd
             ;;
         darwin)
+            install_macos_deps
             setup_launchdaemon
             ;;
     esac
