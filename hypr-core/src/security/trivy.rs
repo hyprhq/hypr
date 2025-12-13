@@ -41,10 +41,7 @@ impl TrivyScanner {
         let binary_path = Self::find_trivy_binary()?;
         let cache_dir = Self::default_cache_dir()?;
 
-        Ok(Self {
-            binary_path,
-            cache_dir,
-        })
+        Ok(Self { binary_path, cache_dir })
     }
 
     /// Create a scanner with a specific Trivy binary path.
@@ -58,23 +55,15 @@ impl TrivyScanner {
 
         let cache_dir = Self::default_cache_dir()?;
 
-        Ok(Self {
-            binary_path,
-            cache_dir,
-        })
+        Ok(Self { binary_path, cache_dir })
     }
 
     /// Find the Trivy binary in common locations.
     fn find_trivy_binary() -> Result<PathBuf> {
         // Check PATH first using `which`
-        if let Ok(output) = std::process::Command::new("which")
-            .arg("trivy")
-            .output()
-        {
+        if let Ok(output) = std::process::Command::new("which").arg("trivy").output() {
             if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout)
-                    .trim()
-                    .to_string();
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !path.is_empty() {
                     return Ok(PathBuf::from(path));
                 }
@@ -134,31 +123,20 @@ impl TrivyScanner {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(HyprError::Internal(format!(
-                "Trivy version check failed: {}",
-                stderr
-            )));
+            return Err(HyprError::Internal(format!("Trivy version check failed: {}", stderr)));
         }
 
         // Parse JSON output to get version
         let json: serde_json::Value = serde_json::from_slice(&output.stdout)
             .map_err(|e| HyprError::Internal(format!("Failed to parse Trivy version: {}", e)))?;
 
-        let version = json
-            .get("Version")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
+        let version = json.get("Version").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
 
         Ok(version)
     }
 
     /// Scan an image for vulnerabilities.
-    pub async fn scan_image(
-        &self,
-        image: &str,
-        options: &ScanOptions,
-    ) -> Result<SecurityReport> {
+    pub async fn scan_image(&self, image: &str, options: &ScanOptions) -> Result<SecurityReport> {
         let timeout_secs = options.timeout_secs.unwrap_or(DEFAULT_SCAN_TIMEOUT_SECS);
 
         let scan_future = self.run_scan(image, options);
@@ -200,11 +178,7 @@ impl TrivyScanner {
 
         // Send scanning progress
         let _ = progress_tx
-            .send(ScanProgress::new(
-                ScanStage::Scanning,
-                format!("Scanning image: {}", image),
-                30,
-            ))
+            .send(ScanProgress::new(ScanStage::Scanning, format!("Scanning image: {}", image), 30))
             .await;
 
         // Run the actual scan
@@ -214,10 +188,7 @@ impl TrivyScanner {
         let _ = progress_tx
             .send(ScanProgress::new(
                 ScanStage::Complete,
-                format!(
-                    "Scan complete: found {} vulnerabilities",
-                    report.summary.total
-                ),
+                format!("Scan complete: found {} vulnerabilities", report.summary.total),
                 100,
             ))
             .await;
@@ -238,11 +209,8 @@ impl TrivyScanner {
 
         // Add severity filter if specified
         if !options.severity_filter.is_empty() {
-            let severities: Vec<&str> = options
-                .severity_filter
-                .iter()
-                .map(|s| s.as_str())
-                .collect();
+            let severities: Vec<&str> =
+                options.severity_filter.iter().map(|s| s.as_str()).collect();
             cmd.arg("--severity").arg(severities.join(","));
         }
 
@@ -271,19 +239,12 @@ impl TrivyScanner {
     ) -> Result<SecurityReport> {
         let mut cmd = Command::new(&self.binary_path);
 
-        cmd.arg("image")
-            .arg("--format")
-            .arg("json")
-            .arg("--cache-dir")
-            .arg(&self.cache_dir);
+        cmd.arg("image").arg("--format").arg("json").arg("--cache-dir").arg(&self.cache_dir);
 
         // Add severity filter if specified
         if !options.severity_filter.is_empty() {
-            let severities: Vec<&str> = options
-                .severity_filter
-                .iter()
-                .map(|s| s.as_str())
-                .collect();
+            let severities: Vec<&str> =
+                options.severity_filter.iter().map(|s| s.as_str()).collect();
             cmd.arg("--severity").arg(severities.join(","));
         }
 
@@ -338,11 +299,7 @@ impl TrivyScanner {
 
         // Send analyzing progress
         let _ = progress_tx
-            .send(ScanProgress::new(
-                ScanStage::Analyzing,
-                "Analyzing scan results",
-                95,
-            ))
+            .send(ScanProgress::new(ScanStage::Analyzing, "Analyzing scan results", 95))
             .await;
 
         // Parse the output

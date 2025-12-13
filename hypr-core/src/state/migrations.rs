@@ -483,10 +483,12 @@ async fn migrate_to_v7(pool: &SqlitePool) -> Result<()> {
     .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
 
     // Index for image lookups
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_security_reports_image ON security_reports(image_id)")
-        .execute(pool)
-        .await
-        .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_security_reports_image ON security_reports(image_id)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| HyprError::MigrationFailed { reason: e.to_string() })?;
 
     // Index for image name lookups (prefix matching)
     sqlx::query(

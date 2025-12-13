@@ -161,16 +161,10 @@ mod tests {
     fn test_cron_job_run_status_parse() {
         assert_eq!(CronJobRunStatus::parse("pending"), CronJobRunStatus::Pending);
         assert_eq!(CronJobRunStatus::parse("RUNNING"), CronJobRunStatus::Running);
-        assert_eq!(
-            CronJobRunStatus::parse("succeeded"),
-            CronJobRunStatus::Succeeded
-        );
+        assert_eq!(CronJobRunStatus::parse("succeeded"), CronJobRunStatus::Succeeded);
         assert_eq!(CronJobRunStatus::parse("failed"), CronJobRunStatus::Failed);
         assert_eq!(CronJobRunStatus::parse("timeout"), CronJobRunStatus::Timeout);
-        assert_eq!(
-            CronJobRunStatus::parse("unknown"),
-            CronJobRunStatus::Pending
-        );
+        assert_eq!(CronJobRunStatus::parse("unknown"), CronJobRunStatus::Pending);
     }
 
     #[test]

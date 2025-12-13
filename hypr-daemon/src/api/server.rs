@@ -2374,11 +2374,7 @@ impl HyprService for HyprServiceImpl {
 
         let reports = self
             .state
-            .list_security_reports(
-                req.image_id.as_deref(),
-                req.image_name.as_deref(),
-                req.limit,
-            )
+            .list_security_reports(req.image_id.as_deref(), req.image_name.as_deref(), req.limit)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -2418,10 +2414,7 @@ impl HyprService for HyprServiceImpl {
             )));
         }
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
 
         // Calculate next run time
         let next_run = calculate_next_run(&req.schedule);
@@ -2444,10 +2437,7 @@ impl HyprService for HyprServiceImpl {
             labels: req.labels,
         };
 
-        self.state
-            .insert_cron_job(&job)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        self.state.insert_cron_job(&job).await.map_err(|e| Status::internal(e.to_string()))?;
 
         Ok(Response::new(cron_job_to_proto(&job)))
     }
@@ -2459,11 +2449,8 @@ impl HyprService for HyprServiceImpl {
         info!("gRPC: GetCronJob");
 
         let req = request.into_inner();
-        let job = self
-            .state
-            .get_cron_job(&req.id)
-            .await
-            .map_err(|e| Status::not_found(e.to_string()))?;
+        let job =
+            self.state.get_cron_job(&req.id).await.map_err(|e| Status::not_found(e.to_string()))?;
 
         Ok(Response::new(cron_job_to_proto(&job)))
     }
@@ -2495,11 +2482,8 @@ impl HyprService for HyprServiceImpl {
         let req = request.into_inner();
 
         // Get existing job
-        let mut job = self
-            .state
-            .get_cron_job(&req.id)
-            .await
-            .map_err(|e| Status::not_found(e.to_string()))?;
+        let mut job =
+            self.state.get_cron_job(&req.id).await.map_err(|e| Status::not_found(e.to_string()))?;
 
         // Update fields if provided
         if let Some(name) = req.name {
@@ -2539,10 +2523,7 @@ impl HyprService for HyprServiceImpl {
             job.max_retries = retries;
         }
 
-        self.state
-            .update_cron_job(&job)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        self.state.update_cron_job(&job).await.map_err(|e| Status::internal(e.to_string()))?;
 
         Ok(Response::new(cron_job_to_proto(&job)))
     }
@@ -2555,10 +2536,7 @@ impl HyprService for HyprServiceImpl {
 
         let req = request.into_inner();
 
-        self.state
-            .delete_cron_job(&req.id)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        self.state.delete_cron_job(&req.id).await.map_err(|e| Status::internal(e.to_string()))?;
 
         Ok(Response::new(DeleteCronJobResponse { success: true }))
     }
@@ -2571,10 +2549,7 @@ impl HyprService for HyprServiceImpl {
 
         let req = request.into_inner();
 
-        let status_filter = req
-            .status
-            .filter(|s| *s != 0)
-            .map(proto_to_cron_run_status);
+        let status_filter = req.status.filter(|s| *s != 0).map(proto_to_cron_run_status);
 
         let runs = self
             .state
@@ -2642,10 +2617,7 @@ impl HyprService for HyprServiceImpl {
 
         let req = request.into_inner();
 
-        let status_filter = req
-            .status
-            .filter(|s| *s != 0)
-            .map(proto_to_dev_env_status);
+        let status_filter = req.status.filter(|s| *s != 0).map(proto_to_dev_env_status);
 
         let envs = self
             .state
@@ -2994,25 +2966,13 @@ async fn create_dev_environment_impl(
     // Stage 1: Clone repository (simulated for now)
     send_progress("cloning", &format!("Cloning repository: {}", req.repo_url), 10).await;
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
 
     // Create dev environment record
-    let env_name = req
-        .name
-        .clone()
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| {
-            // Extract repo name from URL
-            req.repo_url
-                .rsplit('/')
-                .next()
-                .unwrap_or("dev-env")
-                .trim_end_matches(".git")
-                .to_string()
-        });
+    let env_name = req.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| {
+        // Extract repo name from URL
+        req.repo_url.rsplit('/').next().unwrap_or("dev-env").trim_end_matches(".git").to_string()
+    });
 
     let env = hypr_core::state::DevEnvironment {
         id: uuid::Uuid::new_v4().to_string(),
@@ -3123,10 +3083,8 @@ async fn update_stack_impl(
     // TODO: Implement actual rolling/recreate/blue-green update logic
 
     // For now, send a placeholder completion
-    let duration = SystemTime::now()
-        .duration_since(start_time)
-        .unwrap_or_default()
-        .as_secs() as u32;
+    let duration =
+        SystemTime::now().duration_since(start_time).unwrap_or_default().as_secs() as u32;
 
     // Send complete event
     let _ = tx
@@ -3959,10 +3917,8 @@ async fn import_docker_containers_impl(
 
         // Stop Docker container if requested
         if req.stop_containers {
-            let _ = tokio::process::Command::new("docker")
-                .args(["stop", container_id])
-                .output()
-                .await;
+            let _ =
+                tokio::process::Command::new("docker").args(["stop", container_id]).output().await;
         }
     }
 
@@ -3992,8 +3948,16 @@ async fn import_docker_image_impl(
 ) -> Result<()> {
     let image_ref = &req.image;
 
-    send_import_progress(&tx, image_ref, ImportStage::Discovering, "Checking Docker image...", 0, 1, 1)
-        .await;
+    send_import_progress(
+        &tx,
+        image_ref,
+        ImportStage::Discovering,
+        "Checking Docker image...",
+        0,
+        1,
+        1,
+    )
+    .await;
 
     // Check if image exists in Docker
     let inspect_output = tokio::process::Command::new("docker")
@@ -4002,9 +3966,7 @@ async fn import_docker_image_impl(
         .await;
 
     let docker_image_id = match inspect_output {
-        Ok(out) if out.status.success() => {
-            String::from_utf8_lossy(&out.stdout).trim().to_string()
-        }
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
         _ => {
             send_import_error(&tx, image_ref, "Docker image not found", true).await;
             return Err(HyprError::Internal(format!("Docker image not found: {}", image_ref)));
@@ -4131,8 +4093,16 @@ async fn import_docker_image_impl(
         return Err(HyprError::Internal("Failed to create squashfs".to_string()));
     }
 
-    send_import_progress(&tx, image_ref, ImportStage::Importing, "Creating HYPR image...", 75, 1, 1)
-        .await;
+    send_import_progress(
+        &tx,
+        image_ref,
+        ImportStage::Importing,
+        "Creating HYPR image...",
+        75,
+        1,
+        1,
+    )
+    .await;
 
     // Parse image name and tag
     let (name, tag) = if let Some(pos) = image_ref.rfind(':') {

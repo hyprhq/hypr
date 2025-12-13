@@ -116,7 +116,7 @@ impl Default for ImportContainersOptions {
 }
 
 /// Options for importing a Docker image.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ImportImageOptions {
     /// Docker image name:tag or ID.
     pub image: String,
@@ -124,16 +124,6 @@ pub struct ImportImageOptions {
     pub new_name: Option<String>,
     /// Custom tag for HYPR image.
     pub new_tag: Option<String>,
-}
-
-impl Default for ImportImageOptions {
-    fn default() -> Self {
-        Self {
-            image: String::new(),
-            new_name: None,
-            new_tag: None,
-        }
-    }
 }
 
 /// Information about a Docker container discovered for import.
@@ -260,7 +250,7 @@ pub struct ImportedImage {
 }
 
 /// Summary of import operation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ImportSummary {
     /// Number of containers imported.
     pub containers_imported: u32,
@@ -278,20 +268,6 @@ pub struct ImportSummary {
     pub images: Vec<ImportedImage>,
 }
 
-impl Default for ImportSummary {
-    fn default() -> Self {
-        Self {
-            containers_imported: 0,
-            images_imported: 0,
-            volumes_created: 0,
-            networks_created: 0,
-            duration_sec: 0,
-            containers: Vec::new(),
-            images: Vec::new(),
-        }
-    }
-}
-
 /// Docker importer for discovering and importing Docker resources.
 pub struct DockerImporter {
     /// Docker socket path.
@@ -301,9 +277,7 @@ pub struct DockerImporter {
 impl DockerImporter {
     /// Create a new Docker importer with the default socket.
     pub fn new() -> Self {
-        Self {
-            socket_path: std::path::PathBuf::from("/var/run/docker.sock"),
-        }
+        Self { socket_path: std::path::PathBuf::from("/var/run/docker.sock") }
     }
 
     /// Create a new Docker importer with a custom socket path.
@@ -338,10 +312,7 @@ mod tests {
         assert_eq!(ImportStage::parse("EXPORTING"), ImportStage::Exporting);
         assert_eq!(ImportStage::parse("converting"), ImportStage::Converting);
         assert_eq!(ImportStage::parse("importing"), ImportStage::Importing);
-        assert_eq!(
-            ImportStage::parse("copying_volumes"),
-            ImportStage::CopyingVolumes
-        );
+        assert_eq!(ImportStage::parse("copying_volumes"), ImportStage::CopyingVolumes);
         assert_eq!(ImportStage::parse("unknown"), ImportStage::Discovering);
     }
 
@@ -366,9 +337,6 @@ mod tests {
     #[test]
     fn test_docker_importer() {
         let importer = DockerImporter::new();
-        assert_eq!(
-            importer.socket_path(),
-            std::path::Path::new("/var/run/docker.sock")
-        );
+        assert_eq!(importer.socket_path(), std::path::Path::new("/var/run/docker.sock"));
     }
 }
