@@ -2605,6 +2605,8 @@ static void run_runtime_mode(void) {
     char *ip_str = NULL;
     char *netmask_str = NULL;
     char *gateway_str = NULL;
+    char **dns_servers = NULL;
+    int dns_count = 0;
 
     if (manifest_b64) {
         // Decode base64 manifest
@@ -2635,11 +2637,13 @@ static void run_runtime_mode(void) {
                 ip_str = json_get_string(network_obj, "ip");
                 netmask_str = json_get_string(network_obj, "netmask");
                 gateway_str = json_get_string(network_obj, "gateway");
+                dns_servers = json_get_string_array(network_obj, "dns", &dns_count);
 
-                LOG("Network: ip=%s netmask=%s gateway=%s",
+                LOG("Network: ip=%s netmask=%s gateway=%s dns=%d servers",
                     ip_str ? ip_str : "(none)",
                     netmask_str ? netmask_str : "(none)",
-                    gateway_str ? gateway_str : "(none)");
+                    gateway_str ? gateway_str : "(none)",
+                    dns_count);
             }
         }
     } else {
@@ -2692,6 +2696,44 @@ static void run_runtime_mode(void) {
                 } else {
                     LOG("Default route added via %s", gateway_str);
                 }
+            }
+
+            // Configure DNS
+            // Note: /etc might not exist if rootfs is minimal, assume mount_runtime_rootfs created it
+            // or the rootfs has it. mount_runtime_rootfs() bind mounts host /tmp to /newroot/tmp etc.
+            // but /etc is from the rootfs.
+            
+            // Prioritize DNS from manifest, fallback to gvproxy gateway (192.168.127.1)
+            // if we are using the default HYPR subnet.
+
+            FILE *resolv = fopen("/etc/resolv.conf", "w");
+            if (resolv) {
+                int written = 0;
+                if (dns_servers && dns_count > 0) {
+                    for (int i = 0; i < dns_count; i++) {
+                        if (dns_servers[i]) {
+                            fprintf(resolv, "nameserver %s\n", dns_servers[i]);
+                            written++;
+                        }
+                    }
+                }
+                
+                // If no DNS provided or empty, and we have a gateway, use the gateway
+                // This assumes the gateway runs a DNS server (gvproxy does)
+                if (written == 0 && gateway_str) {
+                    fprintf(resolv, "nameserver %s\n", gateway_str);
+                    written++;
+                }
+                
+                // Fallback to Google DNS if absolutely nothing else
+                if (written == 0) {
+                    fprintf(resolv, "nameserver 8.8.8.8\n");
+                }
+
+                fclose(resolv);
+                LOG("DNS configured in /etc/resolv.conf");
+            } else {
+                LOG("Warning: Failed to open /etc/resolv.conf: %s", strerror(errno));
             }
         }
     } else {
@@ -2831,6 +2873,7 @@ static void run_runtime_mode(void) {
     if (ip_str) free(ip_str);
     if (netmask_str) free(netmask_str);
     if (gateway_str) free(gateway_str);
+    free_string_array(dns_servers, dns_count);
     if (workload_obj) free(workload_obj);
     if (network_obj) free(network_obj);
     if (manifest_json) free(manifest_json);

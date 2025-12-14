@@ -716,54 +716,7 @@ impl StateManager {
         }))
     }
 
-    // ========================
-    // Port Mapping Operations (Stubs - Not Yet Implemented)
-    // ========================
 
-    /// Insert a port mapping (STUB - Phase 2).
-    /// Returns NotImplemented error until port mapping persistence is added in Phase 2.
-    #[allow(dead_code)]
-    pub async fn insert_port_mapping(
-        &self,
-        _mapping: &crate::network::port::PortMapping,
-    ) -> Result<()> {
-        Err(HyprError::NotImplemented { feature: "Port mapping persistence (Phase 2)".into() })
-    }
-
-    /// List all port mappings (STUB - Phase 2).
-    /// Returns NotImplemented error until port mapping persistence is added in Phase 2.
-    #[allow(dead_code)]
-    pub async fn list_port_mappings(&self) -> Result<Vec<crate::network::port::PortMapping>> {
-        Err(HyprError::NotImplemented { feature: "Port mapping persistence (Phase 2)".into() })
-    }
-
-    /// Get port mappings for a specific VM (STUB - Phase 2).
-    /// Returns NotImplemented error until port mapping persistence is added in Phase 2.
-    #[allow(dead_code)]
-    pub async fn get_vm_port_mappings(
-        &self,
-        _vm_id: &str,
-    ) -> Result<Vec<crate::network::port::PortMapping>> {
-        Err(HyprError::NotImplemented { feature: "Port mapping persistence (Phase 2)".into() })
-    }
-
-    /// Delete a specific port mapping (STUB - Phase 2).
-    /// Returns NotImplemented error until port mapping persistence is added in Phase 2.
-    #[allow(dead_code)]
-    pub async fn delete_port_mapping(
-        &self,
-        _host_port: u16,
-        _protocol: crate::types::network::Protocol,
-    ) -> Result<()> {
-        Err(HyprError::NotImplemented { feature: "Port mapping persistence (Phase 2)".into() })
-    }
-
-    /// Delete all port mappings for a VM (STUB - Phase 2).
-    /// Returns NotImplemented error until port mapping persistence is added in Phase 2.
-    #[allow(dead_code)]
-    pub async fn delete_vm_port_mappings(&self, _vm_id: &str) -> Result<()> {
-        Err(HyprError::NotImplemented { feature: "Port mapping persistence (Phase 2)".into() })
-    }
 
     // ========================
     // Snapshot Operations

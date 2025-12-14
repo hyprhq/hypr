@@ -100,7 +100,6 @@ impl GvproxyBackend {
         gateway: Ipv4Addr,
         subnet: &str,
         port_forwards: Vec<PortForward>,
-        dns_server: Option<Ipv4Addr>,
     ) -> Result<()> {
         self.gateway = gateway;
         self.subnet = subnet.to_string();
@@ -132,14 +131,8 @@ impl GvproxyBackend {
         // Control/API socket - allows dynamic port forwarding and stats
         cmd.arg("-listen").arg(format!("unix://{}", self.control_socket_path.display()));
 
-        // Network configuration
-        cmd.arg("--gateway").arg(gateway.to_string());
-        cmd.arg("--netmask").arg("255.255.255.0");
-
-        // DNS configuration
-        if let Some(dns) = dns_server {
-            cmd.arg("--dns").arg(dns.to_string());
-        }
+        // Note: gvproxy uses hardcoded defaults (192.168.127.1/24)
+        // We cannot configure gateway/netmask/dns via CLI flags in the current version.
 
         // Port forwards
         for pf in &self.port_forwards {

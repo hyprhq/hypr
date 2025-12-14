@@ -93,18 +93,21 @@ Persistent storage using SQLite. Stores VM state, images, stacks, networks, volu
 
 Handles all networking for VMs. See [Networking](networking.md) for user documentation.
 
-**Linux:**
-- Creates bridge device `vbr0` (default) plus custom bridges
-- Allocates TAP devices per VM
-- IP allocation via built-in IPAM (10.88.0.0/16 default)
-- Port forwarding via eBPF or userspace proxy
-- DNS server for `.hypr` domain resolution
+### Network Manager
 
-**macOS:**
-- Uses vmnet framework (via libkrun)
-- IP allocation via DHCP (192.168.64.0/24)
-- Port forwarding via userspace proxy
-- DNS server for name resolution
+Handles all networking for VMs. See [Networking](networking.md) for user documentation.
+
+**Unified Architecture (gvproxy):**
+- Uses `gvproxy` (gVisor TAP-vsock) for user-mode networking.
+- No root privileges required on host.
+- Single unified subnet: `192.168.127.0/24` across all platforms.
+- **Components:**
+    - **Host**: `gvproxy` process manages NAT, DHCP, and DNS.
+    - **Guest**: Connected via `virtio-vsock` or Unix sockets (virtio-net).
+- **Features:**
+    - Dynamic port forwarding via HTTP API (no process restarts).
+    - Built-in DNS resolution for VM names and external domains.
+    - Isolated network namespace (does not pollute host interfaces).
 
 **Key files:**
 - `hypr-core/src/network/mod.rs` - Network module
@@ -336,8 +339,8 @@ HYPR_OTLP_ENABLED=1 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 hyprd
 | Feature | Linux | macOS |
 |---------|-------|-------|
 | Hypervisor | cloud-hypervisor | libkrun |
-| Network | Bridge + TAP | vmnet |
-| Default CIDR | 10.88.0.0/16 | 192.168.64.0/24 |
-| Max VMs | ~65,000 | ~250 |
+| Network | gvproxy (user-mode) | gvproxy (user-mode) |
+| Default CIDR | 192.168.127.0/24 | 192.168.127.0/24 |
+| Max VMs | ~250 | ~250 |
 | GPU | VFIO passthrough | Metal (ARM64) |
 | Filesystem sharing | virtiofs | virtio-fs |

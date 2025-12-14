@@ -8,16 +8,16 @@ Each VM is assigned an IP address on a virtual network. VMs can communicate with
 
 ## Default Network
 
-HYPR creates a default network automatically. Platform-specific configuration:
+HYPR creates a default network automatically using `gvproxy` (gVisor TAP-vsock). This provides a unified networking experience across Linux and macOS without requiring root privileges or complex host network configuration.
 
-| Platform | Subnet | Gateway | DNS |
-|----------|--------|---------|-----|
-| Linux | `10.88.0.0/16` | `10.88.0.1` | `10.88.0.1` |
-| macOS | `192.168.64.0/24` | `192.168.64.1` | `192.168.64.1` |
+| Property | Value |
+|----------|-------|
+| Subnet | `192.168.127.0/24` |
+| Gateway | `192.168.127.1` |
+| DNS | `192.168.127.1` (gvproxy built-in) |
+| DHCP Range | `192.168.127.2` - `192.168.127.254` |
 
-Linux uses a custom subnet to avoid conflicts with Docker (`172.17.0.0/16`) and Tailscale (`100.64.0.0/10`).
-
-macOS uses the vmnet framework's default range.
+Both Linux and macOS use this identical configuration.
 
 ## Creating Networks
 
@@ -27,17 +27,7 @@ Create a custom network:
 hypr network create mynet
 ```
 
-With custom subnet:
-
-```sh
-hypr network create mynet --subnet 10.89.0.0/16
-```
-
-With custom subnet and gateway:
-
-```sh
-hypr network create mynet --subnet 10.89.0.0/16 --gateway 10.89.0.1
-```
+*Note: Currently, HYPR uses a single unified network backend. Custom subnets are supported but map to isolated gvproxy instances.*
 
 ## Listing Networks
 
@@ -45,39 +35,26 @@ hypr network create mynet --subnet 10.89.0.0/16 --gateway 10.89.0.1
 hypr network ls
 ```
 
-Output:
-```
-NETWORK ID      NAME       DRIVER     SCOPE
-abc123def456    bridge     bridge     local
-def456ghi789    mynet      bridge     local
-```
-
 ## Inspecting Networks
 
 ```sh
-hypr network inspect mynet
+hypr network inspect bridge
 ```
 
 Output:
 ```json
 [
     {
-        "Name": "mynet",
-        "Id": "def456ghi789",
-        "Created": "2024-01-15T10:30:00Z",
-        "Scope": "local",
-        "Driver": "bridge",
+        "Name": "bridge",
+        "Id": "000000000000",
+        "Driver": "gvproxy",
         "IPAM": {
-            "Driver": "default",
             "Config": [
                 {
-                    "Subnet": "10.89.0.0/16",
-                    "Gateway": "10.89.0.1"
+                    "Subnet": "192.168.127.0/24",
+                    "Gateway": "192.168.127.1"
                 }
             ]
-        },
-        "Options": {
-            "com.docker.network.bridge.name": "vbr1"
         }
     }
 ]
@@ -89,116 +66,23 @@ Output:
 hypr network rm mynet
 ```
 
-Force remove (even if VMs are attached):
-
-```sh
-hypr network rm mynet --force
-```
-
-Remove all unused networks:
-
-```sh
-hypr network prune
-```
-
-## Networks in Compose
-
-Define networks in your compose file:
-
-```yaml
-version: "3.8"
-
-services:
-  web:
-    image: nginx:latest
-    ports:
-      - "8080:80"
-    networks:
-      - frontend
-
-  api:
-    image: myapi:latest
-    networks:
-      - frontend
-      - backend
-
-  db:
-    image: postgres:16
-    networks:
-      - backend
-
-networks:
-  frontend:
-  backend:
-```
-
-Services on the same network can communicate by service name:
-
-```sh
-# From the api service:
-curl http://db:5432  # Connects to postgres
-curl http://web:80   # Connects to nginx
-```
-
-### Custom Subnets in Compose
-
-```yaml
-networks:
-  internal:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 10.90.0.0/16
-          gateway: 10.90.0.1
-```
-
 ## DNS Resolution
 
-HYPR runs a DNS server for `.hypr` domain resolution on port 41003.
+HYPR VMs automatically use the host's DNS configuration via the `gvproxy` gateway.
 
 ### VM Name Resolution
 
-VMs are accessible by name with the `.hypr` suffix:
+VMs are accessible by their assigned IP addresses. Internal name resolution (e.g., `ping myvm`) is handled by the `gvproxy` DNS server.
 
-```sh
-# If you have a VM named "myvm"
-ping myvm.hypr
-curl http://myvm.hypr:8080
+### DNS Setup
+
+Each VM is configured with `/etc/resolv.conf` pointing to the gateway:
+
+```
+nameserver 192.168.127.1
 ```
 
-### Service Name Resolution
-
-Within compose stacks, services resolve by name:
-
-```sh
-# From within a VM in the stack
-ping db        # Resolves to the db service IP
-curl api:3000  # Connects to the api service
-```
-
-### Linux DNS Setup
-
-On Linux with systemd-resolved, HYPR configures DNS automatically:
-
-```sh
-# Verify configuration
-resolvectl status vbr0
-```
-
-Manual configuration:
-```sh
-resolvectl domain vbr0 ~hypr
-resolvectl dns vbr0 10.88.0.1
-```
-
-### macOS DNS Setup
-
-On macOS, HYPR creates a resolver file:
-
-```sh
-cat /etc/resolver/hypr
-# nameserver 192.168.64.1
-```
+If the gateway cannot resolve a query, it falls back to the host's system resolvers or `8.8.8.8`.
 
 ## Port Forwarding
 
@@ -208,144 +92,82 @@ Expose VM ports to the host:
 hypr run nginx -p 8080:80
 ```
 
-Multiple ports:
-
-```sh
-hypr run nginx -p 8080:80 -p 8443:443
-```
-
-In compose:
-
-```yaml
-services:
-  web:
-    image: nginx:latest
-    ports:
-      - "8080:80"    # HOST:CONTAINER
-      - "443:443"
-```
+This binds port 8080 on `localhost` (127.0.0.1) and forwards traffic to port 80 inside the VM.
 
 ## Network Architecture
 
-### Linux
+HYPR uses a **User-Mode Networking** architecture powered by `gvproxy`.
 
 ```
-Host Network
-    |
-    +-- vbr0 (bridge, 10.88.0.1/16)
-        |
-        +-- tap0 (VM 1: 10.88.0.2)
-        |
-        +-- tap1 (VM 2: 10.88.0.3)
-        |
-        +-- tap2 (VM 3: 10.88.0.4)
+Host (localhost) <---> gvproxy (192.168.127.1) <---> VM (192.168.127.2+)
 ```
 
-Components:
-- **vbr0**: Linux bridge device
-- **tapN**: TAP device per VM
-- **IPAM**: IP address allocation (SQLite-backed)
-- **DNS**: Built-in DNS server on the bridge IP
+### Components
 
-### macOS
+1.  **gvproxy**: A Go binary (based on gVisor) that acts as the network gateway, DHCP server, and DNS forwarder. It runs as a user process on the host.
+2.  **Virtio-vsock / Unix Sockets**: Communication channel between the host `gvproxy` process and the Guest VM.
+3.  **Kestrel Agent**: Runs inside the VM to configure the network interface with the IP assigned by `gvproxy`.
 
-```
-Host Network
-    |
-    +-- vmnet (192.168.64.1/24)
-        |
-        +-- VM 1 (192.168.64.2)
-        |
-        +-- VM 2 (192.168.64.3)
-```
+### Advantages
 
-Components:
-- **vmnet**: Apple's Virtualization framework network
-- **DHCP**: IP allocation via vmnet
-- **DNS**: Built-in DNS server
+*   **No Root Required**: Unlike TAP/Bridge networking, this doesn't require `sudo` to set up host interfaces.
+*   **Isolation**: Network traffic is isolated from the host's real network stack.
+*   **Consistency**: Identical behavior on macOS and Linux.
+*   **VPN Compatibility**: Works well with corporate VPNs (Tailscale, Cisco AnyConnect) because it doesn't conflict with host routing tables.
 
 ## Troubleshooting
-
+ 
 ### VM Cannot Reach Internet
-
-**Linux:**
-
-1. Check IP forwarding:
+ 
+**All Platforms:**
+ 
+1. Check if `gvproxy` is running:
    ```sh
-   cat /proc/sys/net/ipv4/ip_forward
-   # Should be 1
+   ps aux | grep gvproxy
    ```
-
-   Enable:
+ 
+2. Check `hypr` daemon logs for network errors:
    ```sh
-   sudo sysctl -w net.ipv4.ip_forward=1
+   tail -f ~/.hypr/logs/hyprd.log
    ```
-
-2. Check NAT:
+ 
+3. Verify VM is connected to gateway:
    ```sh
-   sudo iptables -t nat -L POSTROUTING -n
+   hypr exec myvm -- ping -c 1 192.168.127.1
    ```
-
-3. Check bridge exists:
+ 
+4. Check VM DNS resolution:
    ```sh
-   ip link show vbr0
+   hypr exec myvm -- nslookup google.com
    ```
-
-**macOS:**
-
-1. Check vmnet service is running
-2. Verify libkrun permissions in Security & Privacy
-
-### DNS Not Resolving
-
-1. Check DNS server is running:
-   ```sh
-   nc -vz 10.88.0.1 41003  # Linux
-   nc -vz 192.168.64.1 41003  # macOS
-   ```
-
-2. Check /etc/resolv.conf in VM:
-   ```sh
-   hypr exec myvm -- cat /etc/resolv.conf
-   ```
-
-3. Test with explicit nameserver:
-   ```sh
-   hypr exec myvm -- nslookup google.com 8.8.8.8
-   ```
-
-### VMs Cannot Communicate
-
-1. Verify both VMs are on the same network
-2. Check IP addresses:
-   ```sh
-   hypr ps  # Shows IP column
-   ```
-
-3. Test connectivity:
-   ```sh
-   hypr exec vm1 -- ping <vm2-ip>
-   ```
-
+ 
 ### Port Forwarding Not Working
-
+ 
 1. Verify port mapping:
    ```sh
    hypr ps | grep <vm-name>
    ```
-
+ 
 2. Check service is listening in VM:
    ```sh
    hypr exec myvm -- ss -tlnp
    ```
-
-3. Check host firewall:
+ 
+3. Check `gvproxy` port bindings on host:
    ```sh
-   # Linux
-   sudo iptables -L INPUT -n | grep <port>
-
-   # macOS
-   sudo pfctl -sr | grep <port>
+   netstat -an | grep <host-port>
+   ```
+ 
+### VMs Cannot Communicate
+ 
+1. Verify both VMs are running.
+2. Check IP addresses:
+   ```sh
+   hypr ps
+   ```
+3. Test connectivity:
+   ```sh
+   hypr exec vm1 -- ping <vm2-ip>
    ```
 
 ## Advanced Configuration

@@ -380,7 +380,6 @@ impl VmmAdapter for LibkrunAdapter {
                 gvproxy::defaults::GATEWAY,
                 gvproxy::defaults::CIDR,
                 port_forwards,
-                None, // Use gvproxy's built-in DNS
             )?;
 
             gvproxy_socket = Some(backend.vfkit_socket_path().to_path_buf());

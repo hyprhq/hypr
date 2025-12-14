@@ -573,7 +573,6 @@ impl VmmAdapter for CloudHypervisorAdapter {
                 gvproxy::defaults::GATEWAY,
                 gvproxy::defaults::CIDR,
                 port_forwards,
-                None, // Use gvproxy's built-in DNS
             )?;
 
             let socket_path = backend.qemu_socket_path().to_path_buf();
