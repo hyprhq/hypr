@@ -668,13 +668,17 @@ impl HyprService for HyprServiceImpl {
         let until = req.until;
 
         // Compile regex if pattern provided
-        let regex = pattern.as_ref().map(|p| {
-            if case_sensitive {
-                regex::Regex::new(p)
-            } else {
-                regex::RegexBuilder::new(p).case_insensitive(true).build()
-            }
-        }).transpose().map_err(|e| Status::invalid_argument(format!("Invalid regex: {}", e)))?;
+        let regex = pattern
+            .as_ref()
+            .map(|p| {
+                if case_sensitive {
+                    regex::Regex::new(p)
+                } else {
+                    regex::RegexBuilder::new(p).case_insensitive(true).build()
+                }
+            })
+            .transpose()
+            .map_err(|e| Status::invalid_argument(format!("Invalid regex: {}", e)))?;
 
         // Parse and filter log lines
         let mut entries: Vec<LogEntry> = vec![];
@@ -732,11 +736,7 @@ impl HyprService for HyprServiceImpl {
 
         let has_more = total_matches as usize > offset + entries.len();
 
-        Ok(Response::new(SearchLogsResponse {
-            entries,
-            total_matches,
-            has_more,
-        }))
+        Ok(Response::new(SearchLogsResponse { entries, total_matches, has_more }))
     }
 
     #[instrument(skip(self))]
@@ -4350,9 +4350,6 @@ fn parse_log_line(line: &str) -> (i64, &str, &str) {
     }
 
     // No timestamp found, use current time and assume stdout
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
     (now, "stdout", line)
 }
