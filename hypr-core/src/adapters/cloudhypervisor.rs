@@ -9,7 +9,7 @@
 
 use crate::adapters::{AdapterCapabilities, CommandSpec, VmmAdapter};
 use crate::error::{HyprError, Result};
-use crate::network::{gvproxy, GvproxyBackend, GvproxyPortForward};
+use crate::network::{gvproxy, SharedGvproxy};
 use crate::types::network::NetworkConfig;
 use crate::types::vm::{DiskConfig, GpuConfig, VmConfig, VmHandle};
 use async_trait::async_trait;
@@ -36,8 +36,6 @@ pub struct CloudHypervisorAdapter {
     kernel_path: PathBuf,
     /// Track virtiofsd daemons by VM ID (for cleanup)
     virtiofsd_daemons: Arc<Mutex<HashMap<String, Vec<VirtiofsdDaemon>>>>,
-    /// Track gvproxy backends by VM ID (for cleanup)
-    gvproxy_backends: Arc<Mutex<HashMap<String, GvproxyBackend>>>,
     /// Track bound VFIO devices by VM ID (for cleanup/restore)
     bound_vfio_devices: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
@@ -69,7 +67,6 @@ impl CloudHypervisorAdapter {
             runtime_dir,
             kernel_path,
             virtiofsd_daemons: Arc::new(Mutex::new(HashMap::new())),
-            gvproxy_backends: Arc::new(Mutex::new(HashMap::new())),
             bound_vfio_devices: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -553,37 +550,10 @@ impl VmmAdapter for CloudHypervisorAdapter {
         // Create log file path for VM output
         let log_path = Self::get_vm_log_path(&config.id)?;
 
-        // Start gvproxy for networking if enabled
+        // Use shared gvproxy if networking enabled
         let gvproxy_socket: Option<PathBuf> = if config.network_enabled {
-            debug!("Starting gvproxy for networking");
-            let mut backend = GvproxyBackend::new(&config.id);
-
-            // Convert port mappings to gvproxy format
-            let port_forwards: Vec<GvproxyPortForward> = config
-                .ports
-                .iter()
-                .map(|pm| GvproxyPortForward {
-                    host_port: pm.host_port,
-                    guest_port: pm.vm_port,
-                    protocol: format!("{:?}", pm.protocol).to_lowercase(),
-                })
-                .collect();
-
-            backend.start(
-                gvproxy::defaults::GATEWAY,
-                gvproxy::defaults::CIDR,
-                port_forwards,
-            )?;
-
-            let socket_path = backend.qemu_socket_path().to_path_buf();
-
-            // Store gvproxy for cleanup
-            {
-                let mut map = self.gvproxy_backends.lock().unwrap();
-                map.insert(config.id.clone(), backend);
-            }
-
-            Some(socket_path)
+            debug!("Using shared gvproxy for networking");
+            Some(SharedGvproxy::qemu_socket())
         } else {
             None
         };
@@ -635,15 +605,6 @@ impl VmmAdapter for CloudHypervisorAdapter {
             .stderr(std::process::Stdio::from(log_file_err))
             .spawn()
             .map_err(|e| {
-                // Clean up gvproxy on failure
-                if config.network_enabled {
-                    if let Ok(mut map) = self.gvproxy_backends.lock() {
-                        if let Some(mut backend) = map.remove(&config.id) {
-                            let _ = backend.stop();
-                        }
-                    }
-                }
-
                 // Clean up virtiofsd daemons on failure
                 let rt = tokio::runtime::Handle::current();
                 let adapter = self.clone();
@@ -805,15 +766,7 @@ impl VmmAdapter for CloudHypervisorAdapter {
             }
         }
 
-        // Stop gvproxy
-        {
-            let mut map = self.gvproxy_backends.lock().unwrap();
-            if let Some(mut backend) = map.remove(&handle.id) {
-                if let Err(e) = backend.stop() {
-                    warn!(error = %e, "Failed to stop gvproxy");
-                }
-            }
-        }
+
 
         // Clean up API socket
         if let Some(socket_path) = &handle.socket_path {

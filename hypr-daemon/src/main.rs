@@ -170,9 +170,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket_path = args.socket.clone().unwrap_or_else(|| "/tmp/hypr.sock".to_string());
     health_checker.register_subsystem("networking".to_string()).await;
 
-    // Start DNS server for service discovery (*.hypr domains) - skip in ephemeral mode
+    // Start network services (gvproxy and DNS) - skip in ephemeral mode
     if !args.ephemeral {
-        network_mgr.start_dns_server();
+        if let Err(e) = network_mgr.start().await {
+            error!("Failed to start network services: {}", e);
+            // Continue anyway? Or exit?
+            // If networking fails, VMs might not work, but maybe existing ones do?
+            // Providing we log it, we can continue.
+        }
     }
 
     // Reconcile state from previous run (skip in ephemeral mode or if requested)
@@ -320,7 +325,8 @@ async fn setup_host_dns_resolver() -> Result<(), Box<dyn std::error::Error + Sen
         let resolver_file = resolver_dir.join("hypr");
 
         // Get the gateway IP (DNS server address)
-        let dns_ip = "192.168.64.1"; // macOS vmnet gateway
+        // With shared gvproxy, DNS is handled by DnsServer bound to localhost
+        let dns_ip = "127.0.0.1";
 
         // Create /etc/resolver directory if it doesn't exist
         if !resolver_dir.exists() {
@@ -354,8 +360,8 @@ async fn setup_host_dns_resolver() -> Result<(), Box<dyn std::error::Error + Sen
         let resolved_conf_dir = Path::new("/etc/systemd/resolved.conf.d");
         let resolved_conf = resolved_conf_dir.join("hypr.conf");
 
-        // Get the gateway IP (DNS server address)
-        let dns_ip = "10.88.0.1"; // Linux bridge gateway
+        // DNS server address
+        let dns_ip = "127.0.0.1";
 
         if resolved_conf_dir.exists() || Path::new("/etc/systemd/resolved.conf").exists() {
             // systemd-resolved is available
@@ -397,12 +403,12 @@ async fn setup_host_dns_resolver() -> Result<(), Box<dyn std::error::Error + Sen
 
         // Fallback: Try resolvectl directly
         let status =
-            std::process::Command::new("resolvectl").args(["dns", "vbr0", dns_ip]).status();
+            std::process::Command::new("resolvectl").args(["dns", "lo", dns_ip]).status();
 
         if let Ok(s) = status {
             if s.success() {
                 let _ = std::process::Command::new("resolvectl")
-                    .args(["domain", "vbr0", "~hypr"])
+                    .args(["domain", "lo", "~hypr"])
                     .status();
                 info!("Host DNS resolver configured via resolvectl: *.hypr -> {}", dns_ip);
                 return Ok(());

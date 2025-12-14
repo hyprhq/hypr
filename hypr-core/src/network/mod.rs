@@ -25,7 +25,7 @@ pub use defaults::{
 };
 pub use dns::DnsServer;
 pub use gvproxy::{
-    defaults as gvproxy_defaults, GvproxyBackend, PortForward as GvproxyPortForward,
+    defaults as gvproxy_defaults, PortForward as GvproxyPortForward, SharedGvproxy,
 };
 pub use ipam::IpAllocator;
 pub use registry::{ServiceInfo, ServiceRegistry};

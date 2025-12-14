@@ -39,8 +39,8 @@ pub use metrics::{
     MetricsCollector, MetricsDataPoint, MetricsHistory, MetricsResolution, VmMetrics,
 };
 pub use network::{
-    gateway, gvproxy, netmask, netmask_str, network_cidr, network_defaults, GvproxyBackend,
-    GvproxyPortForward, IpAllocator, NetworkDefaults,
+    gateway, gvproxy, netmask, netmask_str, network_cidr, network_defaults, GvproxyPortForward,
+    IpAllocator, NetworkDefaults, SharedGvproxy,
 };
 pub use observability::{
     health::HealthChecker, init as init_observability, shutdown as shutdown_observability,

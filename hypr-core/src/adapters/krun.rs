@@ -31,7 +31,7 @@ static KESTREL_INITRAMFS: &[u8] =
 static KESTREL_INITRAMFS: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/embedded/initramfs-linux-arm64.cpio"));
 
-use crate::network::{gvproxy, GvproxyBackend, GvproxyPortForward};
+use crate::network::{gvproxy, SharedGvproxy};
 
 /// VM context state tracked by the adapter.
 struct VmContext {
@@ -39,8 +39,6 @@ struct VmContext {
     shutdown_eventfd: Option<i32>,
     /// Receiver to wait for VM exit (for builders)
     exit_receiver: Option<tokio::sync::oneshot::Receiver<()>>,
-    /// gvproxy backend (if networking enabled)
-    gvproxy: Option<GvproxyBackend>,
 }
 
 /// libkrun adapter for macOS.
@@ -357,36 +355,13 @@ impl VmmAdapter for LibkrunAdapter {
 
         let start = Instant::now();
 
-        // Start gvproxy for networking if enabled
-        let mut gvproxy_backend: Option<GvproxyBackend> = None;
-        let gvproxy_socket: Option<PathBuf>;
-
-        if config.network_enabled {
-            debug!("Starting gvproxy for networking");
-            let mut backend = GvproxyBackend::new(&config.id);
-
-            // Convert port mappings to gvproxy format
-            let port_forwards: Vec<GvproxyPortForward> = config
-                .ports
-                .iter()
-                .map(|pm| GvproxyPortForward {
-                    host_port: pm.host_port,
-                    guest_port: pm.vm_port,
-                    protocol: format!("{:?}", pm.protocol).to_lowercase(),
-                })
-                .collect();
-
-            backend.start(
-                gvproxy::defaults::GATEWAY,
-                gvproxy::defaults::CIDR,
-                port_forwards,
-            )?;
-
-            gvproxy_socket = Some(backend.vfkit_socket_path().to_path_buf());
-            gvproxy_backend = Some(backend);
+        // Use shared gvproxy if networking enabled
+        let gvproxy_socket: Option<PathBuf> = if config.network_enabled {
+            debug!("Using shared gvproxy for networking");
+            Some(SharedGvproxy::vfkit_socket())
         } else {
-            gvproxy_socket = None;
-        }
+            None
+        };
 
         // Create libkrun context
         let ctx_id = self.libkrun.create_ctx()?;
@@ -396,9 +371,6 @@ impl VmmAdapter for LibkrunAdapter {
         if let Err(e) = self.configure_context(ctx_id, config, gvproxy_socket.as_deref()) {
             // Clean up on failure
             let _ = self.libkrun.free_ctx(ctx_id);
-            if let Some(mut gv) = gvproxy_backend.take() {
-                let _ = gv.stop();
-            }
             metrics::counter!("hypr_vm_start_failures_total", "adapter" => "libkrun", "reason" => "config_failed").increment(1);
             return Err(e);
         }
@@ -409,7 +381,7 @@ impl VmmAdapter for LibkrunAdapter {
         // Create exit notification channel
         let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
 
-        // Store context with exit receiver and gvproxy backend
+        // Store context with exit receiver
         {
             let mut contexts = self.contexts.lock().await;
             contexts.insert(
@@ -418,7 +390,6 @@ impl VmmAdapter for LibkrunAdapter {
                     ctx_id,
                     shutdown_eventfd,
                     exit_receiver: Some(exit_rx),
-                    gvproxy: gvproxy_backend,
                 },
             );
         }
@@ -561,22 +532,15 @@ impl VmmAdapter for LibkrunAdapter {
     async fn delete(&self, handle: &VmHandle) -> Result<()> {
         info!("Deleting VM resources");
 
-        let (ctx_id, mut gvproxy) = {
+        let ctx_id = {
             let mut contexts = self.contexts.lock().await;
-            contexts.remove(&handle.id).map(|c| (Some(c.ctx_id), c.gvproxy)).unwrap_or((None, None))
+            contexts.remove(&handle.id).map(|c| c.ctx_id)
         };
 
         // Free libkrun context
         if let Some(ctx_id) = ctx_id {
             if let Err(e) = self.libkrun.free_ctx(ctx_id) {
                 warn!(error = %e, "Failed to free libkrun context");
-            }
-        }
-
-        // Stop gvproxy
-        if let Some(ref mut gv) = gvproxy {
-            if let Err(e) = gv.stop() {
-                warn!(error = %e, "Failed to stop gvproxy");
             }
         }
 
