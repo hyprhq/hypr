@@ -262,15 +262,11 @@ impl LibkrunAdapter {
             if let Some(socket_path) = gvproxy_socket {
                 let mac = Self::generate_mac_address_bytes();
 
-                // Create our side of the unixgram socket pair
-                // gvproxy listens on vfkit_socket_path, we connect from vm_socket_path
-                let vm_socket_path = socket_path.with_extension("vm.sock");
-
                 // Use add_net_unixgram for gvproxy/vfkit mode
                 self.libkrun.add_net_unixgram(
                     ctx_id,
-                    &vm_socket_path, // Our socket
-                    socket_path,     // gvproxy's socket
+                    Some(socket_path), // gvproxy's socket
+                    None,              // fd
                     &mac,
                     net_features::COMPAT,
                     net_flags::VFKIT, // vfkit compatibility mode for gvproxy

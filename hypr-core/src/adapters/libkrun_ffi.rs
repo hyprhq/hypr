@@ -121,7 +121,7 @@ type KrunAddNetUnixstream = unsafe extern "C" fn(
 type KrunAddNetUnixgram = unsafe extern "C" fn(
     ctx_id: c_uint,
     path: *const c_char,
-    path_peer: *const c_char,
+    fd: c_int,
     mac: *const u8,
     features: c_uint,
     flags: c_uint,
@@ -619,16 +619,16 @@ impl Libkrun {
     ///
     /// # Arguments
     /// * `ctx_id` - libkrun context ID
-    /// * `path` - Socket path for the VM side (our socket)
-    /// * `path_peer` - Socket path for gvproxy side (gvproxy's listen socket)
+    /// * `path` - Socket path for gvproxy (connection endpoint)
+    /// * `fd` - File descriptor (mutually exclusive with path)
     /// * `mac` - 6-byte MAC address
     /// * `features` - virtio-net features (use net_features::COMPAT)
     /// * `flags` - net_flags::VFKIT for gvproxy compatibility
     pub fn add_net_unixgram(
         &self,
         ctx_id: u32,
-        path: &Path,
-        path_peer: &Path,
+        path: Option<&Path>,
+        fd: Option<i32>,
         mac: &[u8; 6],
         features: u32,
         flags: u32,
@@ -637,29 +637,25 @@ impl Libkrun {
             hypervisor: "libkrun: add_net_unixgram not available (need newer libkrun with gvproxy support)".to_string(),
         })?;
 
-        let path_cstr = Self::path_to_cstring(path)?;
-        let path_peer_cstr = Self::path_to_cstring(path_peer)?;
+        let path_cstr = match path {
+            Some(p) => Some(Self::path_to_cstring(p)?),
+            None => None,
+        };
+        let path_ptr = path_cstr.as_ref().map(|c| c.as_ptr()).unwrap_or(std::ptr::null());
+        let fd_val = fd.unwrap_or(-1);
 
         debug!(
             ctx_id,
             path = ?path,
-            path_peer = ?path_peer,
+            fd = fd_val,
             mac = format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]),
             features,
             flags,
             "Adding network device via unix datagram (gvproxy)"
         );
-        let ret = unsafe {
-            (add_net_unixgram)(
-                ctx_id,
-                path_cstr.as_ptr(),
-                path_peer_cstr.as_ptr(),
-                mac.as_ptr(),
-                features,
-                flags,
-            )
-        };
+        let ret =
+            unsafe { (add_net_unixgram)(ctx_id, path_ptr, fd_val, mac.as_ptr(), features, flags) };
         Self::check_result(ret, "krun_add_net_unixgram")
     }
 

@@ -4339,10 +4339,10 @@ fn parse_log_line(line: &str) -> (i64, &str, &str) {
         if let Ok(ts) = line[..space_idx].parse::<i64>() {
             let rest = &line[space_idx + 1..];
             // Check for stream prefix (stdout: or stderr:)
-            if rest.starts_with("stdout:") {
-                return (ts, "stdout", rest[7..].trim_start());
-            } else if rest.starts_with("stderr:") {
-                return (ts, "stderr", rest[7..].trim_start());
+            if let Some(stripped) = rest.strip_prefix("stdout:") {
+                return (ts, "stdout", stripped.trim_start());
+            } else if let Some(stripped) = rest.strip_prefix("stderr:") {
+                return (ts, "stderr", stripped.trim_start());
             } else {
                 return (ts, "stdout", rest);
             }

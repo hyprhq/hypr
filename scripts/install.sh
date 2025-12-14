@@ -97,17 +97,43 @@ install_binaries() {
     fmt_success "Binaries installed"
 }
 
+install_gvproxy() {
+    fmt_header "Installing Dependencies (gvproxy)"
+
+    GVPROXY_URL=""
+    if [ "$OS" = "darwin" ]; then
+        GVPROXY_URL="https://github.com/containers/gvisor-tap-vsock/releases/latest/download/gvproxy-darwin"
+    elif [ "$OS" = "linux" ]; then
+        GVPROXY_URL="https://github.com/containers/gvisor-tap-vsock/releases/latest/download/gvproxy-linux-${ARCH}"
+    fi
+
+    if [ -z "$GVPROXY_URL" ]; then
+        fmt_error "Could not determine gvproxy URL for $OS/$ARCH"
+    fi
+
+    TMP_DIR=$(mktemp -d)
+    trap "rm -rf $TMP_DIR" EXIT
+
+    fmt_info "Fetching ${BOLD}gvproxy${RESET}..."
+    curl -fsSL "$GVPROXY_URL" -o "$TMP_DIR/gvproxy" || fmt_error "Failed to download gvproxy"
+    chmod +x "$TMP_DIR/gvproxy"
+
+    fmt_info "Installing gvproxy to $INSTALL_DIR..."
+    
+    if [ -w "$INSTALL_DIR" ]; then
+        mv "$TMP_DIR/gvproxy" "$INSTALL_DIR/"
+    else
+        sudo mkdir -p "$INSTALL_DIR"
+        sudo mv "$TMP_DIR/gvproxy" "$INSTALL_DIR/"
+    fi
+
+    fmt_success "gvproxy installed"
+}
+
 install_linux_deps() {
     fmt_header "Linux Dependencies"
 
     MISSING_DEPS=""
-
-    # Check for gvproxy (comes with podman)
-    if ! command -v gvproxy >/dev/null 2>&1; then
-        if [ ! -f /usr/libexec/podman/gvproxy ]; then
-            MISSING_DEPS="$MISSING_DEPS gvproxy"
-        fi
-    fi
 
     # Check for mksquashfs
     if ! command -v mksquashfs >/dev/null 2>&1; then
@@ -127,10 +153,6 @@ install_linux_deps() {
             sudo apt-get update -qq >/dev/null
 
             # gvproxy comes with podman
-            if echo "$MISSING_DEPS" | grep -q "gvproxy"; then
-                sudo apt-get install -y podman >/dev/null 2>&1 || fmt_warn "podman install failed (for gvproxy)"
-            fi
-
             if echo "$MISSING_DEPS" | grep -q "squashfs-tools"; then
                 sudo apt-get install -y squashfs-tools >/dev/null 2>&1 || fmt_warn "squashfs-tools install failed"
             fi
@@ -141,10 +163,6 @@ install_linux_deps() {
 
         elif command -v dnf >/dev/null 2>&1; then
             fmt_info "Using dnf..."
-
-            if echo "$MISSING_DEPS" | grep -q "gvproxy"; then
-                sudo dnf install -y podman >/dev/null 2>&1 || fmt_warn "podman install failed (for gvproxy)"
-            fi
 
             if echo "$MISSING_DEPS" | grep -q "squashfs-tools"; then
                 sudo dnf install -y squashfs-tools >/dev/null 2>&1 || fmt_warn "squashfs-tools install failed"
@@ -157,10 +175,6 @@ install_linux_deps() {
         elif command -v pacman >/dev/null 2>&1; then
             fmt_info "Using pacman..."
 
-            if echo "$MISSING_DEPS" | grep -q "gvproxy"; then
-                sudo pacman -Sy --noconfirm podman >/dev/null 2>&1 || fmt_warn "podman install failed (for gvproxy)"
-            fi
-
             if echo "$MISSING_DEPS" | grep -q "squashfs-tools"; then
                 sudo pacman -Sy --noconfirm squashfs-tools >/dev/null 2>&1 || fmt_warn "squashfs-tools install failed"
             fi
@@ -171,7 +185,7 @@ install_linux_deps() {
 
         else
             fmt_warn "Could not detect package manager."
-            fmt_warn "Please install manually: podman squashfs-tools virtiofsd"
+            fmt_warn "Please install manually: squashfs-tools virtiofsd"
         fi
     fi
 
@@ -197,21 +211,6 @@ install_macos_deps() {
         fmt_warn "Homebrew not found. Installing dependencies requires Homebrew."
         fmt_info "Install Homebrew: https://brew.sh"
         return
-    fi
-
-    # Check for gvproxy (comes with podman)
-    if ! command -v gvproxy >/dev/null 2>&1; then
-        # Also check podman libexec path
-        GVPROXY_FOUND=""
-        for path in /opt/homebrew/Cellar/podman/*/libexec/podman/gvproxy /usr/local/Cellar/podman/*/libexec/podman/gvproxy; do
-            if ls $path 2>/dev/null | head -1 >/dev/null 2>&1; then
-                GVPROXY_FOUND="yes"
-                break
-            fi
-        done
-        if [ -z "$GVPROXY_FOUND" ]; then
-            MISSING_DEPS="$MISSING_DEPS podman"
-        fi
     fi
 
     # Check for mksquashfs
@@ -400,6 +399,7 @@ main() {
     detect_platform
     check_requirements
     install_binaries
+    install_gvproxy
 
     case "$OS" in
         linux)

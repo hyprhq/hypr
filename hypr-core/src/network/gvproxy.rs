@@ -57,6 +57,8 @@ pub struct GvproxyBackend {
     vfkit_socket_path: PathBuf,
     /// Socket path for qemu/cloud-hypervisor connection (unix stream)
     qemu_socket_path: PathBuf,
+    /// Socket path for gvproxy API/control (unix stream)
+    control_socket_path: PathBuf,
     /// Gateway IP address
     gateway: Ipv4Addr,
     /// Subnet in CIDR notation
@@ -78,6 +80,7 @@ impl GvproxyBackend {
             process: None,
             vfkit_socket_path: runtime_dir.join(format!("{}.vfkit.sock", vm_id)),
             qemu_socket_path: runtime_dir.join(format!("{}.qemu.sock", vm_id)),
+            control_socket_path: runtime_dir.join(format!("{}.gvproxy.sock", vm_id)),
             gateway: Ipv4Addr::new(192, 168, 127, 1),
             subnet: "192.168.127.0/24".to_string(),
             port_forwards: Vec::new(),
@@ -111,6 +114,7 @@ impl GvproxyBackend {
         // Clean up stale sockets
         let _ = std::fs::remove_file(&self.vfkit_socket_path);
         let _ = std::fs::remove_file(&self.qemu_socket_path);
+        let _ = std::fs::remove_file(&self.control_socket_path);
 
         // Find gvproxy binary
         let gvproxy_path = Self::find_gvproxy()?;
@@ -123,7 +127,10 @@ impl GvproxyBackend {
         cmd.arg("--listen-vfkit").arg(format!("unixgram://{}", self.vfkit_socket_path.display()));
 
         // qemu mode: for cloud-hypervisor (Linux) - uses unix stream
-        cmd.arg("--listen-qemu").arg(format!("unix://{}", self.qemu_socket_path.display()));
+        cmd.arg("-listen-qemu").arg(format!("unix://{}", self.qemu_socket_path.display()));
+
+        // Control/API socket - allows dynamic port forwarding and stats
+        cmd.arg("-listen").arg(format!("unix://{}", self.control_socket_path.display()));
 
         // Network configuration
         cmd.arg("--gateway").arg(gateway.to_string());
@@ -154,6 +161,7 @@ impl GvproxyBackend {
             binary = %gvproxy_path.display(),
             vfkit_socket = %self.vfkit_socket_path.display(),
             qemu_socket = %self.qemu_socket_path.display(),
+            control_socket = %self.control_socket_path.display(),
             gateway = %gateway,
             subnet = %subnet,
             "Starting gvproxy"
@@ -258,7 +266,8 @@ impl GvproxyBackend {
         }
 
         Err(HyprError::NetworkSetupFailed {
-            reason: "gvproxy not found. Install with: brew install podman (macOS) or dnf install podman (Linux)".to_string(),
+            reason: "gvproxy not found. Please ensure gvproxy is installed and in your PATH."
+                .to_string(),
         })
     }
 
@@ -299,19 +308,73 @@ impl GvproxyBackend {
         self.assigned_ip = Some(ip);
     }
 
-    /// Add a port forward dynamically.
-    ///
-    /// Note: This currently requires restarting gvproxy. In the future,
-    /// we could use gvproxy's HTTP API for dynamic updates.
-    pub fn add_port_forward(&mut self, forward: PortForward) -> Result<()> {
-        // For now, we track it but don't apply dynamically
-        // TODO: Use gvproxy HTTP API for dynamic port forwards
-        warn!(
-            vm_id = %self.vm_id,
-            host_port = forward.host_port,
-            guest_port = forward.guest_port,
-            "Dynamic port forward added (will apply on next restart)"
+    /// Add a port forward dynamically using gvproxy's HTTP API.
+    pub async fn add_port_forward(&mut self, forward: PortForward) -> Result<()> {
+        if !self.is_running() {
+            // If not running, just add to config for next start
+            self.port_forwards.push(forward);
+            return Ok(());
+        }
+
+        // Default to the first assigned IP (usually 192.168.127.2)
+        // If we don't have an assigned IP yet, we can't forward dynamically
+        let guest_ip = self.assigned_ip.unwrap_or(defaults::POOL_START);
+
+        let json_body = format!(
+            r#"{{"local":":{}","remote":"{}:{}"}}"#,
+            forward.host_port, guest_ip, forward.guest_port
         );
+
+        let request = format!(
+            "POST /services/forwarder/expose HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\
+             \r\n\
+             {}",
+            json_body.len(),
+            json_body
+        );
+
+        // Connect to control socket
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream =
+            tokio::net::UnixStream::connect(&self.control_socket_path).await.map_err(|e| {
+                HyprError::Internal(format!("Failed to connect to gvproxy control socket: {}", e))
+            })?;
+
+        // Send request
+        stream.write_all(request.as_bytes()).await.map_err(|e| {
+            HyprError::Internal(format!("Failed to send port forward request: {}", e))
+        })?;
+
+        // Read response
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.map_err(|e| {
+            HyprError::Internal(format!("Failed to read port forward response: {}", e))
+        })?;
+
+        let response_str = String::from_utf8_lossy(&response);
+        if !response_str.starts_with("HTTP/1.1 200") {
+            warn!(
+                vm_id = %self.vm_id,
+                response = %response_str,
+                "Failed to add dynamic port forward"
+            );
+            return Err(HyprError::Internal(format!(
+                "gvproxy returned error: {}",
+                response_str.lines().next().unwrap_or("Unknown error")
+            )));
+        }
+
+        info!(
+            vm_id = %self.vm_id,
+            host = forward.host_port,
+            guest = forward.guest_port,
+            "Added dynamic port forward"
+        );
+
         self.port_forwards.push(forward);
         Ok(())
     }
@@ -342,6 +405,7 @@ impl GvproxyBackend {
         // Clean up sockets
         let _ = std::fs::remove_file(&self.vfkit_socket_path);
         let _ = std::fs::remove_file(&self.qemu_socket_path);
+        let _ = std::fs::remove_file(&self.control_socket_path);
 
         Ok(())
     }
