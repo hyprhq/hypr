@@ -56,7 +56,6 @@ pub struct SharedGvproxy {
     subnet: String,
 }
 
-
 impl Default for SharedGvproxy {
     fn default() -> Self {
         Self::new()
@@ -66,11 +65,7 @@ impl Default for SharedGvproxy {
 impl SharedGvproxy {
     /// Create a new shared gvproxy manager.
     pub fn new() -> Self {
-        Self {
-            process: None,
-            gateway: defaults::GATEWAY,
-            subnet: defaults::CIDR.to_string(),
-        }
+        Self { process: None, gateway: defaults::GATEWAY, subnet: defaults::CIDR.to_string() }
     }
 
     /// socket paths
@@ -163,7 +158,7 @@ impl SharedGvproxy {
     /// Add a port forward dynamically.
     pub async fn add_port_forward(&self, forward: PortForward) -> Result<()> {
         let control_socket = Self::control_socket();
-        
+
         let json_body = format!(
             r#"{{"local":":{}","remote":"{}:{}"}}"#,
             forward.host_port, forward.guest_ip, forward.guest_port
@@ -208,7 +203,7 @@ impl SharedGvproxy {
 
     fn is_active(socket_path: &Path) -> bool {
         if !std::path::Path::new(socket_path).exists() {
-             return false;
+            return false;
         }
         // Try connecting to verify it's not a stale socket
         use std::os::unix::net::UnixStream;
@@ -231,24 +226,22 @@ impl SharedGvproxy {
     fn find_gvproxy() -> Result<PathBuf> {
         // Reuse existing find logic...
         // Simplified for brevity, assume paths are checked
-        let paths = [
-             "/opt/homebrew/bin/gvproxy",
-             "/usr/local/bin/gvproxy",
-             "/usr/bin/gvproxy",
-        ];
-        
+        let paths = ["/opt/homebrew/bin/gvproxy", "/usr/local/bin/gvproxy", "/usr/bin/gvproxy"];
+
         for path in paths {
-             if Path::new(path).exists() {
-                 return Ok(PathBuf::from(path));
-             }
+            if Path::new(path).exists() {
+                return Ok(PathBuf::from(path));
+            }
         }
-        
+
         // Fallback to checking PATH
         if let Ok(output) = Command::new("which").arg("gvproxy").output() {
-             if output.status.success() {
-                  let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                  if !p.is_empty() { return Ok(PathBuf::from(p)); }
-             }
+            if output.status.success() {
+                let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !p.is_empty() {
+                    return Ok(PathBuf::from(p));
+                }
+            }
         }
 
         Err(HyprError::Internal("gvproxy binary not found".to_string()))

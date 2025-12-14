@@ -766,8 +766,6 @@ impl VmmAdapter for CloudHypervisorAdapter {
             }
         }
 
-
-
         // Clean up API socket
         if let Some(socket_path) = &handle.socket_path {
             if socket_path.exists() {

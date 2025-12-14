@@ -402,8 +402,7 @@ async fn setup_host_dns_resolver() -> Result<(), Box<dyn std::error::Error + Sen
         }
 
         // Fallback: Try resolvectl directly
-        let status =
-            std::process::Command::new("resolvectl").args(["dns", "lo", dns_ip]).status();
+        let status = std::process::Command::new("resolvectl").args(["dns", "lo", dns_ip]).status();
 
         if let Ok(s) = status {
             if s.success() {

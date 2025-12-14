@@ -386,11 +386,7 @@ impl VmmAdapter for LibkrunAdapter {
             let mut contexts = self.contexts.lock().await;
             contexts.insert(
                 config.id.clone(),
-                VmContext {
-                    ctx_id,
-                    shutdown_eventfd,
-                    exit_receiver: Some(exit_rx),
-                },
+                VmContext { ctx_id, shutdown_eventfd, exit_receiver: Some(exit_rx) },
             );
         }
 
@@ -440,20 +436,17 @@ impl VmmAdapter for LibkrunAdapter {
             if let Some(parent) = log_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            
-            let log_file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(log_path)?;
-                
+
+            let log_file = std::fs::OpenOptions::new().create(true).append(true).open(log_path)?;
+
             use std::os::unix::io::AsRawFd;
             let fd = log_file.as_raw_fd();
-            
+
             unsafe {
                 libc::dup2(fd, libc::STDOUT_FILENO);
                 libc::dup2(fd, libc::STDERR_FILENO);
             }
-            
+
             Ok(())
         }
 
@@ -464,12 +457,12 @@ impl VmmAdapter for LibkrunAdapter {
                 let pid = libc::fork();
                 if pid == 0 {
                     // Child process - run the VM (will exit when VM shuts down)
-                    
+
                     // Redirect stdout/stderr to log file
                     if let Err(e) = redirect_output(&vm_id) {
                         eprintln!("Failed to redirect logs for VM {}: {}", vm_id, e);
                     }
-                    
+
                     let _ = libkrun.start_enter(ctx_id);
                     // If we get here, VM exited normally (shouldn't happen with libkrun)
                     std::process::exit(0);

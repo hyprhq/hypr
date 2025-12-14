@@ -716,8 +716,6 @@ impl StateManager {
         }))
     }
 
-
-
     // ========================
     // Snapshot Operations
     // ========================
