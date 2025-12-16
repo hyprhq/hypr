@@ -451,7 +451,11 @@ impl VmmAdapter for LibkrunAdapter {
             Ok(())
         }
 
-        tokio::task::spawn_blocking(move || {
+        // Use a dedicated OS thread instead of tokio's blocking pool.
+        // tokio::task::spawn_blocking uses a limited thread pool that can be exhausted
+        // when multiple VMs are running, causing the daemon to become unresponsive.
+        // Native OS threads don't have this limitation.
+        std::thread::spawn(move || {
             // Fork before calling start_enter because libkrun calls exit() on VM shutdown
             // This ensures only the child process dies, not the parent
             unsafe {

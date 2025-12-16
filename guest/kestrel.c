@@ -80,6 +80,7 @@ struct sockaddr_vm {
 
 // Exec server constants
 #define EXEC_VSOCK_PORT 1024
+
 #define EXEC_MAX_SESSIONS 16
 #define EXEC_BUF_SIZE 4096
 
@@ -1822,40 +1823,37 @@ static int exec_handle_resize(const uint8_t *payload, size_t len) {
     return 0;
 }
 
-// Initialize vsock exec server
+// Initialize exec server (vsock or TCP fallback)
 static int exec_server_init(void) {
-    // Create vsock socket
+    // Try vsock first
     g_exec_listen_fd = socket(AF_VSOCK, SOCK_STREAM, 0);
+    if (g_exec_listen_fd >= 0) {
+        // Bind to VMADDR_CID_ANY (accept from any CID) on our port
+        struct sockaddr_vm addr = {0};
+        addr.svm_family = AF_VSOCK;
+        addr.svm_cid = VMADDR_CID_ANY;
+        addr.svm_port = EXEC_VSOCK_PORT;
+
+        if (bind(g_exec_listen_fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+            if (listen(g_exec_listen_fd, 5) == 0) {
+                // Set non-blocking
+                int fl = fcntl(g_exec_listen_fd, F_GETFL);
+                fcntl(g_exec_listen_fd, F_SETFL, fl | O_NONBLOCK);
+                LOG("Exec server listening on vsock port %d", EXEC_VSOCK_PORT);
+                return 0;
+            }
+        }
+        close(g_exec_listen_fd);
+        g_exec_listen_fd = -1;
+    }
+
+
+
     if (g_exec_listen_fd < 0) {
-        LOG("Warning: vsock socket failed: %s (exec disabled)", strerror(errno));
+        LOG("Warning: Failed to bind vsock port %d: %s (exec disabled)", EXEC_VSOCK_PORT, strerror(errno));
         return -1;
     }
-
-    // Bind to VMADDR_CID_ANY (accept from any CID) on our port
-    struct sockaddr_vm addr = {0};
-    addr.svm_family = AF_VSOCK;
-    addr.svm_cid = VMADDR_CID_ANY;
-    addr.svm_port = EXEC_VSOCK_PORT;
-
-    if (bind(g_exec_listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        LOG("Warning: vsock bind failed: %s (exec disabled)", strerror(errno));
-        close(g_exec_listen_fd);
-        g_exec_listen_fd = -1;
-        return -1;
-    }
-
-    if (listen(g_exec_listen_fd, 5) < 0) {
-        LOG("Warning: vsock listen failed: %s (exec disabled)", strerror(errno));
-        close(g_exec_listen_fd);
-        g_exec_listen_fd = -1;
-        return -1;
-    }
-
-    // Set non-blocking
-    int fl = fcntl(g_exec_listen_fd, F_GETFL);
-    fcntl(g_exec_listen_fd, F_SETFL, fl | O_NONBLOCK);
-
-    LOG("Exec server listening on vsock port %d", EXEC_VSOCK_PORT);
+    
     return 0;
 }
 
@@ -1865,11 +1863,11 @@ static void exec_server_poll(void) {
 
     // Accept new connections
     if (g_exec_client_fd < 0) {
-        struct sockaddr_vm peer;
+        struct sockaddr_storage peer;
         socklen_t peer_len = sizeof(peer);
         int client = accept(g_exec_listen_fd, (struct sockaddr *)&peer, &peer_len);
         if (client >= 0) {
-            LOG("Exec client connected from CID %u", peer.svm_cid);
+            LOG("Exec client connected");
             g_exec_client_fd = client;
             fcntl(g_exec_client_fd, F_SETFL, fcntl(g_exec_client_fd, F_GETFL) | O_NONBLOCK);
         }
@@ -1880,6 +1878,11 @@ static void exec_server_poll(void) {
     // Try to read a message from client
     uint8_t len_buf[4];
     ssize_t r = recv(g_exec_client_fd, len_buf, 4, MSG_PEEK);
+    if (r > 0 && r != 4) {
+        // Partial header, wait for more
+        return;
+    }
+    
     if (r == 4) {
         uint32_t msg_len = read_be32(len_buf);
         if (msg_len > 0 && msg_len < 1024 * 1024) {  // Sanity limit: 1MB
@@ -1926,9 +1929,15 @@ static void exec_server_poll(void) {
         }
     } else if (r == 0) {
         // Client disconnected
-        LOG("Exec client disconnected");
+        LOG("Exec client disconnected (recv=0)");
         close(g_exec_client_fd);
         g_exec_client_fd = -1;
+    } else if (r < 0) {
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            LOG("Exec client recv error: %d", errno);
+            close(g_exec_client_fd);
+            g_exec_client_fd = -1;
+        }
     }
 
     // Relay output from active sessions to client

@@ -25,7 +25,7 @@ use tokio_stream::wrappers::UnixListenerStream;
 use tokio_stream::{Stream, StreamExt};
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
-use tracing::{info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 /// gRPC service implementation
 #[allow(dead_code)]
@@ -688,16 +688,18 @@ impl HyprService for HyprServiceImpl {
             // Parse log line (format: "timestamp stream: content" or just "content")
             let (timestamp, stream, log_content) = parse_log_line(line);
 
-            // Apply filters
-            if let Some(since_ts) = since {
-                if timestamp < since_ts {
-                    continue;
+            // Apply filters (skip time filters if no parseable timestamp, i.e., timestamp == 0)
+            if timestamp > 0 {
+                if let Some(since_ts) = since {
+                    if timestamp < since_ts {
+                        continue;
+                    }
                 }
-            }
 
-            if let Some(until_ts) = until {
-                if timestamp > until_ts {
-                    continue;
+                if let Some(until_ts) = until {
+                    if timestamp > until_ts {
+                        continue;
+                    }
                 }
             }
 
@@ -4192,8 +4194,68 @@ async fn run_vm_with_progress(
         }
     }
 
+    // Copy port mappings from proto config
+    if let Some(ref cfg) = proto_config {
+        for port in &cfg.ports {
+            let proto = match port.protocol.to_lowercase().as_str() {
+                "udp" => hypr_core::types::network::Protocol::Udp,
+                _ => hypr_core::types::network::Protocol::Tcp,
+            };
+            vm_config.ports.push(hypr_core::types::network::PortMapping {
+                host_port: port.host_port as u16,
+                vm_port: port.guest_port as u16,
+                protocol: proto,
+            });
+        }
+    }
+
     // Create via adapter
     let handle = adapter.create(&vm_config).await?;
+
+    // Setup port forwarding for each exposed port
+    for port_cfg in &vm_config.ports {
+        if let Err(e) = network_mgr
+            .add_port_forward(
+                port_cfg.host_port,
+                vm_ip,
+                port_cfg.vm_port,
+                port_cfg.protocol,
+                vm_config.id.clone(),
+            )
+            .await
+        {
+            // Log error but don't fail VM creation
+            warn!(
+                "Failed to setup port forwarding {}:{} -> {}:{}:{}",
+                "localhost", port_cfg.host_port, vm_ip, port_cfg.vm_port, e
+            );
+        } else {
+            info!(
+                "Port forwarding: localhost:{} -> {}:{} ({})",
+                port_cfg.host_port, vm_ip, port_cfg.vm_port, port_cfg.protocol
+            );
+        }
+    }
+
+    // Setup exec port forwarding (port 7777) for TCP exec fallback
+    // This is an internal port for hypr exec, not shown in user-facing port list
+    // We use a high ephemeral port on host to avoid conflicts
+    let exec_host_port = 40000 + (vm_ip.octets()[3] as u16 * 10); // e.g., 40090 for .9
+    info!("Setting up exec port forwarding: localhost:{} -> {}:7777", exec_host_port, vm_ip);
+    if let Err(e) = network_mgr
+        .add_port_forward(
+            exec_host_port,
+            vm_ip,
+            7777,
+            hypr_core::types::network::Protocol::Tcp,
+            vm_config.id.clone(),
+        )
+        .await
+    {
+        warn!("Failed to setup exec port forwarding: {}", e);
+    } else {
+        info!("Exec port forwarding configured");
+    }
 
     // Save to state
     let vm = Vm {
@@ -4920,7 +4982,7 @@ fn parse_log_line(line: &str) -> (i64, &str, &str) {
         }
     }
 
-    // No timestamp found, use current time and assume stdout
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
-    (now, "stdout", line)
+    // No timestamp found, use 0 (epoch) so time filters don't exclude these logs
+    // Logs without timestamps will always match time-based filters
+    (0, "stdout", line)
 }

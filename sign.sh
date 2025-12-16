@@ -9,7 +9,7 @@ echo "Building hypr..."
 cargo build --release
 
 # Binaries to sign
-BINARIES=("target/release/hyprd" "target/release/hypr")
+BINARIES=("/usr/local/bin/hyprd" "/usr/local/bin/hyprd")
 ENTITLEMENTS="hyprd.entitlements"
 
 # Check if entitlements file exists

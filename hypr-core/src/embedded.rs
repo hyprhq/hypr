@@ -132,7 +132,59 @@ pub fn get_libkrun_path() -> Result<PathBuf> {
         debug!("Using existing libkrun at {}", library_path.display());
     }
 
+    // Always ensure the library is signed with proper entitlements
+    // This is fast and ensures it works even if the file existed but signature was invalid
+    sign_libkrun(&library_path)?;
+
     Ok(library_path)
+}
+
+/// Sign libkrun.dylib with hypervisor entitlement.
+#[cfg(target_os = "macos")]
+fn sign_libkrun(path: &Path) -> Result<()> {
+    // Create entitlements in temp file
+    let entitlements_content = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.hypervisor</key>
+    <true/>
+</dict>
+</plist>"#;
+
+    let entitlements_path = path.with_extension("entitlements");
+    fs::write(&entitlements_path, entitlements_content)
+        .map_err(|e| HyprError::IoError { path: entitlements_path.clone(), source: e })?;
+
+    // Sign the library
+    let status = std::process::Command::new("codesign")
+        .args([
+            "--force",
+            "--sign",
+            "-",
+            "--entitlements",
+            entitlements_path.to_str().unwrap_or(""),
+            path.to_str().unwrap_or(""),
+        ])
+        .output(); // Use output to capture stderr if needed
+
+    // Clean up entitlements file
+    let _ = fs::remove_file(&entitlements_path);
+
+    match status {
+        Ok(out) if out.status.success() => {
+            debug!("Signed libkrun with hypervisor entitlement");
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            tracing::warn!("codesign exited with status: {} (stderr: {})", out.status, stderr);
+        }
+        Err(e) => {
+            tracing::warn!("Failed to run codesign: {} (VMs may not start)", e);
+        }
+    }
+
+    Ok(())
 }
 
 /// Extract libkrun.dylib to disk.

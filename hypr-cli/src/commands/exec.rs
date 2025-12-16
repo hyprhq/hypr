@@ -39,30 +39,22 @@ pub async fn exec(
         ));
     }
 
-    // Get vsock path from VM config
-    // For now, construct it from the VM ID and runtime directory
-    let vsock_path =
-        hypr_core::paths::runtime_dir().join("ch").join(format!("{}.vsock", vm_info.id));
-
-    // Check if vsock is available
-    if !vsock_path.exists() {
-        return Err(anyhow::anyhow!(
-            "VM '{}' does not have exec support enabled.\n\n\
-             This feature requires:\n\
-             1. vsock device configured in the VM\n\
-             2. Kestrel agent running with exec server\n\n\
-             Note: This is a new feature. If you're seeing this error,\n\
-             the VM may need to be recreated with vsock support.",
-            vm_info.name
-        ));
-    }
-
-    // Create exec client
-    let mut exec_client = ExecClient::new(&vsock_path);
+    // Try multiple vsock paths (different adapters use different locations)
+    let vsock_paths = [
+        // libkrun path
+        hypr_core::paths::runtime_dir().join("krun").join(format!("{}.vsock", vm_info.id)),
+        // cloud-hypervisor path
+        hypr_core::paths::runtime_dir().join("ch").join(format!("{}.vsock", vm_info.id)),
+    ];
 
     // Execute command
+    let vsock_path = vsock_paths
+        .iter()
+        .find(|p| p.exists())
+        .ok_or_else(|| anyhow::anyhow!("Exec socket not found for VM {}", vm_info.name))?;
+
+    let mut exec_client = ExecClient::new(vsock_path);
     let exit_code = if interactive {
-        // Set up raw terminal mode for interactive sessions
         setup_terminal()?;
         let result = exec_client.exec_interactive(cmd, env).await;
         restore_terminal()?;

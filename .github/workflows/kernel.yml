@@ -232,6 +232,15 @@ jobs:
           CONFIG_ZSTD_COMPRESS=y
           CONFIG_ZSTD_DECOMPRESS=y
           CONFIG_XZ_DEC=y
+
+          # VSOCK support (required for hypr exec via vsock)
+          CONFIG_VSOCKETS=y
+          CONFIG_VIRTIO_VSOCKETS=y
+          CONFIG_VSOCKETS_LOOPBACK=y
+
+          # PTY support (required for interactive exec sessions)
+          CONFIG_UNIX98_PTYS=y
+          CONFIG_LEGACY_PTYS=n
           HYPR_CONFIG
 
           # Resolve any conflicts and set defaults for new options
@@ -261,6 +270,9 @@ jobs:
           echo ""
           echo "compression libs:"
           grep -E "CONFIG_(ZLIB|LZO|LZ4|ZSTD|XZ)" .config | head -10
+          echo ""
+          echo "vsock (for exec):"
+          grep -E "CONFIG_(VSOCKETS|VIRTIO_VSOCKETS)" .config || echo "WARNING: VSOCK not found!"
 
           # Final check - fail if squashfs is not enabled
           if ! grep -q "CONFIG_SQUASHFS=y" .config; then
