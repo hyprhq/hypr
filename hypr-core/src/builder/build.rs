@@ -241,19 +241,21 @@ pub async fn build_image(options: BuildOptions) -> Result<BuildResult> {
     for stage in parsed_dockerfile.stages.iter().rev() {
         for instr in stage.instructions.iter().rev() {
             if let crate::builder::parser::Instruction::Healthcheck { config } = instr {
-                 use crate::types::image::{HealthCheckConfig, HealthCheckType};
-                 healthcheck = Some(HealthCheckConfig {
-                     check_type: HealthCheckType::Exec,
-                     endpoint: None,
-                     port: 0,
-                     interval_sec: config.interval.as_deref().map(parse_duration).unwrap_or(30),
-                     timeout_sec: config.timeout.as_deref().map(parse_duration).unwrap_or(30),
-                     retries: config.retries.unwrap_or(3),
-                 });
-                 break;
+                use crate::types::image::{HealthCheckConfig, HealthCheckType};
+                healthcheck = Some(HealthCheckConfig {
+                    check_type: HealthCheckType::Exec,
+                    endpoint: None,
+                    port: 0,
+                    interval_sec: config.interval.as_deref().map(parse_duration).unwrap_or(30),
+                    timeout_sec: config.timeout.as_deref().map(parse_duration).unwrap_or(30),
+                    retries: config.retries.unwrap_or(3),
+                });
+                break;
             }
         }
-        if healthcheck.is_some() { break; }
+        if healthcheck.is_some() {
+            break;
+        }
     }
 
     Ok(BuildResult {
@@ -358,7 +360,6 @@ pub async fn register_image(
     Ok(image)
 }
 
-
 fn parse_duration(s: &str) -> u32 {
     let s = s.trim();
     if let Some(stripped) = s.strip_suffix('s') {
@@ -373,7 +374,6 @@ fn parse_duration(s: &str) -> u32 {
     // Default fallback
     s.parse().unwrap_or(0)
 }
-
 
 /// Import layers from a cache_from image into the cache manager.
 ///

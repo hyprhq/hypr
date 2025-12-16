@@ -873,7 +873,7 @@ impl HyprService for HyprServiceImpl {
         let id = uuid::Uuid::new_v4().to_string();
 
         // Determine network subnet
-        // gvproxy uses a single unified subnet (192.168.127.0/24) 
+        // gvproxy uses a single unified subnet (192.168.127.0/24)
         // Custom networks get isolated ranges in the 10.89.x.0/24 space
         let network_num = existing.len() + 1;
         let cidr = req.subnet.unwrap_or_else(|| format!("10.89.{}.0/24", network_num));
@@ -1215,10 +1215,8 @@ impl HyprService for HyprServiceImpl {
                 adapter.vsock_path(&VmHandle { id: vm.id.clone(), pid: vm.pid, socket_path: None });
 
             // Generate session ID (use nanoseconds as simple random source)
-            let session_id = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .subsec_nanos();
+            let session_id =
+                SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().subsec_nanos();
             let session_id_str = session_id.to_string();
 
             // Connect to vsock
@@ -1254,7 +1252,7 @@ impl HyprService for HyprServiceImpl {
                     // Frame: [Length (4 bytes BE)] [Type (1 byte)] [Body]
                     // Inner Body matches kestrel: [Type] [SessionID] ... but here payload starts with SessionID
                     // Kestrel frame: [4 bytes total_len] [1 byte type] [4 byte sess_id] [payload...]
-                    
+
                     let total_len = 1 + payload.len(); // Type + Payload
                     let mut frame = Vec::with_capacity(4 + total_len);
                     frame.extend_from_slice(&(total_len as u32).to_be_bytes());
@@ -1263,7 +1261,10 @@ impl HyprService for HyprServiceImpl {
 
                     if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut writer, &frame).await {
                         let _ = tx
-                            .send(Err(Status::internal(format!("Failed to send ExecRequest: {}", e))))
+                            .send(Err(Status::internal(format!(
+                                "Failed to send ExecRequest: {}",
+                                e
+                            ))))
                             .await;
                         return;
                     }
@@ -1286,7 +1287,8 @@ impl HyprService for HyprServiceImpl {
                                 break;
                             }
 
-                            if msg_len < 5 { // Type (1) + SessionID (4)
+                            if msg_len < 5 {
+                                // Type (1) + SessionID (4)
                                 continue;
                             }
 
@@ -1322,32 +1324,40 @@ impl HyprService for HyprServiceImpl {
                                     if !payload.is_empty() {
                                         let flags = payload[0];
                                         let mut pos = 1;
-                                        
+
                                         // Has PID (bit 0)
                                         if flags & 1 != 0 && payload.len() >= pos + 4 {
                                             // Process started
-                                            let _pid = u32::from_be_bytes(payload[pos..pos+4].try_into().unwrap());
+                                            let _pid = u32::from_be_bytes(
+                                                payload[pos..pos + 4].try_into().unwrap(),
+                                            );
                                             pos += 4;
                                             // Send Started info
-                                             let _ = tx_clone
+                                            let _ = tx_clone
                                                 .send(Ok(ExecResponse {
-                                                    message: Some(exec_response::Message::Started(ExecStarted {
-                                                        session_id: session_id_str.clone(),
-                                                    })),
+                                                    message: Some(exec_response::Message::Started(
+                                                        ExecStarted {
+                                                            session_id: session_id_str.clone(),
+                                                        },
+                                                    )),
                                                 }))
                                                 .await;
                                         }
 
                                         // Has Exit Code (bit 1)
                                         if flags & 2 != 0 && payload.len() >= pos + 4 {
-                                            let code = i32::from_be_bytes(payload[pos..pos+4].try_into().unwrap());
+                                            let code = i32::from_be_bytes(
+                                                payload[pos..pos + 4].try_into().unwrap(),
+                                            );
                                             let _ = tx_clone
                                                 .send(Ok(ExecResponse {
-                                                    message: Some(exec_response::Message::ExitCode(code)),
+                                                    message: Some(
+                                                        exec_response::Message::ExitCode(code),
+                                                    ),
                                                 }))
                                                 .await;
                                             // Exit code means session ended
-                                            break; 
+                                            break;
                                         }
                                     }
                                 }
@@ -1372,8 +1382,10 @@ impl HyprService for HyprServiceImpl {
                                 frame.extend_from_slice(&(total_len as u32).to_be_bytes());
                                 frame.push(MSG_STDIN);
                                 frame.extend_from_slice(&body);
-                                
-                                if writer.write_all(&frame).await.is_err() { break; }
+
+                                if writer.write_all(&frame).await.is_err() {
+                                    break;
+                                }
                             }
                             Some(exec_request::Message::Resize(resize)) => {
                                 // Msg: [4 len] [Type] [SessID] [2 rows] [2 cols]
@@ -1388,7 +1400,9 @@ impl HyprService for HyprServiceImpl {
                                 frame.push(MSG_RESIZE);
                                 frame.extend_from_slice(&body);
 
-                                if writer.write_all(&frame).await.is_err() { break; }
+                                if writer.write_all(&frame).await.is_err() {
+                                    break;
+                                }
                             }
                             Some(exec_request::Message::Signal(sig)) => {
                                 // Msg: [4 len] [Type] [SessID] [1 sig]
@@ -1402,12 +1416,14 @@ impl HyprService for HyprServiceImpl {
                                 frame.push(MSG_SIGNAL);
                                 frame.extend_from_slice(&body);
 
-                                if writer.write_all(&frame).await.is_err() { break; }
+                                if writer.write_all(&frame).await.is_err() {
+                                    break;
+                                }
                             }
                             _ => {}
                         }
                     }
-                    
+
                     // Client closed stream -> Send CLOSE message
                     let mut body = Vec::new();
                     body.extend_from_slice(&session_id.to_be_bytes());
@@ -1422,7 +1438,10 @@ impl HyprService for HyprServiceImpl {
                 }
                 Err(e) => {
                     let _ = tx
-                        .send(Err(Status::internal(format!("Failed to connect to VM vsock: {}", e))))
+                        .send(Err(Status::internal(format!(
+                            "Failed to connect to VM vsock: {}",
+                            e
+                        ))))
                         .await;
                 }
             }
@@ -1895,7 +1914,7 @@ impl HyprService for HyprServiceImpl {
 
         // Check which volumes are in use
         let vms = self.state.list_vms().await.map_err(|e| Status::internal(e.to_string()))?;
-        
+
         let mut used_volumes = std::collections::HashSet::new();
         for vm in vms {
             for vol in vm.config.volumes {
@@ -1917,16 +1936,15 @@ impl HyprService for HyprServiceImpl {
 
             // Delete from filesystem if path exists
             if volume.path.exists() {
-                 if let Err(e) = std::fs::remove_dir_all(&volume.path) {
-                     warn!("Failed to remove volume directory {}: {}", volume.path.display(), e);
-                     // Proceed anyway as DB record is gone
-                 }
+                if let Err(e) = std::fs::remove_dir_all(&volume.path) {
+                    warn!("Failed to remove volume directory {}: {}", volume.path.display(), e);
+                    // Proceed anyway as DB record is gone
+                }
             }
 
             reclaimed += volume.size_bytes;
             deleted.push(volume.id);
         }
-
 
         Ok(Response::new(PruneVolumesResponse {
             volumes_deleted: deleted,
@@ -2028,7 +2046,8 @@ impl HyprService for HyprServiceImpl {
     ) -> std::result::Result<Response<UpdateSettingsResponse>, Status> {
         let req = request.into_inner();
 
-        let settings = req.settings.ok_or_else(|| Status::invalid_argument("Settings not provided"))?;
+        let settings =
+            req.settings.ok_or_else(|| Status::invalid_argument("Settings not provided"))?;
 
         // Convert proto settings to core config
         let config = hypr_core::config::Config {
@@ -2993,44 +3012,53 @@ impl HyprService for HyprServiceImpl {
         let req = request.into_inner();
 
         // Get environment first
-        let env = self.state.get_dev_environment(&req.id).await.map_err(|e| Status::not_found(e.to_string()))?;
+        let env = self
+            .state
+            .get_dev_environment(&req.id)
+            .await
+            .map_err(|e| Status::not_found(e.to_string()))?;
 
         // If delete_vm is true, also delete the associated VM
         if req.delete_vm {
             if let Some(vm_id) = &env.vm_id {
                 // Try to find the VM
                 if let Ok(vm) = self.state.get_vm(vm_id).await {
-                     // Stop/Kill if running
-                     if vm.status == VmStatus::Running {
-                          let handle = hypr_core::VmHandle { id: vm.id.clone(), pid: vm.pid, socket_path: None };
-                          if let Err(e) = self.adapter.kill(&handle).await {
-                              warn!("Failed to kill associated DevEnv VM {}: {}", vm_id, e);
-                          }
-                     }
+                    // Stop/Kill if running
+                    if vm.status == VmStatus::Running {
+                        let handle = hypr_core::VmHandle {
+                            id: vm.id.clone(),
+                            pid: vm.pid,
+                            socket_path: None,
+                        };
+                        if let Err(e) = self.adapter.kill(&handle).await {
+                            warn!("Failed to kill associated DevEnv VM {}: {}", vm_id, e);
+                        }
+                    }
 
-                     // Cleanup network resources
-                     let _ = self.network_mgr.remove_vm_port_forwards(&vm.id).await;
-                     let _ = self.network_mgr.release_ip(&vm.id).await;
-                     // Cleanup DNS
-                     let service_name = if !vm.name.is_empty() { &vm.name } else { &vm.id };
-                     let _ = self.network_mgr.unregister_service(service_name).await;
+                    // Cleanup network resources
+                    let _ = self.network_mgr.remove_vm_port_forwards(&vm.id).await;
+                    let _ = self.network_mgr.release_ip(&vm.id).await;
+                    // Cleanup DNS
+                    let service_name = if !vm.name.is_empty() { &vm.name } else { &vm.id };
+                    let _ = self.network_mgr.unregister_service(service_name).await;
 
-                     // Delete via adapter
-                     let handle = hypr_core::VmHandle { id: vm.id.clone(), pid: vm.pid, socket_path: None };
-                     if let Err(e) = self.adapter.delete(&handle).await {
-                         warn!("Failed to delete associated DevEnv VM {}: {}", vm_id, e);
-                     }
+                    // Delete via adapter
+                    let handle =
+                        hypr_core::VmHandle { id: vm.id.clone(), pid: vm.pid, socket_path: None };
+                    if let Err(e) = self.adapter.delete(&handle).await {
+                        warn!("Failed to delete associated DevEnv VM {}: {}", vm_id, e);
+                    }
 
-                     // Delete VM from DB
-                     if let Err(e) = self.state.delete_vm(&vm.id).await {
-                         warn!("Failed to delete associated DevEnv VM {} from DB: {}", vm_id, e);
-                     }
-                     
-                     // Clean logs
-                     let log_path = hypr_core::paths::vm_log_path(&vm.id);
-                     if log_path.exists() {
-                         let _ = std::fs::remove_file(&log_path);
-                     }
+                    // Delete VM from DB
+                    if let Err(e) = self.state.delete_vm(&vm.id).await {
+                        warn!("Failed to delete associated DevEnv VM {} from DB: {}", vm_id, e);
+                    }
+
+                    // Clean logs
+                    let log_path = hypr_core::paths::vm_log_path(&vm.id);
+                    if log_path.exists() {
+                        let _ = std::fs::remove_file(&log_path);
+                    }
                 }
             }
         }
@@ -3110,7 +3138,7 @@ impl HyprService for HyprServiceImpl {
                 let ports_str = parts[4];
                 let vols_str = parts[5];
                 let nets_str = parts[6];
-                
+
                 // Simple parsing for comma-separated lists
                 let ports: Vec<String> = ports_str
                     .split(',')
@@ -3453,7 +3481,7 @@ async fn create_dev_environment_impl(
 
     // Clone git repo using system git command
     let branch = req.branch.clone().filter(|b| !b.is_empty()).unwrap_or_else(|| "main".to_string());
-    
+
     let git_output = tokio::process::Command::new("git")
         .arg("clone")
         .arg("--depth")
@@ -3492,7 +3520,7 @@ async fn create_dev_environment_impl(
 
     let mut dev_config = CoreDevContainerConfig::default();
     let mut config_found = false;
-    
+
     // Regex to strip JSON comments (for JSONC support)
     let comment_re = regex::Regex::new(r"(?m)//.*$|/\*[\s\S]*?\*/").unwrap();
 
@@ -3502,7 +3530,7 @@ async fn create_dev_environment_impl(
             match tokio::fs::read_to_string(&config_path).await {
                 Ok(content) => {
                     let cleaned_content = comment_re.replace_all(&content, "");
-                    
+
                     match serde_json::from_str::<CoreDevContainerConfig>(&cleaned_content) {
                         Ok(cfg) => {
                             dev_config = cfg;
@@ -3525,7 +3553,8 @@ async fn create_dev_environment_impl(
     }
 
     // Determine workspace path
-    let workspace_path = dev_config.workspace_folder.clone().unwrap_or_else(|| "/workspace".to_string());
+    let workspace_path =
+        dev_config.workspace_folder.clone().unwrap_or_else(|| "/workspace".to_string());
 
     // Create dev environment record
     let mut env = hypr_core::state::DevEnvironment {
@@ -3559,7 +3588,7 @@ async fn create_dev_environment_impl(
         } else {
             cache_dir.join(dockerfile_path).parent().unwrap_or(&cache_dir).to_path_buf()
         };
-        
+
         let build_opts = hypr_core::builder::BuildOptions {
             context_path: context_dir,
             dockerfile: dockerfile_path.clone(),
@@ -3570,19 +3599,21 @@ async fn create_dev_environment_impl(
             no_cache: false,
             cache_from: vec![],
         };
-        
+
         let builder_res = hypr_core::builder::build_image(build_opts)
             .await
             .map_err(|e| HyprError::Internal(format!("Build failed: {}", e)))?;
-        
+
         let image = hypr_core::builder::register_image(
-            &builder_res, 
-            &format!("dev-env-{}", env_id), 
-            "latest", 
-            true, 
-            &state
-        ).await.map_err(|e| HyprError::Internal(format!("Failed to register image: {}", e)))?;
-        
+            &builder_res,
+            &format!("dev-env-{}", env_id),
+            "latest",
+            true,
+            &state,
+        )
+        .await
+        .map_err(|e| HyprError::Internal(format!("Failed to register image: {}", e)))?;
+
         image.id
     } else if let Some(image_name) = &dev_config.image {
         // Use existing image or pull from registry
@@ -3591,12 +3622,12 @@ async fn create_dev_environment_impl(
         } else {
             let mut puller = hypr_core::registry::ImagePuller::new()
                 .map_err(|e| HyprError::Internal(e.to_string()))?;
-            let img = puller.pull(image_name).await
-                .map_err(|e| HyprError::Internal(format!("Failed to pull image {}: {}", image_name, e)))?;
-            
-            state.insert_image(&img).await
-                .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
-                
+            let img = puller.pull(image_name).await.map_err(|e| {
+                HyprError::Internal(format!("Failed to pull image {}: {}", image_name, e))
+            })?;
+
+            state.insert_image(&img).await.map_err(|e| HyprError::DatabaseError(e.to_string()))?;
+
             img.id
         }
     } else {
@@ -3606,43 +3637,38 @@ async fn create_dev_environment_impl(
         } else {
             let mut puller = hypr_core::registry::ImagePuller::new()
                 .map_err(|e| HyprError::Internal(e.to_string()))?;
-            let img = puller.pull("ubuntu:22.04").await
+            let img = puller
+                .pull("ubuntu:22.04")
+                .await
                 .map_err(|e| HyprError::Internal(format!("Failed to pull default image: {}", e)))?;
-            state.insert_image(&img).await
-                .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
+            state.insert_image(&img).await.map_err(|e| HyprError::DatabaseError(e.to_string()))?;
             img.id
         }
     };
 
     // Stage 4: Start VM
     send_progress("starting", "Starting VM...", 80).await;
-    
+
     let vm_id = format!("dev-{}", env_id);
     let vm_ip = network_mgr.allocate_ip(&vm_id).await?;
-    
+
     // Get the built/pulled image
     let image = state.get_image(&image_id).await?;
-    
+
     // Configure VM with the image rootfs and workspace mount
     let mut vm_config = VmConfig {
         network_enabled: true,
         id: vm_id.clone(),
         name: env_name.clone(),
-        resources: VmResources { 
-            cpus: 4, 
-            memory_mb: 4096, 
-            balloon_enabled: true 
-        },
+        resources: VmResources { cpus: 4, memory_mb: 4096, balloon_enabled: true },
         kernel_path: None,
         kernel_args: vec![],
         initramfs_path: None,
-        disks: vec![
-            hypr_core::types::vm::DiskConfig {
-                path: image.rootfs_path.clone(),
-                readonly: true,
-                format: hypr_core::types::vm::DiskFormat::Squashfs,
-            }
-        ],
+        disks: vec![hypr_core::types::vm::DiskConfig {
+            path: image.rootfs_path.clone(),
+            readonly: true,
+            format: hypr_core::types::vm::DiskFormat::Squashfs,
+        }],
         network: hypr_core::types::network::NetworkConfig {
             network: "default".to_string(),
             mac_address: None,
@@ -3651,17 +3677,15 @@ async fn create_dev_environment_impl(
         },
         ports: vec![],
         env: dev_config.remote_env.clone(),
-        volumes: vec![
-            hypr_core::types::volume::VolumeMount {
-                source: cache_dir.to_string_lossy().to_string(),
-                target: env.workspace_path.clone(),
-                readonly: false,
-            }
-        ],
+        volumes: vec![hypr_core::types::volume::VolumeMount {
+            source: cache_dir.to_string_lossy().to_string(),
+            target: env.workspace_path.clone(),
+            readonly: false,
+        }],
         gpu: None,
         virtio_fs_mounts: vec![],
     };
-    
+
     // Configure port forwarding
     for port in &dev_config.forward_ports {
         vm_config.ports.push(hypr_core::types::network::PortMapping {
@@ -3673,9 +3697,11 @@ async fn create_dev_environment_impl(
 
     // Prepare runtime manifest for guest init
     let net_defaults = hypr_core::network_defaults();
-    let manifest = hypr_core::manifest::runtime_manifest::RuntimeManifest::new(
-        vec!["/bin/sh".to_string(), "-c".to_string(), "while true; do sleep 3600; done".to_string()]
-    )
+    let manifest = hypr_core::manifest::runtime_manifest::RuntimeManifest::new(vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        "while true; do sleep 3600; done".to_string(),
+    ])
     .with_env(dev_config.remote_env.iter().map(|(k, v)| format!("{}={}", k, v)).collect())
     .with_workdir(env.workspace_path.clone())
     .with_network(hypr_core::manifest::runtime_manifest::NetworkConfig {
@@ -3694,13 +3720,16 @@ async fn create_dev_environment_impl(
 
     // Setup port forwarding via gvproxy
     for port in &dev_config.forward_ports {
-        if let Err(e) = network_mgr.add_port_forward(
-            *port as u16, 
-            vm_ip, 
-            *port as u16, 
-            hypr_core::types::network::Protocol::Tcp, 
-            vm_id.clone()
-        ).await {
+        if let Err(e) = network_mgr
+            .add_port_forward(
+                *port as u16,
+                vm_ip,
+                *port as u16,
+                hypr_core::types::network::Protocol::Tcp,
+                vm_id.clone(),
+            )
+            .await
+        {
             warn!(port = port, error = %e, "Failed to setup port forwarding");
         }
     }
@@ -3708,9 +3737,12 @@ async fn create_dev_environment_impl(
     // Update env status
     env.status = hypr_core::state::DevEnvStatus::Running;
     env.vm_id = Some(vm_id.clone());
-    env.started_at = Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64);
-    
-    state.update_dev_environment(&env).await
+    env.started_at =
+        Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64);
+
+    state
+        .update_dev_environment(&env)
+        .await
         .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
 
     // Mark as running
@@ -3729,7 +3761,7 @@ async fn create_dev_environment_impl(
 }
 
 /// Implementation for update_stack streaming RPC (rolling updates).
-/// 
+///
 /// Note: Stack updates are not yet implemented. This function returns an error.
 /// Future implementation will support rolling, recreate, and blue-green update strategies.
 async fn update_stack_impl(
@@ -3771,13 +3803,13 @@ async fn update_stack_impl(
     // 3. Build/pull new images as needed
     // 4. Apply update strategy (rolling: one at a time, recreate: stop all then start, blue-green: parallel deployment)
     // 5. Handle rollback on failure
-    
+
     let error_msg = format!(
         "Stack update (strategy: {}) is not yet implemented. \
          To update stack '{}' with {} services, please use 'hypr compose down' followed by 'hypr compose up'.",
         strategy, stack.name, stack.services.len()
     );
-    
+
     let _ = tx
         .send(Ok(UpdateStackEvent {
             event: Some(update_stack_event::Event::Error(UpdateError {

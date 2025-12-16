@@ -351,7 +351,7 @@ impl SnapshotManager {
     }
 
     /// Create a full snapshot including memory state.
-    /// 
+    ///
     /// Note: Memory snapshots require hypervisor-specific support that is not yet available.
     /// Currently falls back to disk-only snapshot with a warning.
     async fn create_full_snapshot(
@@ -365,11 +365,11 @@ impl SnapshotManager {
         // Memory snapshots require hypervisor support:
         // - libkrun: No snapshot API available
         // - cloud-hypervisor: Has snapshot API but requires VM pause/resume coordination
-        // 
+        //
         // When hypervisor support is available, the implementation would:
         // 1. Pause the VM via adapter
         // 2. Request memory dump from hypervisor
-        // 3. Save memory state to snapshot directory  
+        // 3. Save memory state to snapshot directory
         // 4. Resume the VM
 
         warn!("Full snapshot requested but memory snapshots are not yet supported; disk-only snapshot created");

@@ -214,14 +214,16 @@ impl SharedGvproxy {
             HyprError::Internal(format!("Failed to connect to gvproxy control socket: {}", e))
         })?;
 
-        stream.write_all(request.as_bytes()).await.map_err(|e| {
-            HyprError::Internal(format!("Failed to send unexpose request: {}", e))
-        })?;
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .map_err(|e| HyprError::Internal(format!("Failed to send unexpose request: {}", e)))?;
 
         let mut response = Vec::new();
-        stream.read_to_end(&mut response).await.map_err(|e| {
-            HyprError::Internal(format!("Failed to read unexpose response: {}", e))
-        })?;
+        stream
+            .read_to_end(&mut response)
+            .await
+            .map_err(|e| HyprError::Internal(format!("Failed to read unexpose response: {}", e)))?;
 
         let response_str = String::from_utf8_lossy(&response);
         if !response_str.starts_with("HTTP/1.1 200") {

@@ -211,7 +211,7 @@ pub async fn ps(stack_name: Option<&str>) -> Result<()> {
 }
 
 /// Show logs for a service in a stack.
-/// 
+///
 /// Note: Direct service log streaming via compose is not yet implemented.
 /// Use `hypr logs <vm-id>` to view logs for individual service VMs.
 pub async fn logs(service_name: &str) -> Result<()> {

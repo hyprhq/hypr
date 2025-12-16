@@ -387,24 +387,23 @@ impl VmBuilder {
         let mut hasher = sha2::Sha256::new();
         let mut buffer = [0; 8192];
 
-        use tokio::io::AsyncReadExt;
         use sha2::Digest;
+        use tokio::io::AsyncReadExt;
 
         loop {
-            let n = file.read(&mut buffer).await.map_err(|e| {
-                HyprError::BuildFailed { reason: format!("Failed to read layer for hashing: {}", e) }
+            let n = file.read(&mut buffer).await.map_err(|e| HyprError::BuildFailed {
+                reason: format!("Failed to read layer for hashing: {}", e),
             })?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             hasher.update(&buffer[..n]);
         }
 
         let hash = hasher.finalize();
         let hash_hex = format!("sha256:{:x}", hash);
 
-        Ok(BuildLayerInfo {
-            size_bytes: metadata.len(),
-            layer_hash: hash_hex,
-        })
+        Ok(BuildLayerInfo { size_bytes: metadata.len(), layer_hash: hash_hex })
     }
 
     /// Execute ALL build steps in a SINGLE VM (the correct way).

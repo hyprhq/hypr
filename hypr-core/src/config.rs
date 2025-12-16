@@ -54,21 +54,24 @@ impl Config {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| HyprError::InvalidConfig { reason: format!("Failed to read config: {}", e) })?;
-        serde_json::from_str(&content)
-            .map_err(|e| HyprError::InvalidConfig { reason: format!("Failed to parse config: {}", e) })
+        let content = std::fs::read_to_string(&path).map_err(|e| HyprError::InvalidConfig {
+            reason: format!("Failed to read config: {}", e),
+        })?;
+        serde_json::from_str(&content).map_err(|e| HyprError::InvalidConfig {
+            reason: format!("Failed to parse config: {}", e),
+        })
     }
 
     /// Save configuration to disk.
     pub fn save(&self) -> Result<()> {
         let path = Self::config_path();
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| HyprError::IoError { path: parent.to_path_buf(), source: e })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| HyprError::IoError { path: parent.to_path_buf(), source: e })?;
         }
-        let content = serde_json::to_string_pretty(self)
-            .map_err(|e| HyprError::InvalidConfig { reason: format!("Failed to serialize config: {}", e) })?;
-        std::fs::write(&path, content)
-            .map_err(|e| HyprError::IoError { path, source: e })
+        let content = serde_json::to_string_pretty(self).map_err(|e| HyprError::InvalidConfig {
+            reason: format!("Failed to serialize config: {}", e),
+        })?;
+        std::fs::write(&path, content).map_err(|e| HyprError::IoError { path, source: e })
     }
 }
