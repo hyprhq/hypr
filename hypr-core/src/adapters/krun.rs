@@ -65,7 +65,6 @@ impl LibkrunAdapter {
     pub fn new() -> Result<Self> {
         let libkrun = Arc::new(Libkrun::load()?);
 
-        // Set log level based on RUST_LOG
         let log_level = if tracing::enabled!(tracing::Level::TRACE) {
             5 // trace
         } else if tracing::enabled!(tracing::Level::DEBUG) {
@@ -79,7 +78,9 @@ impl LibkrunAdapter {
         };
         let _ = libkrun.set_log_level(log_level);
 
-        let kernel_path = crate::paths::kernel_path();
+        // Ensure kernel exists, download if missing
+        let kernel_path = crate::paths::ensure_kernel()
+            .map_err(|e| HyprError::Internal(format!("Failed to ensure kernel: {}", e)))?;
 
         // GPU is available on Apple Silicon (aarch64)
         #[cfg(target_arch = "aarch64")]

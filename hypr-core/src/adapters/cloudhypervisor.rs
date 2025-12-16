@@ -55,7 +55,10 @@ impl CloudHypervisorAdapter {
         let binary_path = crate::embedded::get_cloud_hypervisor_path()?;
         let virtiofsd_binary = Self::find_binary("virtiofsd")?;
         let runtime_dir = crate::paths::runtime_dir().join("ch");
-        let kernel_path = crate::paths::kernel_path();
+
+        // Ensure kernel exists, download if missing
+        let kernel_path = crate::paths::ensure_kernel()
+            .map_err(|e| HyprError::Internal(format!("Failed to ensure kernel: {}", e)))?;
 
         // Ensure runtime directory exists
         std::fs::create_dir_all(&runtime_dir)
