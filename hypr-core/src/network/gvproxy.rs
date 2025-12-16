@@ -114,11 +114,9 @@ impl SharedGvproxy {
         cmd.arg("-listen-qemu").arg(format!("unix://{}", qemu_socket.display()));
         cmd.arg("-listen").arg(format!("unix://{}", control_socket.display()));
 
-        // Don't forward SSH by default (ssh-port default is 2222 if not specified)
-        // We cannot use 0 as it's invalid (must be 1024-65536).
-        // If we want to avoid conflicts, we might need to set it to a random high port
-        // or just let it be 2222 and hope it doesn't conflict.
-        // For now, removing the invalid argument.
+        // gvproxy's -ssh-port defaults to 2222; we don't set it explicitly since
+        // SSH forwarding is handled separately through our port forwarding API.
+        // Setting 0 is invalid (must be 1024-65535), so we let gvproxy use its default.
 
         // Suppress stdout, capture stderr
         cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
@@ -190,10 +188,45 @@ impl SharedGvproxy {
             HyprError::Internal(format!("Failed to read port forward response: {}", e))
         })?;
 
+        Ok(())
+    }
+
+    /// Remove a port forward.
+    pub async fn remove_port_forward(&self, host_port: u16) -> Result<()> {
+        let control_socket = Self::control_socket();
+
+        let json_body = format!(r#"{{"local":":{}"}}"#, host_port);
+
+        let request = format!(
+            "POST /services/forwarder/unexpose HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\
+             \r\n\
+             {}",
+            json_body.len(),
+            json_body
+        );
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::UnixStream::connect(control_socket).await.map_err(|e| {
+            HyprError::Internal(format!("Failed to connect to gvproxy control socket: {}", e))
+        })?;
+
+        stream.write_all(request.as_bytes()).await.map_err(|e| {
+            HyprError::Internal(format!("Failed to send unexpose request: {}", e))
+        })?;
+
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.map_err(|e| {
+            HyprError::Internal(format!("Failed to read unexpose response: {}", e))
+        })?;
+
         let response_str = String::from_utf8_lossy(&response);
         if !response_str.starts_with("HTTP/1.1 200") {
             return Err(HyprError::Internal(format!(
-                "gvproxy error: {}",
+                "gvproxy unexpose error: {}",
                 response_str.lines().next().unwrap_or("Unknown error")
             )));
         }
@@ -224,8 +257,7 @@ impl SharedGvproxy {
     }
 
     fn find_gvproxy() -> Result<PathBuf> {
-        // Reuse existing find logic...
-        // Simplified for brevity, assume paths are checked
+        // Search common installation paths in order of preference
         let paths = ["/opt/homebrew/bin/gvproxy", "/usr/local/bin/gvproxy", "/usr/bin/gvproxy"];
 
         for path in paths {

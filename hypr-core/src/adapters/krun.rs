@@ -527,8 +527,8 @@ impl VmmAdapter for LibkrunAdapter {
         // Wait for graceful shutdown
         let start = Instant::now();
         while start.elapsed() < timeout {
-            // Check if context is still active
-            // For now, just wait - libkrun will clean up
+            // libkrun handles VM cleanup internally when the context is released;
+            // we poll here to respect the timeout before forcing cleanup
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 

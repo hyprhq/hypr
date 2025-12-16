@@ -872,32 +872,33 @@ impl HyprService for HyprServiceImpl {
         // Generate unique ID
         let id = uuid::Uuid::new_v4().to_string();
 
-        // Parse or auto-generate subnet
-        // For now, we'll use a simple scheme: vbr1, vbr2, etc. with 10.89.x.0/24
-        let network_num = existing.len() + 1; // +1 because default is vbr0
-        let cidr = req.subnet.unwrap_or_else(|| format!("10.{}.0.0/16", 88 + network_num));
+        // Determine network subnet
+        // gvproxy uses a single unified subnet (192.168.127.0/24) 
+        // Custom networks get isolated ranges in the 10.89.x.0/24 space
+        let network_num = existing.len() + 1;
+        let cidr = req.subnet.unwrap_or_else(|| format!("10.89.{}.0/24", network_num));
 
         // Parse gateway from CIDR or use provided
         let gateway_str = req.gateway.unwrap_or_else(|| {
-            // Extract base from CIDR and set gateway to .1
             if let Some(slash_pos) = cidr.find('/') {
                 let base = &cidr[..slash_pos];
                 if let Some(last_dot) = base.rfind('.') {
                     return format!("{}.1", &base[..last_dot]);
                 }
             }
-            format!("10.{}.0.1", 88 + network_num)
+            format!("10.89.{}.1", network_num)
         });
 
         let gateway: std::net::Ipv4Addr =
             gateway_str.parse().map_err(|_| Status::invalid_argument("Invalid gateway IP"))?;
 
-        let bridge_name = format!("vbr{}", network_num);
+        // gvproxy handles networking without host bridge interfaces
+        let bridge_name = format!("hypr{}", network_num);
 
         let network = hypr_core::Network {
             id: id.clone(),
             name: req.name.clone(),
-            driver: hypr_core::types::NetworkDriver::Bridge,
+            driver: hypr_core::types::NetworkDriver::Gvproxy,
             cidr: cidr.clone(),
             gateway,
             bridge_name: bridge_name.clone(),
@@ -907,13 +908,13 @@ impl HyprService for HyprServiceImpl {
         // Store in database
         self.state.insert_network(&network).await.map_err(|e| Status::internal(e.to_string()))?;
 
-        // TODO: Actually create the bridge interface (Linux only)
-        // For now, this just stores the network metadata
+        // Note: gvproxy networking doesn't require creating host bridge interfaces.
+        // The network metadata is stored for VM IP allocation tracking.
 
         let proto_network = proto::Network {
             id,
             name: req.name,
-            driver: "bridge".to_string(),
+            driver: "gvproxy".to_string(),
             cidr,
             gateway: gateway_str,
             bridge_name,
@@ -954,8 +955,7 @@ impl HyprService for HyprServiceImpl {
         if !req.force {
             let vms = self.state.list_vms().await.map_err(|e| Status::internal(e.to_string()))?;
 
-            // Check if any VM is using this network
-            // For now, all VMs use the default network, so this check is placeholder
+            // Check if any VM's network config references this network
             let in_use = vms.iter().any(|vm| vm.config.network.network == req.name);
             if in_use {
                 return Err(Status::failed_precondition(format!(
@@ -971,7 +971,7 @@ impl HyprService for HyprServiceImpl {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        // TODO: Actually delete the bridge interface (Linux only)
+        // Note: gvproxy networking doesn't create host bridge interfaces, so nothing to clean up.
 
         Ok(Response::new(DeleteNetworkResponse { success: true }))
     }
@@ -1175,6 +1175,16 @@ impl HyprService for HyprServiceImpl {
         let adapter = self.adapter.clone();
 
         tokio::spawn(async move {
+            // Protocol constants
+            const MSG_EXEC_REQUEST: u8 = 0x01;
+            const MSG_EXEC_RESPONSE: u8 = 0x02;
+            const MSG_STDIN: u8 = 0x03;
+            const MSG_STDOUT: u8 = 0x04;
+            const MSG_STDERR: u8 = 0x05;
+            const MSG_SIGNAL: u8 = 0x06;
+            const MSG_RESIZE: u8 = 0x07;
+            const MSG_CLOSE: u8 = 0x08;
+
             // Wait for ExecStart message
             let start_msg = match in_stream.next().await {
                 Some(Ok(req)) => match req.message {
@@ -1204,80 +1214,218 @@ impl HyprService for HyprServiceImpl {
             let vsock_path =
                 adapter.vsock_path(&VmHandle { id: vm.id.clone(), pid: vm.pid, socket_path: None });
 
-            // Send started confirmation
-            let session_id = uuid::Uuid::new_v4().to_string();
-            let _ = tx
-                .send(Ok(ExecResponse {
-                    message: Some(exec_response::Message::Started(ExecStarted {
-                        session_id: session_id.clone(),
-                    })),
-                }))
-                .await;
+            // Generate session ID (use nanoseconds as simple random source)
+            let session_id = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos();
+            let session_id_str = session_id.to_string();
 
-            // Connect to vsock and relay I/O
-            // TODO: Implement actual vsock connection using kestrel exec protocol
-            // For now, this is a placeholder that will be implemented with console multiplexing
+            // Connect to vsock
             match tokio::net::UnixStream::connect(&vsock_path).await {
                 Ok(stream) => {
                     let (mut reader, mut writer) = stream.into_split();
 
+                    // 1. Send ExecRequest
+                    let mut payload = Vec::new();
+                    // Session ID (4 bytes BE)
+                    payload.extend_from_slice(&session_id.to_be_bytes());
+                    // Flags (bit 0 = tty)
+                    payload.push(if start_msg.tty { 1 } else { 0 });
+                    // Rows (2 bytes BE) - Default to 24
+                    payload.extend_from_slice(&(24u16).to_be_bytes());
+                    // Cols (2 bytes BE) - Default to 80
+                    payload.extend_from_slice(&(80u16).to_be_bytes());
+                    // Command Length (4 bytes BE) + Command
+                    let cmd_string = start_msg.command.join(" ");
+                    let cmd_bytes = cmd_string.as_bytes();
+                    payload.extend_from_slice(&(cmd_bytes.len() as u32).to_be_bytes());
+                    payload.extend_from_slice(cmd_bytes);
+                    // Env Count (4 bytes BE)
+                    payload.extend_from_slice(&(start_msg.env.len() as u32).to_be_bytes());
+                    // Env vars
+                    for (k, v) in start_msg.env {
+                        payload.extend_from_slice(&(k.len() as u16).to_be_bytes());
+                        payload.extend_from_slice(k.as_bytes());
+                        payload.extend_from_slice(&(v.len() as u16).to_be_bytes());
+                        payload.extend_from_slice(v.as_bytes());
+                    }
+
+                    // Frame: [Length (4 bytes BE)] [Type (1 byte)] [Body]
+                    // Inner Body matches kestrel: [Type] [SessionID] ... but here payload starts with SessionID
+                    // Kestrel frame: [4 bytes total_len] [1 byte type] [4 byte sess_id] [payload...]
+                    
+                    let total_len = 1 + payload.len(); // Type + Payload
+                    let mut frame = Vec::with_capacity(4 + total_len);
+                    frame.extend_from_slice(&(total_len as u32).to_be_bytes());
+                    frame.push(MSG_EXEC_REQUEST);
+                    frame.extend_from_slice(&payload);
+
+                    if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut writer, &frame).await {
+                        let _ = tx
+                            .send(Err(Status::internal(format!("Failed to send ExecRequest: {}", e))))
+                            .await;
+                        return;
+                    }
+
                     // Spawn reader task
                     let tx_clone = tx.clone();
                     let reader_task = tokio::spawn(async move {
-                        let mut buf = vec![0u8; 4096];
                         loop {
-                            match tokio::io::AsyncReadExt::read(&mut reader, &mut buf).await {
-                                Ok(0) => break, // EOF
-                                Ok(n) => {
+                            use tokio::io::AsyncReadExt;
+                            // Read Length (4 bytes)
+                            let mut len_buf = [0u8; 4];
+                            if reader.read_exact(&mut len_buf).await.is_err() {
+                                break;
+                            }
+                            let msg_len = u32::from_be_bytes(len_buf) as usize;
+
+                            // Read Body
+                            let mut body = vec![0u8; msg_len];
+                            if reader.read_exact(&mut body).await.is_err() {
+                                break;
+                            }
+
+                            if msg_len < 5 { // Type (1) + SessionID (4)
+                                continue;
+                            }
+
+                            let msg_type = body[0];
+                            let msg_sess_id = u32::from_be_bytes(body[1..5].try_into().unwrap());
+
+                            if msg_sess_id != session_id {
+                                continue;
+                            }
+
+                            let payload = &body[5..];
+
+                            match msg_type {
+                                MSG_STDOUT => {
                                     let _ = tx_clone
                                         .send(Ok(ExecResponse {
                                             message: Some(exec_response::Message::Stdout(
-                                                buf[..n].to_vec(),
+                                                payload.to_vec(),
                                             )),
                                         }))
                                         .await;
                                 }
-                                Err(_) => break,
+                                MSG_STDERR => {
+                                    let _ = tx_clone
+                                        .send(Ok(ExecResponse {
+                                            message: Some(exec_response::Message::Stderr(
+                                                payload.to_vec(),
+                                            )),
+                                        }))
+                                        .await;
+                                }
+                                MSG_EXEC_RESPONSE => {
+                                    if !payload.is_empty() {
+                                        let flags = payload[0];
+                                        let mut pos = 1;
+                                        
+                                        // Has PID (bit 0)
+                                        if flags & 1 != 0 && payload.len() >= pos + 4 {
+                                            // Process started
+                                            let _pid = u32::from_be_bytes(payload[pos..pos+4].try_into().unwrap());
+                                            pos += 4;
+                                            // Send Started info
+                                             let _ = tx_clone
+                                                .send(Ok(ExecResponse {
+                                                    message: Some(exec_response::Message::Started(ExecStarted {
+                                                        session_id: session_id_str.clone(),
+                                                    })),
+                                                }))
+                                                .await;
+                                        }
+
+                                        // Has Exit Code (bit 1)
+                                        if flags & 2 != 0 && payload.len() >= pos + 4 {
+                                            let code = i32::from_be_bytes(payload[pos..pos+4].try_into().unwrap());
+                                            let _ = tx_clone
+                                                .send(Ok(ExecResponse {
+                                                    message: Some(exec_response::Message::ExitCode(code)),
+                                                }))
+                                                .await;
+                                            // Exit code means session ended
+                                            break; 
+                                        }
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     });
 
                     // Process input from client
                     while let Some(Ok(req)) = in_stream.next().await {
+                        use tokio::io::AsyncWriteExt;
                         match req.message {
                             Some(exec_request::Message::Input(input)) => {
-                                if tokio::io::AsyncWriteExt::write_all(&mut writer, &input.data)
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
+                                // Msg: [4 len] [Type] [SessID] [4 data_len] [data]
+                                let mut body = Vec::new();
+                                body.extend_from_slice(&session_id.to_be_bytes());
+                                body.extend_from_slice(&(input.data.len() as u32).to_be_bytes());
+                                body.extend_from_slice(&input.data);
+
+                                let total_len = 1 + body.len();
+                                let mut frame = Vec::with_capacity(4 + total_len);
+                                frame.extend_from_slice(&(total_len as u32).to_be_bytes());
+                                frame.push(MSG_STDIN);
+                                frame.extend_from_slice(&body);
+                                
+                                if writer.write_all(&frame).await.is_err() { break; }
                             }
                             Some(exec_request::Message::Resize(resize)) => {
-                                // TODO: Send SIGWINCH to guest process
-                                let _ = resize;
+                                // Msg: [4 len] [Type] [SessID] [2 rows] [2 cols]
+                                let mut body = Vec::new();
+                                body.extend_from_slice(&session_id.to_be_bytes());
+                                body.extend_from_slice(&(resize.rows as u16).to_be_bytes());
+                                body.extend_from_slice(&(resize.cols as u16).to_be_bytes());
+
+                                let total_len = 1 + body.len();
+                                let mut frame = Vec::with_capacity(4 + total_len);
+                                frame.extend_from_slice(&(total_len as u32).to_be_bytes());
+                                frame.push(MSG_RESIZE);
+                                frame.extend_from_slice(&body);
+
+                                if writer.write_all(&frame).await.is_err() { break; }
                             }
                             Some(exec_request::Message::Signal(sig)) => {
-                                // TODO: Send signal to guest process
-                                let _ = sig;
+                                // Msg: [4 len] [Type] [SessID] [1 sig]
+                                let mut body = Vec::new();
+                                body.extend_from_slice(&session_id.to_be_bytes());
+                                body.push(sig.signal as u8);
+
+                                let total_len = 1 + body.len();
+                                let mut frame = Vec::with_capacity(4 + total_len);
+                                frame.extend_from_slice(&(total_len as u32).to_be_bytes());
+                                frame.push(MSG_SIGNAL);
+                                frame.extend_from_slice(&body);
+
+                                if writer.write_all(&frame).await.is_err() { break; }
                             }
                             _ => {}
                         }
                     }
+                    
+                    // Client closed stream -> Send CLOSE message
+                    let mut body = Vec::new();
+                    body.extend_from_slice(&session_id.to_be_bytes());
+                    let total_len = 1 + body.len();
+                    let mut frame = Vec::with_capacity(4 + total_len);
+                    frame.extend_from_slice(&(total_len as u32).to_be_bytes());
+                    frame.push(MSG_CLOSE);
+                    frame.extend_from_slice(&body);
+                    let _ = tokio::io::AsyncWriteExt::write_all(&mut writer, &frame).await;
 
                     reader_task.abort();
                 }
                 Err(e) => {
                     let _ = tx
-                        .send(Err(Status::internal(format!("Failed to connect to VM: {}", e))))
+                        .send(Err(Status::internal(format!("Failed to connect to VM vsock: {}", e))))
                         .await;
                 }
             }
-
-            // Send exit code
-            let _ = tx
-                .send(Ok(ExecResponse { message: Some(exec_response::Message::ExitCode(0)) }))
-                .await;
         });
 
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -1742,14 +1890,43 @@ impl HyprService for HyprServiceImpl {
         let volumes =
             self.state.list_volumes().await.map_err(|e| Status::internal(e.to_string()))?;
 
-        let deleted = Vec::new();
-        let reclaimed: u64 = 0;
+        let mut deleted = Vec::new();
+        let mut reclaimed: u64 = 0;
 
-        // TODO: Check which volumes are in use
-        for volume in volumes {
-            // For now, skip deletion - need to implement usage tracking
-            let _ = volume;
+        // Check which volumes are in use
+        let vms = self.state.list_vms().await.map_err(|e| Status::internal(e.to_string()))?;
+        
+        let mut used_volumes = std::collections::HashSet::new();
+        for vm in vms {
+            for vol in vm.config.volumes {
+                used_volumes.insert(vol.source);
+            }
         }
+
+        for volume in volumes {
+            // Check if used by ID or Name
+            if used_volumes.contains(&volume.id) || used_volumes.contains(&volume.name) {
+                continue;
+            }
+
+            // Delete from database
+            if let Err(e) = self.state.delete_volume(&volume.id).await {
+                warn!("Failed to delete volume {}: {}", volume.id, e);
+                continue;
+            }
+
+            // Delete from filesystem if path exists
+            if volume.path.exists() {
+                 if let Err(e) = std::fs::remove_dir_all(&volume.path) {
+                     warn!("Failed to remove volume directory {}: {}", volume.path.display(), e);
+                     // Proceed anyway as DB record is gone
+                 }
+            }
+
+            reclaimed += volume.size_bytes;
+            deleted.push(volume.id);
+        }
+
 
         Ok(Response::new(PruneVolumesResponse {
             volumes_deleted: deleted,
@@ -1823,20 +2000,24 @@ impl HyprService for HyprServiceImpl {
         &self,
         _request: Request<GetSettingsRequest>,
     ) -> std::result::Result<Response<GetSettingsResponse>, Status> {
+        // Load config from disk
+        let config = hypr_core::config::Config::load()
+            .map_err(|e| Status::internal(format!("Failed to load config: {}", e)))?;
+
         Ok(Response::new(GetSettingsResponse {
             settings: Some(proto::Settings {
-                default_cpus: 2,
-                default_memory_mb: 512,
-                auto_start_daemon: true,
-                start_at_login: false,
-                log_level: "info".to_string(),
-                max_concurrent_builds: 4,
-                cache_size_limit_bytes: 10 * 1024 * 1024 * 1024, // 10 GB
-                log_retention_days: 7,
-                telemetry_enabled: false,
-                data_dir: hypr_core::paths::data_dir().to_string_lossy().to_string(),
-                runtime_dir: hypr_core::paths::runtime_dir().to_string_lossy().to_string(),
-                socket_path: "/tmp/hypr.sock".to_string(),
+                default_cpus: config.default_cpus,
+                default_memory_mb: config.default_memory_mb,
+                auto_start_daemon: config.auto_start_daemon,
+                start_at_login: config.start_at_login,
+                log_level: config.log_level,
+                max_concurrent_builds: config.max_concurrent_builds,
+                cache_size_limit_bytes: config.cache_size_limit_bytes,
+                log_retention_days: config.log_retention_days,
+                telemetry_enabled: config.telemetry_enabled,
+                data_dir: config.data_dir,
+                runtime_dir: config.runtime_dir,
+                socket_path: config.socket_path,
             }),
         }))
     }
@@ -1847,9 +2028,28 @@ impl HyprService for HyprServiceImpl {
     ) -> std::result::Result<Response<UpdateSettingsResponse>, Status> {
         let req = request.into_inner();
 
-        // TODO: Persist settings to config file
-        // For now, just return the settings back
-        Ok(Response::new(UpdateSettingsResponse { settings: req.settings }))
+        let settings = req.settings.ok_or_else(|| Status::invalid_argument("Settings not provided"))?;
+
+        // Convert proto settings to core config
+        let config = hypr_core::config::Config {
+            default_cpus: settings.default_cpus,
+            default_memory_mb: settings.default_memory_mb,
+            auto_start_daemon: settings.auto_start_daemon,
+            start_at_login: settings.start_at_login,
+            log_level: settings.log_level.clone(),
+            max_concurrent_builds: settings.max_concurrent_builds,
+            cache_size_limit_bytes: settings.cache_size_limit_bytes,
+            log_retention_days: settings.log_retention_days,
+            telemetry_enabled: settings.telemetry_enabled,
+            data_dir: settings.data_dir.clone(),
+            runtime_dir: settings.runtime_dir.clone(),
+            socket_path: settings.socket_path.clone(),
+        };
+
+        // Save to file
+        config.save().map_err(|e| Status::internal(format!("Failed to save settings: {}", e)))?;
+
+        Ok(Response::new(UpdateSettingsResponse { settings: Some(settings) }))
     }
 
     // =========================================================================
@@ -2729,6 +2929,8 @@ impl HyprService for HyprServiceImpl {
 
         let req = request.into_inner();
         let state = self.state.clone();
+        let adapter = self.adapter.clone();
+        let network_mgr = self.network_mgr.clone();
 
         // Validate required fields
         if req.repo_url.is_empty() {
@@ -2738,7 +2940,7 @@ impl HyprService for HyprServiceImpl {
         let (tx, rx) = tokio::sync::mpsc::channel(32);
 
         tokio::spawn(async move {
-            let _ = create_dev_environment_impl(req, state, tx).await;
+            let _ = create_dev_environment_impl(req, state, adapter, network_mgr, tx).await;
         });
 
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -2790,7 +2992,48 @@ impl HyprService for HyprServiceImpl {
 
         let req = request.into_inner();
 
-        // TODO: If delete_vm is true, also delete the associated VM
+        // Get environment first
+        let env = self.state.get_dev_environment(&req.id).await.map_err(|e| Status::not_found(e.to_string()))?;
+
+        // If delete_vm is true, also delete the associated VM
+        if req.delete_vm {
+            if let Some(vm_id) = &env.vm_id {
+                // Try to find the VM
+                if let Ok(vm) = self.state.get_vm(vm_id).await {
+                     // Stop/Kill if running
+                     if vm.status == VmStatus::Running {
+                          let handle = hypr_core::VmHandle { id: vm.id.clone(), pid: vm.pid, socket_path: None };
+                          if let Err(e) = self.adapter.kill(&handle).await {
+                              warn!("Failed to kill associated DevEnv VM {}: {}", vm_id, e);
+                          }
+                     }
+
+                     // Cleanup network resources
+                     let _ = self.network_mgr.remove_vm_port_forwards(&vm.id).await;
+                     let _ = self.network_mgr.release_ip(&vm.id).await;
+                     // Cleanup DNS
+                     let service_name = if !vm.name.is_empty() { &vm.name } else { &vm.id };
+                     let _ = self.network_mgr.unregister_service(service_name).await;
+
+                     // Delete via adapter
+                     let handle = hypr_core::VmHandle { id: vm.id.clone(), pid: vm.pid, socket_path: None };
+                     if let Err(e) = self.adapter.delete(&handle).await {
+                         warn!("Failed to delete associated DevEnv VM {}: {}", vm_id, e);
+                     }
+
+                     // Delete VM from DB
+                     if let Err(e) = self.state.delete_vm(&vm.id).await {
+                         warn!("Failed to delete associated DevEnv VM {} from DB: {}", vm_id, e);
+                     }
+                     
+                     // Clean logs
+                     let log_path = hypr_core::paths::vm_log_path(&vm.id);
+                     if log_path.exists() {
+                         let _ = std::fs::remove_file(&log_path);
+                     }
+                }
+            }
+        }
 
         self.state
             .delete_dev_environment(&req.id)
@@ -2830,6 +3073,76 @@ impl HyprService for HyprServiceImpl {
     // ========================
     // Import from Docker (P3)
     // ========================
+
+    async fn list_docker_containers(
+        &self,
+        request: Request<ListDockerContainersRequest>,
+    ) -> std::result::Result<Response<ListDockerContainersResponse>, Status> {
+        info!("gRPC: ListDockerContainers");
+        let _req = request.into_inner();
+
+        let output = tokio::process::Command::new("docker")
+            .args([
+                "ps",
+                "-a",
+                "--no-trunc",
+                "--format",
+                "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}|{{.Mounts}}|{{.Networks}}|{{.CreatedAt}}",
+            ])
+            .output()
+            .await
+            .map_err(|e| Status::internal(format!("Docker command failed: {}", e)))?;
+
+        if !output.status.success() {
+            return Err(Status::internal("Docker command failed"));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut containers = Vec::new();
+
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split('|').collect();
+            if parts.len() >= 8 {
+                let id = parts[0].to_string();
+                let name = parts[1].to_string();
+                let image = parts[2].to_string();
+                let status = parts[3].to_string();
+                let ports_str = parts[4];
+                let vols_str = parts[5];
+                let nets_str = parts[6];
+                
+                // Simple parsing for comma-separated lists
+                let ports: Vec<String> = ports_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let volumes: Vec<String> = vols_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let networks: Vec<String> = nets_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+
+                containers.push(proto::DockerContainer {
+                    id,
+                    name,
+                    image,
+                    status,
+                    ports,
+                    volumes,
+                    networks,
+                    created_at: 0, // Placeholder
+                });
+            }
+        }
+
+        Ok(Response::new(ListDockerContainersResponse { containers }))
+    }
 
     type ImportDockerContainersStream =
         Pin<Box<dyn Stream<Item = std::result::Result<ImportEvent, Status>> + Send>>;
@@ -3093,8 +3406,12 @@ fn proto_to_dev_env_status(status: i32) -> hypr_core::state::DevEnvStatus {
 async fn create_dev_environment_impl(
     req: CreateDevEnvRequest,
     state: Arc<StateManager>,
+    adapter: Arc<dyn VmmAdapter>,
+    network_mgr: Arc<NetworkManager>,
     tx: tokio::sync::mpsc::Sender<std::result::Result<DevEnvEvent, Status>>,
 ) -> std::result::Result<(), HyprError> {
+    use hypr_core::state::DevContainerConfig as CoreDevContainerConfig;
+    use hypr_core::types::VmResources;
     use proto::{dev_env_event, DevEnvError, DevEnvProgress, DevEnvReady};
 
     // Send progress helper
@@ -3115,60 +3432,288 @@ async fn create_dev_environment_impl(
         }
     };
 
-    // Stage 1: Clone repository (simulated for now)
+    // Stage 1: Clone repository
     send_progress("cloning", &format!("Cloning repository: {}", req.repo_url), 10).await;
 
+    // Use environment ID for uniqueness
+    let env_id = uuid::Uuid::new_v4().to_string();
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
 
-    // Create dev environment record
+    // Determine environment name
     let env_name = req.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| {
         // Extract repo name from URL
         req.repo_url.rsplit('/').next().unwrap_or("dev-env").trim_end_matches(".git").to_string()
     });
 
-    let env = hypr_core::state::DevEnvironment {
-        id: uuid::Uuid::new_v4().to_string(),
-        name: env_name,
+    // Setup workspace directory
+    let cache_dir = hypr_core::paths::cache_dir().join("dev-envs").join(&env_id);
+    if let Err(e) = tokio::fs::create_dir_all(&cache_dir).await {
+        return Err(HyprError::IoError { path: cache_dir, source: e });
+    }
+
+    // Clone git repo using system git command
+    let branch = req.branch.clone().filter(|b| !b.is_empty()).unwrap_or_else(|| "main".to_string());
+    
+    let git_output = tokio::process::Command::new("git")
+        .arg("clone")
+        .arg("--depth")
+        .arg("1")
+        .arg("--branch")
+        .arg(&branch)
+        .arg(&req.repo_url)
+        .arg(".")
+        .current_dir(&cache_dir)
+        .output()
+        .await
+        .map_err(|e| HyprError::Internal(format!("Failed to execute git clone: {}", e)))?;
+
+    if !git_output.status.success() {
+        let error_msg = String::from_utf8_lossy(&git_output.stderr).to_string();
+        let _ = tx
+            .send(Ok(DevEnvEvent {
+                event: Some(dev_env_event::Event::Error(DevEnvError {
+                    message: format!("Git clone failed: {}", error_msg),
+                    stage: "cloning".to_string(),
+                })),
+            }))
+            .await;
+        return Err(HyprError::Internal(format!("Git clone failed: {}", error_msg)));
+    }
+
+    // Stage 2: Parse devcontainer.json
+    send_progress("parsing", "Parsing devcontainer.json...", 30).await;
+
+    // Look for devcontainer.json in standard locations
+    let possible_paths = [
+        ".devcontainer/devcontainer.json",
+        ".devcontainer.json",
+        ".devcontainer/devcontainer.jsonc", // JSONC not supported by serde_json by default, but let's check
+    ];
+
+    let mut dev_config = CoreDevContainerConfig::default();
+    let mut config_found = false;
+    
+    // Regex to strip JSON comments (for JSONC support)
+    let comment_re = regex::Regex::new(r"(?m)//.*$|/\*[\s\S]*?\*/").unwrap();
+
+    for rel_path in possible_paths {
+        let config_path = cache_dir.join(rel_path);
+        if config_path.exists() {
+            match tokio::fs::read_to_string(&config_path).await {
+                Ok(content) => {
+                    let cleaned_content = comment_re.replace_all(&content, "");
+                    
+                    match serde_json::from_str::<CoreDevContainerConfig>(&cleaned_content) {
+                        Ok(cfg) => {
+                            dev_config = cfg;
+                            config_found = true;
+                            info!(path = rel_path, "Parsed devcontainer.json");
+                            break;
+                        }
+                        Err(e) => {
+                            warn!(path = rel_path, error = %e, "Failed to parse devcontainer.json");
+                        }
+                    }
+                }
+                Err(e) => warn!(path = rel_path, error = %e, "Failed to read devcontainer.json"),
+            }
+        }
+    }
+
+    if !config_found {
+        info!("No devcontainer.json found, using defaults");
+    }
+
+    // Determine workspace path
+    let workspace_path = dev_config.workspace_folder.clone().unwrap_or_else(|| "/workspace".to_string());
+
+    // Create dev environment record
+    let mut env = hypr_core::state::DevEnvironment {
+        id: env_id.clone(),
+        name: env_name.clone(),
         repo_url: req.repo_url.clone(),
-        branch: req.branch.clone().filter(|b| !b.is_empty()).unwrap_or_else(|| "main".to_string()),
+        branch: branch.clone(),
         vm_id: None,
-        workspace_path: "/workspace".to_string(),
+        workspace_path: workspace_path.clone(),
         ssh_port: None,
-        forwarded_ports: Vec::new(),
+        forwarded_ports: dev_config.forward_ports.clone(),
         status: hypr_core::state::DevEnvStatus::Creating,
         created_at: now,
         started_at: None,
-        config: hypr_core::state::DevContainerConfig::default(),
-        labels: req.labels,
+        config: dev_config.clone(),
+        labels: req.labels.clone(),
     };
 
     // Save to database
     if let Err(e) = state.insert_dev_environment(&env).await {
-        let _ = tx
-            .send(Ok(DevEnvEvent {
-                event: Some(dev_env_event::Event::Error(DevEnvError {
-                    message: e.to_string(),
-                    stage: "creating".to_string(),
-                })),
-            }))
-            .await;
-        return Err(e);
+        return Err(HyprError::DatabaseError(e.to_string()));
     }
 
-    send_progress("parsing", "Parsing devcontainer.json...", 30).await;
-
-    // TODO: Parse actual devcontainer.json from cloned repo
-    // For now, just complete with stub implementation
-
+    // Stage 3: Build or Pull Image
     send_progress("building", "Building environment...", 60).await;
 
-    // TODO: Build image if Dockerfile specified
+    let image_id = if let Some(dockerfile_path) = &dev_config.dockerfile {
+        // Build image from Dockerfile using the centralized builder API
+        let context_dir = if dockerfile_path.starts_with(".devcontainer") {
+            cache_dir.clone()
+        } else {
+            cache_dir.join(dockerfile_path).parent().unwrap_or(&cache_dir).to_path_buf()
+        };
+        
+        let build_opts = hypr_core::builder::BuildOptions {
+            context_path: context_dir,
+            dockerfile: dockerfile_path.clone(),
+            name: format!("dev-env-{}", env_id),
+            tag: "latest".to_string(),
+            build_args: std::collections::HashMap::new(),
+            target: None,
+            no_cache: false,
+            cache_from: vec![],
+        };
+        
+        let builder_res = hypr_core::builder::build_image(build_opts)
+            .await
+            .map_err(|e| HyprError::Internal(format!("Build failed: {}", e)))?;
+        
+        let image = hypr_core::builder::register_image(
+            &builder_res, 
+            &format!("dev-env-{}", env_id), 
+            "latest", 
+            true, 
+            &state
+        ).await.map_err(|e| HyprError::Internal(format!("Failed to register image: {}", e)))?;
+        
+        image.id
+    } else if let Some(image_name) = &dev_config.image {
+        // Use existing image or pull from registry
+        if let Ok(img) = state.get_image_by_name_tag(image_name, "latest").await {
+            img.id
+        } else {
+            let mut puller = hypr_core::registry::ImagePuller::new()
+                .map_err(|e| HyprError::Internal(e.to_string()))?;
+            let img = puller.pull(image_name).await
+                .map_err(|e| HyprError::Internal(format!("Failed to pull image {}: {}", image_name, e)))?;
+            
+            state.insert_image(&img).await
+                .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
+                
+            img.id
+        }
+    } else {
+        // Default to Ubuntu 22.04
+        if let Ok(img) = state.get_image_by_name_tag("ubuntu", "22.04").await {
+            img.id
+        } else {
+            let mut puller = hypr_core::registry::ImagePuller::new()
+                .map_err(|e| HyprError::Internal(e.to_string()))?;
+            let img = puller.pull("ubuntu:22.04").await
+                .map_err(|e| HyprError::Internal(format!("Failed to pull default image: {}", e)))?;
+            state.insert_image(&img).await
+                .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
+            img.id
+        }
+    };
 
+    // Stage 4: Start VM
     send_progress("starting", "Starting VM...", 80).await;
+    
+    let vm_id = format!("dev-{}", env_id);
+    let vm_ip = network_mgr.allocate_ip(&vm_id).await?;
+    
+    // Get the built/pulled image
+    let image = state.get_image(&image_id).await?;
+    
+    // Configure VM with the image rootfs and workspace mount
+    let mut vm_config = VmConfig {
+        network_enabled: true,
+        id: vm_id.clone(),
+        name: env_name.clone(),
+        resources: VmResources { 
+            cpus: 4, 
+            memory_mb: 4096, 
+            balloon_enabled: true 
+        },
+        kernel_path: None,
+        kernel_args: vec![],
+        initramfs_path: None,
+        disks: vec![
+            hypr_core::types::vm::DiskConfig {
+                path: image.rootfs_path.clone(),
+                readonly: true,
+                format: hypr_core::types::vm::DiskFormat::Squashfs,
+            }
+        ],
+        network: hypr_core::types::network::NetworkConfig {
+            network: "default".to_string(),
+            mac_address: None,
+            ip_address: Some(vm_ip),
+            dns_servers: vec![std::net::Ipv4Addr::new(192, 168, 127, 1)],
+        },
+        ports: vec![],
+        env: dev_config.remote_env.clone(),
+        volumes: vec![
+            hypr_core::types::volume::VolumeMount {
+                source: cache_dir.to_string_lossy().to_string(),
+                target: env.workspace_path.clone(),
+                readonly: false,
+            }
+        ],
+        gpu: None,
+        virtio_fs_mounts: vec![],
+    };
+    
+    // Configure port forwarding
+    for port in &dev_config.forward_ports {
+        vm_config.ports.push(hypr_core::types::network::PortMapping {
+            host_port: *port as u16,
+            vm_port: *port as u16,
+            protocol: hypr_core::types::network::Protocol::Tcp,
+        });
+    }
 
-    // TODO: Create and start VM
+    // Prepare runtime manifest for guest init
+    let net_defaults = hypr_core::network_defaults();
+    let manifest = hypr_core::manifest::runtime_manifest::RuntimeManifest::new(
+        vec!["/bin/sh".to_string(), "-c".to_string(), "while true; do sleep 3600; done".to_string()]
+    )
+    .with_env(dev_config.remote_env.iter().map(|(k, v)| format!("{}={}", k, v)).collect())
+    .with_workdir(env.workspace_path.clone())
+    .with_network(hypr_core::manifest::runtime_manifest::NetworkConfig {
+        ip: vm_ip.to_string(),
+        netmask: net_defaults.netmask_str.to_string(),
+        gateway: net_defaults.gateway.to_string(),
+        dns: net_defaults.dns_servers.iter().map(|s| (*s).to_string()).collect(),
+    });
 
-    // Mark as running (for now, we'll leave it in Creating state since VM isn't actually created)
+    let encoded_manifest = manifest.encode().map_err(|e| HyprError::Internal(e.to_string()))?;
+    vm_config.kernel_args.push(format!("manifest={}", encoded_manifest));
+
+    // Create and start VM (adapter handles overlay filesystem setup)
+    let handle = adapter.create(&vm_config).await?;
+    adapter.start(&handle).await?;
+
+    // Setup port forwarding via gvproxy
+    for port in &dev_config.forward_ports {
+        if let Err(e) = network_mgr.add_port_forward(
+            *port as u16, 
+            vm_ip, 
+            *port as u16, 
+            hypr_core::types::network::Protocol::Tcp, 
+            vm_id.clone()
+        ).await {
+            warn!(port = port, error = %e, "Failed to setup port forwarding");
+        }
+    }
+
+    // Update env status
+    env.status = hypr_core::state::DevEnvStatus::Running;
+    env.vm_id = Some(vm_id.clone());
+    env.started_at = Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64);
+    
+    state.update_dev_environment(&env).await
+        .map_err(|e| HyprError::DatabaseError(e.to_string()))?;
+
+    // Mark as running
     send_progress("ready", "Dev environment ready", 100).await;
 
     // Send ready event
@@ -3184,17 +3729,18 @@ async fn create_dev_environment_impl(
 }
 
 /// Implementation for update_stack streaming RPC (rolling updates).
+/// 
+/// Note: Stack updates are not yet implemented. This function returns an error.
+/// Future implementation will support rolling, recreate, and blue-green update strategies.
 async fn update_stack_impl(
     req: UpdateStackRequest,
     state: Arc<StateManager>,
     _orchestrator: Arc<crate::orchestrator::StackOrchestrator>,
     tx: tokio::sync::mpsc::Sender<std::result::Result<UpdateStackEvent, Status>>,
 ) -> std::result::Result<(), HyprError> {
-    use proto::{update_stack_event, UpdateComplete, UpdateError, UpdateProgress};
+    use proto::{update_stack_event, UpdateError};
 
-    let start_time = SystemTime::now();
-
-    // Get existing stack
+    // Verify stack exists
     let stack = match state.get_stack(&req.stack_name).await {
         Ok(s) => s,
         Err(e) => {
@@ -3218,38 +3764,31 @@ async fn update_stack_impl(
         _ => "rolling",
     };
 
-    // Send initial progress
+    // Stack updates are not yet implemented
+    // The proper implementation would:
+    // 1. Parse the new compose file
+    // 2. Compare with existing services
+    // 3. Build/pull new images as needed
+    // 4. Apply update strategy (rolling: one at a time, recreate: stop all then start, blue-green: parallel deployment)
+    // 5. Handle rollback on failure
+    
+    let error_msg = format!(
+        "Stack update (strategy: {}) is not yet implemented. \
+         To update stack '{}' with {} services, please use 'hypr compose down' followed by 'hypr compose up'.",
+        strategy, stack.name, stack.services.len()
+    );
+    
     let _ = tx
         .send(Ok(UpdateStackEvent {
-            event: Some(update_stack_event::Event::Progress(UpdateProgress {
+            event: Some(update_stack_event::Event::Error(UpdateError {
                 service: String::new(),
-                stage: "analyzing".to_string(),
-                message: format!("Analyzing stack changes (strategy: {})", strategy),
-                current: 0,
-                total: stack.services.len() as u32,
+                message: error_msg.clone(),
+                rolled_back: false,
             })),
         }))
         .await;
 
-    // TODO: Parse new compose file and compare with existing
-    // TODO: Implement actual rolling/recreate/blue-green update logic
-
-    // For now, send a placeholder completion
-    let duration =
-        SystemTime::now().duration_since(start_time).unwrap_or_default().as_secs() as u32;
-
-    // Send complete event
-    let _ = tx
-        .send(Ok(UpdateStackEvent {
-            event: Some(update_stack_event::Event::Complete(UpdateComplete {
-                stack: Some(stack.into()),
-                services_updated: 0,
-                duration_sec: duration,
-            })),
-        }))
-        .await;
-
-    Ok(())
+    Err(HyprError::Internal(error_msg))
 }
 
 /// Calculate directory size recursively

@@ -210,14 +210,21 @@ pub async fn ps(stack_name: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Show logs for a service in a stack (stub for Phase 3)
+/// Show logs for a service in a stack.
+/// 
+/// Note: Direct service log streaming via compose is not yet implemented.
+/// Use `hypr logs <vm-id>` to view logs for individual service VMs.
 pub async fn logs(service_name: &str) -> Result<()> {
-    println!("{} Logs functionality will be available in Phase 3", "ℹ".blue().bold());
+    println!(
+        "{} Service log streaming via 'hypr compose logs' is not yet available.",
+        "ℹ".blue().bold()
+    );
+    println!();
     println!("Service: {}", service_name.bold());
     println!();
-    println!("{}", "For now, you can:".dimmed());
-    println!("  {} Use 'hypr ps' to see VM IDs", "•".dimmed());
-    println!("  {} SSH into VMs to check application logs", "•".dimmed());
+    println!("{}", "To view logs for this service:".dimmed());
+    println!("  1. Find the service's VM ID: {}", "hypr compose ps <stack-name>".cyan());
+    println!("  2. Stream logs: {}", "hypr logs <vm-id>".cyan());
 
     Ok(())
 }

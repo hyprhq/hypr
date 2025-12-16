@@ -351,27 +351,28 @@ impl SnapshotManager {
     }
 
     /// Create a full snapshot including memory state.
+    /// 
+    /// Note: Memory snapshots require hypervisor-specific support that is not yet available.
+    /// Currently falls back to disk-only snapshot with a warning.
     async fn create_full_snapshot(
         &self,
         vm: &crate::types::Vm,
         snapshot: &Snapshot,
     ) -> Result<u64> {
-        // First, do the disk snapshot
+        // Capture disk state first
         let disk_size = self.create_disk_snapshot(vm, snapshot).await?;
 
-        // For full snapshots, we would need to:
-        // 1. Pause the VM
-        // 2. Dump memory state
-        // 3. Resume the VM
-        //
-        // This requires hypervisor-specific implementation.
-        // For libkrun: Not currently supported
-        // For cloud-hypervisor: Use the snapshot API
+        // Memory snapshots require hypervisor support:
+        // - libkrun: No snapshot API available
+        // - cloud-hypervisor: Has snapshot API but requires VM pause/resume coordination
+        // 
+        // When hypervisor support is available, the implementation would:
+        // 1. Pause the VM via adapter
+        // 2. Request memory dump from hypervisor
+        // 3. Save memory state to snapshot directory  
+        // 4. Resume the VM
 
-        // For now, we just do a disk snapshot and mark it as full
-        // TODO: Implement memory snapshot when hypervisor support is available
-
-        warn!("Full snapshots (with memory) not yet implemented; created disk-only snapshot");
+        warn!("Full snapshot requested but memory snapshots are not yet supported; disk-only snapshot created");
 
         Ok(disk_size)
     }

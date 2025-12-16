@@ -8,13 +8,17 @@ use std::time::SystemTime;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkDriver {
+    /// gvproxy userspace networking (unified for macOS and Linux)
     #[default]
+    Gvproxy,
+    /// Legacy bridge networking (kept for backward compatibility)
     Bridge,
 }
 
 impl std::fmt::Display for NetworkDriver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            NetworkDriver::Gvproxy => write!(f, "gvproxy"),
             NetworkDriver::Bridge => write!(f, "bridge"),
         }
     }
@@ -25,6 +29,7 @@ impl std::str::FromStr for NetworkDriver {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
+            "gvproxy" => Ok(NetworkDriver::Gvproxy),
             "bridge" => Ok(NetworkDriver::Bridge),
             _ => Err(format!("Unknown network driver: {}", s)),
         }

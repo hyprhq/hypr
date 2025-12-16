@@ -379,9 +379,31 @@ impl VmBuilder {
             HyprError::BuildFailed { reason: format!("Failed to read layer metadata: {}", e) }
         })?;
 
+        // Compute SHA256 hash
+        let mut file = tokio::fs::File::open(layer_path).await.map_err(|e| {
+            HyprError::BuildFailed { reason: format!("Failed to open layer for hashing: {}", e) }
+        })?;
+
+        let mut hasher = sha2::Sha256::new();
+        let mut buffer = [0; 8192];
+
+        use tokio::io::AsyncReadExt;
+        use sha2::Digest;
+
+        loop {
+            let n = file.read(&mut buffer).await.map_err(|e| {
+                HyprError::BuildFailed { reason: format!("Failed to read layer for hashing: {}", e) }
+            })?;
+            if n == 0 { break; }
+            hasher.update(&buffer[..n]);
+        }
+
+        let hash = hasher.finalize();
+        let hash_hex = format!("sha256:{:x}", hash);
+
         Ok(BuildLayerInfo {
             size_bytes: metadata.len(),
-            layer_hash: "sha256:placeholder".to_string(), // TODO: compute actual hash
+            layer_hash: hash_hex,
         })
     }
 

@@ -77,6 +77,9 @@ pub struct BuildResult {
 
     /// Layer history for image history command
     pub history: Vec<LayerHistory>,
+
+    /// Healthcheck configuration extracted from Dockerfile
+    pub healthcheck: Option<crate::types::image::HealthCheckConfig>,
 }
 
 /// Build an image from a Dockerfile.
@@ -232,12 +235,34 @@ pub async fn build_image(options: BuildOptions) -> Result<BuildResult> {
         })
         .collect();
 
+    // Extract HEALTHCHECK from parsed Dockerfile
+    let mut healthcheck = None;
+    // Iterate over stages in reverse to find the last HEALTHCHECK
+    for stage in parsed_dockerfile.stages.iter().rev() {
+        for instr in stage.instructions.iter().rev() {
+            if let crate::builder::parser::Instruction::Healthcheck { config } = instr {
+                 use crate::types::image::{HealthCheckConfig, HealthCheckType};
+                 healthcheck = Some(HealthCheckConfig {
+                     check_type: HealthCheckType::Exec,
+                     endpoint: None,
+                     port: 0,
+                     interval_sec: config.interval.as_deref().map(parse_duration).unwrap_or(30),
+                     timeout_sec: config.timeout.as_deref().map(parse_duration).unwrap_or(30),
+                     retries: config.retries.unwrap_or(3),
+                 });
+                 break;
+            }
+        }
+        if healthcheck.is_some() { break; }
+    }
+
     Ok(BuildResult {
         cached_layers: output.stats.cached_layers,
         total_layers: output.stats.layer_count,
         duration_secs: duration.as_secs_f64(),
         output,
         history,
+        healthcheck,
     })
 }
 
@@ -303,7 +328,7 @@ pub async fn register_image(
             rootfs_type: "squashfs".to_string(),
             restart_policy: RestartPolicy::Always,
         },
-        health: None, // TODO: Extract health check from Dockerfile
+        health: build_result.healthcheck.clone(),
         history: build_result.history.clone(),
     };
 
@@ -332,6 +357,23 @@ pub async fn register_image(
 
     Ok(image)
 }
+
+
+fn parse_duration(s: &str) -> u32 {
+    let s = s.trim();
+    if let Some(stripped) = s.strip_suffix('s') {
+        return stripped.parse().unwrap_or(0);
+    }
+    if let Some(stripped) = s.strip_suffix('m') {
+        return stripped.parse::<u32>().unwrap_or(0) * 60;
+    }
+    if let Some(stripped) = s.strip_suffix('h') {
+        return stripped.parse::<u32>().unwrap_or(0) * 3600;
+    }
+    // Default fallback
+    s.parse().unwrap_or(0)
+}
+
 
 /// Import layers from a cache_from image into the cache manager.
 ///

@@ -60,6 +60,11 @@ pub fn vm_log_path(vm_id: &str) -> PathBuf {
     logs_dir().join(format!("{}.log", vm_id))
 }
 
+/// Get the configuration directory.
+pub fn config_dir() -> PathBuf {
+    data_dir()
+}
+
 /// Get the kernel path.
 pub fn kernel_path() -> PathBuf {
     data_dir().join("vmlinux")

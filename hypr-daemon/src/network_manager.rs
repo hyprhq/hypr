@@ -35,6 +35,9 @@ pub struct NetworkManager {
 
     /// DNS server bind address
     dns_bind_addr: Option<IpAddr>,
+
+    /// State manager for VM lookups
+    state: Arc<StateManager>,
 }
 
 impl NetworkManager {
@@ -70,7 +73,7 @@ impl NetworkManager {
             "Network manager initialized (gvproxy unified networking)"
         );
 
-        Ok(Self { ip_allocator, service_registry, gvproxy, dns_bind_addr })
+        Ok(Self { ip_allocator, service_registry, gvproxy, dns_bind_addr, state })
     }
 
     /// Allocates an IP for a VM.
@@ -142,11 +145,39 @@ impl NetworkManager {
     /// Remove all port forwarding rules for a VM.
     #[instrument(skip(self))]
     pub async fn remove_vm_port_forwards(&self, vm_id: &str) -> Result<()> {
-        // gvproxy doesn't currently support removing specific rules by VM ID easily via API,
-        // but since we use a shared instance, we might want to track these later to remove them.
-        // For now, they persist until gvproxy restart or we add explicit unexpose support.
-        // TODO: Implement unexpose in SharedGvproxy if needed.
-        info!(vm_id = %vm_id, "Port forward cleanup requested (deferred)");
+        info!(vm_id = %vm_id, "Removing port forwarding rules");
+
+        // Get VM config to find ports
+        // Note: This relies on VM still being in the database or at least accessible.
+        match self.state.get_vm(vm_id).await {
+            Ok(vm) => {
+                let gv = self.gvproxy.lock().await;
+
+                for port in vm.config.ports {
+                    if let Err(e) = gv.remove_port_forward(port.host_port).await {
+                        // Log but continue (best effort)
+                        error!(
+                            vm_id = %vm_id,
+                            host_port = port.host_port,
+                            error = %e,
+                            "Failed to remove port forward"
+                        );
+                    } else {
+                        info!(
+                            vm_id = %vm_id,
+                            host_port = port.host_port,
+                            "Removed port forward"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                // If VM is already deleted (e.g. force delete), we can't look up ports to unexpose.
+                // In gvproxy, ports persist until process restart or explicit unexpose.
+                // Without knowing the ports, we can't unexpose them here.
+                tracing::warn!(vm_id = %vm_id, error = %e, "Could not fetch VM to clean up ports (may already be deleted)");
+            }
+        }
         Ok(())
     }
 
